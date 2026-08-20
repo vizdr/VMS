@@ -1,0 +1,13 @@
+# Secrets — never commit device identity material
+certs/
+*.pem
+*.key
+
+# Reproducible / built locally
+venv-adapter/
+vendor/amazon-kinesis-video-streams-producer-sdk-cpp/
+mediamtx/mediamtx
+mediamtx/mediamtx.tar.gz
+
+# Measurement raw data (keep processed CSVs if you want them tracked; adjust as needed)
+measurements/*.raw

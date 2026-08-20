@@ -1,0 +1,191 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cam-01</title>
+<style>
+  body { font-family: sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+  #login, #app { display: none; }
+  input { display: block; margin: 0.5rem 0; padding: 0.5rem; width: 100%; box-sizing: border-box; }
+  button { padding: 0.5rem 1rem; margin-right: 0.5rem; }
+  #status { color: #666; font-size: 0.9rem; }
+  .video-wrap { position: relative; background: #000; aspect-ratio: 16 / 9; }
+  video { display: block; width: 100%; height: 100%; }
+  #overlay {
+    position: absolute; inset: 0; background: #000; color: #ddd;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 1.5rem; box-sizing: border-box; font-size: 1rem;
+  }
+  #overlay.hidden { display: none; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h3>Sign in</h3>
+  <input id="username" placeholder="username" autocomplete="username">
+  <input id="password" type="password" placeholder="password" autocomplete="current-password">
+  <button onclick="login()">Sign in</button>
+  <div id="loginError" style="color:red"></div>
+</div>
+
+<div id="app">
+  <div class="video-wrap">
+    <video id="v" controls autoplay muted playsinline></video>
+    <div id="overlay">Press Start to begin watching</div>
+  </div>
+  <p>
+    <button onclick="cmd('start')">Start</button>
+    <button onclick="cmd('stop')">Stop</button>
+    <button onclick="load()">Reload player</button>
+  </p>
+  <div id="status"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script>
+const API = "https://svfvg7xh9g.execute-api.eu-central-1.amazonaws.com/prod";
+const COGNITO_REGION = "eu-central-1";
+const COGNITO_CLIENT_ID = "1r0n2cor1pgqvahfogs6cfno7s";
+
+let idToken = null;
+let hls = null;          // tracked so a second load() doesn't stack a new Hls instance
+                          // onto the same <video> element (that caused mediaSourceRequiresReset)
+let userStopped = true;  // true whenever we're not expecting the stream to be live --
+                          // gates whether a player error should retry or just show "stopped"
+
+function setStatus(msg) { document.getElementById("status").textContent = msg; }
+
+function showOverlay(msg) {
+  const el = document.getElementById("overlay");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+}
+function hideOverlay() {
+  document.getElementById("overlay").classList.add("hidden");
+}
+
+function teardownPlayer() {
+  if (hls) { hls.destroy(); hls = null; }
+  const v = document.getElementById("v");
+  v.removeAttribute("src");
+  v.load();   // actually clears the frame instead of leaving the last one frozen on screen
+}
+
+// Cognito's InitiateAuth is a plain JSON HTTPS API -- no SDK needed, keeps this a
+// single self-contained file. See: https://docs.aws.amazon.com/cognito/latest/developerguide/API_InitiateAuth.html
+async function login() {
+  const username = document.getElementById("username").value;
+  const password = document.getElementById("password").value;
+  const errorEl = document.getElementById("loginError");
+  errorEl.textContent = "";
+  try {
+    const r = await fetch(`https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
+      },
+      body: JSON.stringify({
+        AuthFlow: "USER_PASSWORD_AUTH",
+        ClientId: COGNITO_CLIENT_ID,
+        AuthParameters: { USERNAME: username, PASSWORD: password },
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.AuthenticationResult) {
+      errorEl.textContent = data.message || "Sign-in failed";
+      return;
+    }
+    idToken = data.AuthenticationResult.IdToken;
+    document.getElementById("login").style.display = "none";
+    document.getElementById("app").style.display = "block";
+  } catch (e) {
+    errorEl.textContent = "Network error: " + e.message;
+  }
+}
+
+async function load() {
+  setStatus("loading stream...");
+  showOverlay("Loading stream…");
+  try {
+    const r = await fetch(`${API}/hls`, { headers: { Authorization: idToken } });
+    const data = await r.json();
+    if (!r.ok) {
+      setStatus("error: " + (data.error || r.status));
+      showOverlay((data.error || "Could not load stream") + "\n\nPress Start to begin.");
+      return;
+    }
+    const { url } = data;
+    const v = document.getElementById("v");
+
+    if (hls) { hls.destroy(); hls = null; }   // release the previous MediaSource first
+    userStopped = false;
+
+    if (Hls.isSupported()) {
+      hls = new Hls();
+      hls.loadSource(url);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.FRAG_BUFFERED, hideOverlay);   // first real video data arrived
+      hls.on(Hls.Events.ERROR, (evt, data) => {
+        if (!data.fatal) return;   // hls.js logs plenty of non-fatal errors; ignore those
+        if (userStopped) return;   // we tore this player down on purpose; ignore its errors
+        setStatus("player error: " + data.details);
+        // hls.js's own recommended recovery pattern -- most fatal errors on a live
+        // stream (including bufferStalledError) are transient network/buffer hiccups
+        // and self-recover without a full reload. This only applies while we still
+        // expect the stream to be live -- retrying forever against a stream that was
+        // deliberately stopped just produces an endless spinner (see cmd('stop') below,
+        // which tears the player down instead of leaving this loop to run).
+        switch (data.type) {
+          case Hls.ErrorTypes.NETWORK_ERROR:
+            hls.startLoad();
+            break;
+          case Hls.ErrorTypes.MEDIA_ERROR:
+            hls.recoverMediaError();
+            break;
+          default:
+            showOverlay("Playback error (" + data.details + ")\n\nPress Reload player to retry.");
+        }
+      });
+    } else {
+      v.src = url;                                  // Safari plays HLS natively
+      hideOverlay();
+    }
+    setStatus("stream loaded");
+  } catch (e) {
+    setStatus("error: " + e.message);
+    showOverlay("Error loading stream.\n\nPress Reload player to retry.");
+  }
+}
+
+async function cmd(action) {
+  setStatus(`sending ${action}...`);
+  if (action === "stop") {
+    userStopped = true;
+    teardownPlayer();
+    showOverlay("Stream stopped.\n\nPress Start to watch again.");
+  } else {
+    showOverlay("Starting stream…\nThis can take a few seconds.");
+  }
+  try {
+    const r = await fetch(`${API}/cmd`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const data = await r.json();
+    setStatus(r.ok ? `${action} sent` : "error: " + (data.error || r.status));
+    if (!r.ok) { showOverlay("Could not send " + action + ": " + (data.error || r.status)); return; }
+    if (action === "start") setTimeout(load, 8000);  // give KVS a moment to receive fragments
+  } catch (e) {
+    setStatus("error: " + e.message);
+    showOverlay("Network error sending " + action + ".\n\nPress Start to try again.");
+  }
+}
+
+document.getElementById("login").style.display = "block";
+</script>
+</body>
+</html>

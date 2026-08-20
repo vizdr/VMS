@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "kinesisvideo:DescribeStream",
+      "kinesisvideo:GetDataEndpoint",
+      "kinesisvideo:PutMedia",
+      "kinesisvideo:TagStream"
+    ],
+    "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/*"
+  }]
+}

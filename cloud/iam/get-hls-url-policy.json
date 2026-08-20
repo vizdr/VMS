@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "kinesisvideo:GetDataEndpoint",
+      "kinesisvideo:GetHLSStreamingSessionURL",
+      "kinesisvideo:DescribeStream"
+    ],
+    "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/1787244081283"
+  }]
+}

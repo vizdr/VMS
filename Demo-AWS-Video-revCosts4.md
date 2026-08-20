@@ -93,11 +93,104 @@ to be able to make in an interview.
 export AWS_REGION=eu-central-1
 export KVS_STREAM=cam-01
 export THING_NAME=adapter-01
+export VMS_HOME=$HOME/MyProjects/VMS
 ```
 
 You already have the AWS CLI, an IoT Core endpoint and a working certificate/policy
 model from the earlier telemetry pipeline. Reuse the account; create *new* Thing and
 certificate for the adapter so the policies stay cleanly scoped.
+
+**Repository root, not scattered `$HOME` clutter.** Every build artifact below — MediaMTX,
+the KVS Producer SDK checkout, certificates, the Python venv, scripts — lives under
+`$VMS_HOME` (`~/MyProjects/VMS`), not directly in `$HOME`. This keeps the whole prototype
+in one git-tracked directory that matches §12's repository layout, makes teardown and
+portfolio packaging exact, and means `certs/` and the venv can be gitignored in one place.
+Where a command below still shows `~/something`, read it as `$VMS_HOME/something` unless
+noted otherwise — the few exceptions (systemd `Environment=` lines) are called out
+explicitly, since systemd doesn't expand `$VMS_HOME`.
+
+### 1.4 System stability hardening (do this before §4's SDK build)
+
+**Do this before attempting §4.** A Pi 4B running VS Code Remote-SSH's server stack
+(1.3+ GB of Node processes: extension host, Pylance, Copilot) plus a from-source C++ build
+is genuinely oversubscribed on 4 GB of RAM. Without the hardening below, the KVS SDK build
+in §4.2 reliably crashed the whole Pi — not just failed the build — via three distinct
+mechanisms discovered the hard way on 2026-08-20. Apply all four; each one closes a
+different failure mode, not variations on the same one.
+
+**1. `earlyoom` — intervene before the kernel's blunt last-resort killer does.**
+
+```bash
+sudo apt install -y earlyoom
+sudo tee /etc/default/earlyoom > /dev/null <<'EOF'
+EARLYOOM_ARGS="-r 60 -m 20 -s 95 --avoid '(^|/)(sshd|systemd|systemd-.*|init)$' --prefer '(^|/)(cc1plus|cc1|g\+\+|gcc|cpp|as|ld|make|cmake)$'"
+EOF
+sudo systemctl enable --now earlyoom
+sudo systemctl restart earlyoom
+```
+
+`-m 20 -s 95` acts on low RAM alone (20% available), essentially ignoring swap level —
+**this specific threshold matters**. An earlier, looser `-s 50` (act only once swap is
+*also* below 50% free) was tried to rescue a few large individual compiles, and instead
+let available memory crater from 64% to 12% in a single 60-second window before the
+looser condition could catch it — a full crash. `-m20 -s95` reliably intervenes early
+enough that it hasn't missed one since. `--avoid` protects `sshd`/`systemd` so remote
+access survives even when something else is sacrificed; `--prefer` targets compiler
+processes first, since a killed `cc1plus` just needs `make` re-run, unlike a killed VS
+Code server process.
+
+**2. Real swap headroom, tuned so it doesn't itself become the crash.**
+
+```bash
+sudo fallocate -l 3G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile
+sudo swapon -p 10 /swapfile
+echo "/swapfile none swap sw,pri=10 0 0" | sudo tee -a /etc/fstab
+
+echo "vm.swappiness=10" | sudo tee /etc/sysctl.d/99-low-swappiness.conf
+sudo sysctl -p /etc/sysctl.d/99-low-swappiness.conf
+```
+
+The default `zram` swap (RAM-compressed, ~2 GB) gives no headroom once RAM itself is
+exhausted. A disk-backed swapfile does — but **heavy sustained swapping to an SD card is
+itself a crash mechanism**: it happened once, mid-build, with no OOM-killer log and no
+panic — just a silent cutoff, correlated with `brcmfmac` (WiFi driver) SDIO timeout
+messages right before it. Low `vm.swappiness` keeps the kernel preferring fast page-cache
+reclaim over slow disk I/O; the swapfile's low priority (`10`, vs. `zram`'s `100`) means
+it's only ever a last resort. Verify with `swapon --show` — during a healthy build, the
+disk swapfile should show `0B` used; if it starts climbing, expect trouble.
+
+**3. Update the bootloader/EEPROM firmware — check even if the OS is current.**
+
+```bash
+sudo rpi-eeprom-update          # check
+sudo rpi-eeprom-update -a       # stage the update
+sudo reboot                     # required to apply
+```
+
+Found over a year out of date on this build (2025-05-08 installed vs. 2026-05-17
+available) despite the OS itself being current — firmware updates track separately.
+Raspberry Pi firmware releases regularly include power/USB/SDIO stability fixes.
+
+**4. Keep heavy build load off the CPUs that service network interrupts.**
+
+This kernel is tuned for real-time work — check your own `/proc/cmdline` for
+`isolcpus=`/`irqaffinity=`; this Pi carries `isolcpus=1,2 irqaffinity=0,3`, meaning all
+hardware interrupts (including the WiFi chip's) are confined to cores 0 and 3, while 1
+and 2 sit isolated from the default scheduler. An unpinned build competes directly with
+WiFi interrupt servicing on the same cores. Put the build on the isolated cores instead —
+they're otherwise idle for our purposes, and `cpuset` isn't delegated to user cgroups on
+this system, so `systemd-run --property=AllowedCPUs=` silently does nothing; use
+`taskset`, which works via direct syscall affinity instead:
+
+```bash
+taskset -c 1,2 <your build command>   # inherited by all child processes via fork()
+```
+
+(This is folded into the `systemd-run` invocation in §4.2.)
+
+**With all four in place:** the SDK build in §4.2 completed with zero crashes and zero
+`earlyoom` interventions on its final, successful run — a build that had crashed the Pi
+outright on five separate attempts beforehand.
 
 ---
 
@@ -128,6 +221,23 @@ The PW310 is a UVC device and almost certainly exposes MJPG + YUYV. At 720p30, Y
 ~27 MB/s, which will not fit a USB 2.0 bus — so **MJPG is the working format**, and a
 decode/encode step is unavoidable.
 
+**Verified on the actual unit (2026-08-20):**
+
+```text
+[0]: 'MJPG' (Motion-JPEG, compressed)
+        Size: Discrete 1280x720
+                Interval: Discrete 0.033s (30.000 fps)   # only interval offered at 720p
+[1]: 'YUYV' (YUYV 4:2:2)
+        Size: Discrete 1280x720
+                Interval: Discrete 0.125s (8.000 fps)    # confirms the USB2 bandwidth argument
+```
+
+No `H264` format at all, so the passthrough shortcut in §2.5 is not available on this unit.
+More importantly: **MJPG at 1280x720 offers only 30 fps — no native 15 fps step at this
+resolution** (lower resolutions do offer 15/10/5 fps). This means the 15 fps-at-source
+branch of §2.5 does not apply here; the 30fps-capture-then-decimate branch is mandatory,
+not a fallback. §2.5 below reflects that as the primary path.
+
 ### 2.2 Pin the device node
 
 `/dev/video0` shifts when other devices enumerate — and on a Pi it will shift, because
@@ -135,11 +245,18 @@ decode/encode step is unavoidable.
 
 ```bash
 ls -l /dev/v4l/by-id/
-# usb-AVerMedia_TECHNOLOGIES__Inc._Live_Streamer_CAM_310_...-video-index0
-export CAM=/dev/v4l/by-id/usb-AVerMedia_TECHNOLOGIES__Inc._Live_Streamer_CAM_310_XXXX-video-index0
+export CAM=/dev/v4l/by-id/usb-Generic_AVerMedia_PW310_Webcam_200901010001-video-index0
 ```
 
 Put that in the systemd unit later, not `/dev/video0`.
+
+**Verified on the actual unit:** the descriptor string is
+`usb-Generic_AVerMedia_PW310_Webcam_200901010001-` (not the
+`AVerMedia_TECHNOLOGIES__Inc._Live_Streamer_CAM_310_...` string an earlier draft of this
+guide assumed — USB descriptor strings vary by firmware/vendor batch, so always confirm
+with `ls -l /dev/v4l/by-id/` rather than copying a literal example). Two entries appear,
+`-video-index0` and `-video-index1`; **use `index0`**, the capture node — `index1` is the
+UVC metadata/still-image node, not a second video stream.
 
 ### 2.3 Lock exposure — this matters more than it sounds
 
@@ -150,21 +267,53 @@ noise.
 
 ```bash
 v4l2-ctl -d "$CAM" --list-ctrls
+```
 
-# manual exposure, fixed gain, fixed white balance, no autofocus hunting
+**Control names are camera-specific — don't copy a generic list blindly.** The PW310 on
+this build exposes standard UVC controls, but with two differences worth checking for on
+any camera before writing the lock command:
+
+- **No `gain` control exists on this unit.** `exposure_time_absolute` is the only manual
+  light-level lever available; don't reference a `gain` control that isn't there.
+- **`exposure_dynamic_framerate`** is a real, separate control here (default: enabled) —
+  this *is* the mechanism described above that silently drops fps in dim light. It must be
+  disabled explicitly, in addition to switching `auto_exposure` to manual.
+
+`exposure_time_absolute`, `white_balance_temperature`, and `focus_absolute` all start
+`flags=inactive` until their parent auto-control is switched off — set the automatics
+first, confirm the flags clear, then set the manual values in a second call:
+
+```bash
+# 1. disable the automatics (order matters — these gate the manual controls below)
 v4l2-ctl -d "$CAM" \
   --set-ctrl=auto_exposure=1 \
-  --set-ctrl=exposure_time_absolute=250 \
+  --set-ctrl=exposure_dynamic_framerate=0 \
   --set-ctrl=white_balance_automatic=0 \
-  --set-ctrl=gain=32
+  --set-ctrl=focus_automatic_continuous=0
+
+# 2. confirm exposure_time_absolute / white_balance_temperature / focus_absolute
+#    no longer show flags=inactive
+v4l2-ctl -d "$CAM" --list-ctrls
+
+# 3. now set the manual values (250 = 25ms, a reasonable indoor starting point;
+#    this camera's range is 50-10000)
+v4l2-ctl -d "$CAM" \
+  --set-ctrl=exposure_time_absolute=250 \
+  --set-ctrl=white_balance_temperature=4600 \
+  --set-ctrl=focus_absolute=120
 
 # confirm the camera is actually delivering 30 fps
 v4l2-ctl -d "$CAM" --set-fmt-video=width=1280,height=720,pixelformat=MJPG \
                    --set-parm=30 --stream-mmap --stream-count=300 --stream-to=/dev/null
 ```
 
-That last command prints a running fps figure. If it reads 15 when you asked for 30, the
-exposure is still too long — lower `exposure_time_absolute` and add light.
+That last command prints a running fps figure — expect it to start low (0 dropped/warming
+up) and converge toward 30 within the first ~10 frames; verified on this unit at
+23.71 → 30.53 fps, settling at 30. If it settles below 30, the exposure is still too long —
+lower `exposure_time_absolute` and add light.
+
+This sequence is codified in `adapter/bin/camera-init.sh` — run once at boot, before the
+publish pipeline starts, since these settings don't persist across power cycles.
 
 ### 2.4 Hardware H.264 encoding on the Pi 4B
 
@@ -182,6 +331,15 @@ v4l2-ctl -d /dev/video11 --list-ctrls-menus     # see the exact control names/en
 > encoder entirely. `v4l2h264enc` on a Pi 4B is the correct path — one more reason this
 > demo belongs on the 4B.
 
+**Verified working** on this build (kernel 6.18, Debian trixie): `v4l2h264enc` registers
+at primary rank, and `/dev/video11` exposes exactly the controls the §2.5 pipeline needs —
+`video_bitrate`, `h264_i_frame_period`, `repeat_sequence_header` — plus `h264_level`
+already defaulting to `4`, matching the caps workaround below. One extra control worth
+knowing about: **`video_gop_size`** (default `60`, separate from `h264_i_frame_period`).
+The §2.5 pipeline doesn't set it, relying on `h264_i_frame_period` alone — if the §10.1
+IDR-period sweep doesn't behave as expected, check whether `video_gop_size` needs setting
+too.
+
 ### 2.5 Capture → encode → publish to MediaMTX
 
 Keeping MediaMTX in the design is deliberate. It preserves the **RTSP boundary** that a
@@ -189,37 +347,54 @@ real Hikvision would present, so Phases 3–9 remain untouched and the topology 
 matches `OUTBOUND-CLOUD.md` §19. The camera-facing side is the only thing that changed.
 
 ```bash
-cd ~ && mkdir -p mediamtx && cd mediamtx
+mkdir -p "$VMS_HOME/mediamtx" && cd "$VMS_HOME/mediamtx"
 curl -L -o mediamtx.tar.gz \
-  https://github.com/bluenviron/mediamtx/releases/latest/download/mediamtx_linux_arm64v8.tar.gz
+  https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1_linux_arm64.tar.gz
 tar xzf mediamtx.tar.gz && ./mediamtx &
 ```
 
-`~/bin/publish-cam01.sh`:
+> **Known trap:** the asset naming above is what MediaMTX currently ships (verified
+> 2026-08-20). An earlier draft of this guide referenced
+> `mediamtx_linux_arm64v8.tar.gz` under `releases/latest/download/` — that name no longer
+> exists; GitHub 404s past the redirect and `curl -L` silently writes a 9-byte "Not Found"
+> body instead of failing loudly. If this breaks again, check the real asset names with:
+> `curl -s https://api.github.com/repos/bluenviron/mediamtx/releases/latest | grep browser_download_url`
+
+`adapter/bin/publish-cam01.sh` (paths below are relative to `$VMS_HOME`):
 
 ```bash
 #!/usr/bin/env bash
-CAM=/dev/v4l/by-id/usb-AVerMedia_TECHNOLOGIES__Inc._Live_Streamer_CAM_310_XXXX-video-index0
+CAM=/dev/v4l/by-id/usb-Generic_AVerMedia_PW310_Webcam_200901010001-video-index0
 
 gst-launch-1.0 -v \
   v4l2src device="$CAM" ! \
-  image/jpeg,width=1280,height=720,framerate=15/1 ! \
-  jpegdec ! videoconvert ! video/x-raw,format=I420 ! \
+  image/jpeg,width=1280,height=720,framerate=30/1 ! \
+  jpegdec ! videorate drop-only=true ! video/x-raw,framerate=15/1 ! \
+  videoconvert ! video/x-raw,format=I420 ! \
   v4l2h264enc extra-controls="controls,video_bitrate=1000000,h264_i_frame_period=30,repeat_sequence_header=1" ! \
-  video/x-h264,level=(string)4 ! \
+  "video/x-h264,level=(string)4" ! \
   h264parse config-interval=-1 ! \
   rtspclientsink location=rtsp://127.0.0.1:8554/cam01 protocols=tcp
 ```
 
-If the PW310 does not offer MJPG at 15 fps (check §2.1 output), request 30 and decimate
-after decode — `drop-only` prevents frame duplication:
+**Verified working** on this unit, 2026-08-20 — confirmed via Checkpoint 1 below.
 
-```bash
-  ... ! jpegdec ! videorate drop-only=true ! video/x-raw,framerate=15/1 ! videoconvert ! ...
-```
+**Two fixes against an earlier draft of this guide, both worth knowing generally, not just
+for this camera:**
 
-Source-side 15 fps is preferable when available: it halves the USB bandwidth as well as
-the encode load. See §2.7 for why 15 and not 30 or 10.
+1. **The 30fps-capture-then-decimate branch is the primary path here, not a fallback.**
+   §2.1 showed this PW310 offers no native 15 fps step at 1280x720 (only 30 fps at that
+   resolution) — so the source-side-15fps variant an earlier draft led with doesn't apply.
+   Always check your own `--list-formats-ext` output before assuming a camera offers your
+   target fps natively; when it does, requesting it directly at capture does still halve
+   USB bandwidth and encode load versus decimating after decode (§2.7 explains why 15 and
+   not 30 or 10 fps is the target either way).
+2. **`"video/x-h264,level=(string)4"` must be quoted in a shell script.** Unquoted, bash's
+   lexer treats the bare `(` as a subshell opener mid-word and throws
+   `syntax error near unexpected token '('` — this reproduces identically wherever this
+   caps string appears unquoted (also present in §18.2's audio pipeline, fixed there too).
+   It's specific to running the caps string from a script/non-interactive shell, not to
+   this camera.
 
 Three details that will cost you an hour each if missed:
 
@@ -263,8 +438,22 @@ ffplay  -rtsp_transport tcp -fflags nobuffer rtsp://127.0.0.1:8554/cam01
 Expect `Video: h264`, 1280x720, 15 fps. If this is wrong, everything downstream fails in
 confusing ways.
 
-**Checkpoint 1:** the PW310's live picture is served as H.264 over RTSP on the Pi, at a
-stable 15 fps with a 2-second IDR interval.
+**Checkpoint 1 — met, verified 2026-08-20:**
+
+```text
+Stream #0:0: Video: h264 (Baseline), yuv420p(progressive), 1280x720, 15 fps, 15.17 tbr, 90k tbn
+```
+
+RTP session stats over the same window showed `packets-sent` climbing steadily and
+`bitrate≈1.2 Mbps` (close to the configured 1.0 Mbps target plus RTP/RTCP overhead),
+confirming sustained streaming rather than a single preroll frame.
+
+One divergence worth noting: `/dev/video11`'s `h264_profile` control defaults to `High`,
+but the negotiated stream came out **Baseline** — nothing in the pipeline explicitly
+requests this, it's presumably `v4l2h264enc` negotiating down against the
+`level=(string)4` caps filter. Not a problem — Baseline is actually the safer choice for
+broad HLS/browser compatibility later — but worth knowing if you go looking for where
+"High" went.
 
 ### 2.7 Frame-rate policy — why 15 fps
 
@@ -318,6 +507,84 @@ demonstrated more than one who matched the product's number.
 > measurements in §10.1 will move for reasons that have nothing to do with the variable
 > you think you are testing.
 
+### 2.8 Persist this across reboots — don't skip it
+
+**A real incident (2026-08-20):** hours into working on later phases, "is the stream
+alive?" got the answer "no" — not because of anything downstream, but because
+`camera-init.sh` → MediaMTX → `publish-cam01.sh` (this whole section) had only ever been
+run manually, never turned into a systemd unit. Everything built *on top* of it — the
+`kvs-cam01.service` producer (§7.1), the control agent (§7.2) — was correctly persisted
+and auto-recovering, but with nothing feeding local RTSP, `kvs-cam01.service` just
+crash-looped (`Restart=on-failure`) against a 404 with nothing to show for it until
+someone thought to check the bottom of the chain. **Persist all three pieces, not just
+the cloud-facing ones** — a partial persistence story is worse than an obviously manual
+one, because it fails silently instead of just not starting:
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/kvs-camera-init.service <<'EOF'
+[Unit]
+Description=Lock PW310 exposure/WB/focus before streaming starts
+Before=kvs-mediamtx.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/camera-init.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target
+EOF
+
+cat > ~/.config/systemd/user/kvs-mediamtx.service <<'EOF'
+[Unit]
+Description=MediaMTX RTSP/HLS server for camera capture
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/vladimir/MyProjects/VMS/mediamtx
+ExecStart=/home/vladimir/MyProjects/VMS/mediamtx/mediamtx
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+cat > ~/.config/systemd/user/kvs-camera-publish.service <<'EOF'
+[Unit]
+Description=PW310 capture/encode -> publish to MediaMTX (rtsp://127.0.0.1:8554/cam01)
+After=kvs-camera-init.service kvs-mediamtx.service
+Requires=kvs-camera-init.service kvs-mediamtx.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/vladimir/MyProjects/VMS/adapter/bin
+ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/publish-cam01.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now kvs-camera-init kvs-mediamtx kvs-camera-publish
+```
+
+The `After=`/`Requires=` ordering on `kvs-camera-publish` matters — without it, systemd
+may start the publish script before MediaMTX is actually listening, and you get the exact
+same failure this section exists to prevent, just moved one layer down.
+
+**Verify the whole local chain, not just that the units are "active":**
+
+```bash
+systemctl --user is-active kvs-camera-init kvs-mediamtx kvs-camera-publish
+ffprobe -rtsp_transport tcp rtsp://127.0.0.1:8554/cam01   # the actual proof
+```
+
 ---
 
 ## 3. Phase 2 — Create the KVS stream
@@ -341,7 +608,10 @@ Note the `StreamARN` — you need it for the IAM policies below.
 ## 4. Phase 3 — Build the KVS Producer SDK on the Pi
 
 This is the longest step. The SDK builds several open-source dependencies from source;
-budget **45–90 minutes** on a Pi 4B. Do it once, then never again.
+budget **45–90 minutes** on a Pi 4B under ideal conditions — see §4.2 for why the real
+number is usually higher. **Apply §1.4's hardening first** — on this hardware, skipping
+it meant this step crashed the Pi outright rather than just failing the build. Do it
+once, then never again.
 
 ### 4.1 Dependencies
 
@@ -358,23 +628,150 @@ sudo apt install -y \
 ### 4.2 Build
 
 ```bash
-cd ~ && git clone --recursive \
+cd "$VMS_HOME/vendor" && git clone --recursive \
   https://github.com/awslabs/amazon-kinesis-video-streams-producer-sdk-cpp.git
 cd amazon-kinesis-video-streams-producer-sdk-cpp
 mkdir -p build && cd build
 
-cmake .. -DBUILD_GSTREAMER_PLUGIN=ON -DBUILD_DEPENDENCIES=ON -DCMAKE_BUILD_TYPE=Release
-make -j2      # -j4 will OOM on a 4 GB Pi during the OpenSSL/curl builds
+cmake .. -DBUILD_GSTREAMER_PLUGIN=ON -DBUILD_DEPENDENCIES=ON -DPARALLEL_BUILD=OFF \
+         -DCMAKE_BUILD_TYPE=Release
+make -j1
 ```
 
-Use `-j2`. The parallel dependency builds are memory-hungry and `-j4` on a 4 GB board
-tends to end in the OOM killer halfway through.
+**`--recursive` on the `git clone` is now a harmless no-op.** As of SDK v3.6.0,
+`.gitmodules` is empty — dependencies are pulled via CMake during configure
+(`-DBUILD_DEPENDENCIES=ON`), not git submodules. Safe to drop `--recursive`, but leaving
+it in place doesn't hurt anything.
+
+**`-DPARALLEL_BUILD=OFF` is not optional on a 4 GB Pi — capping `make -j` alone does
+not protect you.** This cost real debugging time (2026-08-20), so the mechanism is worth
+understanding: `CMake/Utilities.cmake`'s `build_dependency()` function — which drives the
+from-source builds of `log4cplus`, `openssl`, `curl`, etc. — invokes each one via
+`cmake --build . --parallel` with **no explicit job count**. A bare `--parallel` resolves
+to `-j$(nproc)` as a literal command-line argument, which **always overrides** an
+inherited `MAKEFLAGS` or `CMAKE_BUILD_PARALLEL_LEVEL` environment variable — so setting
+those, or passing `-j1`/`-j2` only to the *outer* `make`, does nothing to constrain the
+*dependency* sub-builds. On this Pi 4B (4 GB RAM), that let `log4cplus`'s own build spawn
+**370 concurrent tasks** (it wasn't just compiling the library — it was also building
+`log4cplus`'s entire bundled test suite in parallel: `fileappender_test`, `filter_test`,
+`socket_test`, `unit_tests`, and a dozen more independent binaries, each spinning up its
+own `cc1plus`). Combined with the VS Code Remote-SSH server's own memory footprint, this
+reliably triggered repeated OOM kills and — before the hardening in §1 was in place —
+full system reboots (kernel OOM-killer fired on `cc1plus`, followed by a silent
+watchdog/brownout-style crash with no further log trace).
+
+`PARALLEL_BUILD` is a real, supported CMake `option()` (`CMakeLists.txt` line 18,
+`ON` by default) that gates that exact `--parallel` flag. Passing `-DPARALLEL_BUILD=OFF`
+on the *outer* configure call propagates down and forces every dependency sub-build to
+build single-threaded too. Verified fix: dependency build cgroup task count dropped from
+**370 → 14**, and `earlyoom` interventions dropped from double digits per attempt to
+**zero** for the remainder of the build.
+
+**Budget more than the original 45–90 minutes if you apply this fix** — forcing every
+dependency to build single-threaded (not just the outer SDK) is meaningfully slower, but
+it is the difference between a build that completes and one that crashes the box partway
+through. If `-DPARALLEL_BUILD=OFF` combined with `make -j2` for the *outer* build proves
+stable on your hardware, `-j2` is worth trying before settling for full `-j1`
+throughout — but validate it the same way: watch `earlyoom`'s kill count
+(`journalctl -u earlyoom | grep -c 'sending SIGTERM to process'`) across the attempt, not
+just whether it finishes.
+
+**`-DPARALLEL_BUILD=OFF` only fixes the top-level `build_dependency()`. There is a
+second, separate copy of the same function with the identical bug, and it isn't gated by
+any option at all.** OpenSSL isn't built by the SDK's own top-level `CMakeLists.txt` —
+it's built by a *nested*, independently-vendored dependency at
+`dependency/libkvscproducer/kvscproducer-src/`, which has its own
+`CMake/Utilities.cmake` with its own `build_dependency()`. That copy hardcodes
+`cmake --build . --parallel` with **no `PARALLEL_BUILD` check whatsoever** — our outer
+flag never reaches it. This is why `log4cplus` (built by the top-level function) respected
+`-j1` cleanly while `OpenSSL`'s build still spawned **398 concurrent tasks** and crashed
+the box, even with the top-level fix already applied. Patch it directly:
+
+```bash
+# in dependency/libkvscproducer/kvscproducer-src/CMake/Utilities.cmake, around line 89:
+#   COMMAND ${CMAKE_COMMAND} --build . --parallel
+# remove the trailing "--parallel" so it defaults to sequential:
+sed -i 's/--build \. --parallel/--build ./' \
+  "$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/dependency/libkvscproducer/kvscproducer-src/CMake/Utilities.cmake"
+```
+
+**OpenSSL's `ExternalProject_Add` also fetches four large, unnecessary git submodules —
+`boringssl`, `krb5`, `pyca-cryptography`, `wycheproof`.** These are OpenSSL's own
+optional differential-fuzzing/test-vector dependencies, not required to build the library
+`make install_sw` actually needs. Left unconstrained, cloning `boringssl` alone (a huge
+repository) caused **repeated system crashes** during the clone/checkout itself — likely
+sustained SD-card I/O pressure, the same failure mode as the swap-thrashing crash in §1.4,
+just triggered by git instead of swap. Fix it in
+`dependency/libkvscproducer/kvscproducer-src/CMake/Dependencies/libopenssl-CMakeLists.txt`
+by adding one line to the `ExternalProject_Add(project_libopenssl ...)` block:
+
+```cmake
+ExternalProject_Add(project_libopenssl
+    GIT_REPOSITORY    https://github.com/openssl/openssl.git
+    GIT_TAG           OpenSSL_1_1_1t
+    GIT_SHALLOW       TRUE
+    GIT_PROGRESS      TRUE
+    GIT_SUBMODULES    ""     # <-- add this: skips submodule init/update entirely
+    PREFIX            ${CMAKE_CURRENT_BINARY_DIR}/build
+    ...
+```
+
+**GCC 14 breaks the SDK's own source** — `Thread.c`'s use of `pthread_getname_np` (a
+glibc/GNU extension) needs `_GNU_SOURCE` defined before `<pthread.h>` is included, which
+this SDK version's source doesn't do. Older GCC only warned about the resulting implicit
+declaration; **GCC 14 made implicit function declarations a hard error by default**, so
+this fails the build outright on current Debian trixie. Fix it once, globally, rather than
+patching individual source files as they're discovered — add to
+`dependency/libkvscproducer/kvscproducer-src/dependency/libkvspic/kvspic-src/CMakeLists.txt`,
+right after the `project(pic_project LANGUAGES C)` block's initial `add_definitions()` calls:
+
+```cmake
+if(UNIX AND NOT APPLE)
+  add_definitions(-D_GNU_SOURCE)
+endif()
+```
+
+**Run it detached, not in a plain background shell.** This step easily runs past any
+single terminal/IDE session. A bare `&`/`nohup`/`disown` background job is not enough — it
+is still tied to the login session's cgroup and gets killed the moment that session ends
+(VS Code Remote-SSH reconnects, an SSH client disconnects, etc.), which silently discards
+an hour of compilation. Use a `systemd --user` transient unit instead, with lingering
+enabled once so it survives independent of any login session. Also pin it to the isolated
+CPU cores (`taskset`) — see §1.4 for why this matters on this kernel's real-time tuning:
+
+```bash
+loginctl enable-linger "$USER"   # one-time; lets user services outlive your login session
+
+systemd-run --user --unit=kvs-build --collect \
+  --working-directory="$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/build" \
+  taskset -c 1,2 bash -c 'cmake .. -DBUILD_GSTREAMER_PLUGIN=ON -DBUILD_DEPENDENCIES=ON \
+             -DPARALLEL_BUILD=OFF -DCMAKE_BUILD_TYPE=Release > build.log 2>&1 && \
+           make -j1 >> build.log 2>&1; echo "EXIT_CODE=$?" >> build.log'
+
+# check on it any time, from any session:
+systemctl --user status kvs-build
+tail -f "$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/build/build.log"
+```
+
+**If a retry is needed, don't wipe `build/` unless you have to.** `log4cplus` and
+`OpenSSL` install to `open-source/local/` (a sibling of `build/`, not inside it), and
+`build_dependency()` skips any dependency it can already `find_library()` there — so a
+successful dependency survives `rm -rf build` and doesn't need to be rebuilt on the next
+attempt. Only wipe `open-source/local/lib<name>` directly if a *specific* dependency's
+build is stuck in a bad partial state.
+
+**Realistic time budget, all fixes applied:** on a clean, uninterrupted run this is closer
+to **1.5–2.5 hours** single-threaded than the original 45–90 minute estimate — genuinely
+slower, but the difference between finishing and repeatedly crashing the Pi. Getting there
+took several hours of debugging in practice, almost all of it the CMake/build-script fixes
+above, not the compile time itself.
 
 ### 4.3 Register the plugin
 
 ```bash
 cat >> ~/.bashrc <<'EOF'
-export KVS_SDK=$HOME/amazon-kinesis-video-streams-producer-sdk-cpp
+export VMS_HOME=$HOME/MyProjects/VMS
+export KVS_SDK=$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp
 export GST_PLUGIN_PATH=$KVS_SDK/build
 export LD_LIBRARY_PATH=$KVS_SDK/open-source/local/lib:$LD_LIBRARY_PATH
 EOF
@@ -395,9 +792,23 @@ things at once is how afternoons disappear.
 
 ### 5.1 Temporary IAM user
 
-Create a user `kvs-demo-producer` with this inline policy (substitute your ARN):
+Four steps: get your account ID, create the user, write the policy with that ID filled
+in, attach it as an **inline** policy (owned by and deleted with the user — no separate
+policy object to clean up later, which matches the "temporary" framing of this phase).
 
-```json
+```bash
+# 1. account ID, to fill in the policy's ARN (same pattern as §1.1's budget alarm) —
+#    captured into a variable so step 3 substitutes it automatically, not a number to
+#    copy-paste by hand
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+echo "$ACCOUNT_ID"   # sanity-check it printed a real 12-digit account ID
+
+# 2. the user
+aws iam create-user --user-name kvs-demo-producer
+
+# 3. the policy — <ACCOUNT> is a placeholder; envsubst-style substitution below fills in
+#    the real value from $ACCOUNT_ID, nothing to edit by hand
+cat > kvs-demo-producer-policy.json <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [{
@@ -408,12 +819,33 @@ Create a user `kvs-demo-producer` with this inline policy (substitute your ARN):
       "kinesisvideo:PutMedia",
       "kinesisvideo:TagStream"
     ],
-    "Resource": "arn:aws:kinesisvideo:eu-central-1:<ACCOUNT>:stream/cam-01/*"
+    "Resource": "arn:aws:kinesisvideo:eu-central-1:${ACCOUNT_ID}:stream/cam-01/*"
   }]
 }
+EOF
+
+# 4. attach it
+aws iam put-user-policy \
+  --user-name kvs-demo-producer \
+  --policy-name KVSProducerDemo \
+  --policy-document file://kvs-demo-producer-policy.json
 ```
 
 ### 5.2 Run the pipeline
+
+**The two `export` values below don't pre-exist — they come from creating an access key
+for the user you just made.** That's a separate, explicit API call:
+
+```bash
+aws iam create-access-key --user-name kvs-demo-producer
+```
+
+which returns the `AccessKeyId` and `SecretAccessKey` as JSON. **The secret is shown
+exactly once, at creation** — AWS never displays it again; lose it and you delete the key
+and create a new one, there's no recovery. Export both directly in your shell — don't
+write them to a file anywhere under `$VMS_HOME` (not even `certs/`, which is gitignored
+for the X.509 material in §6, but isn't meant for this kind of credential either). They
+only need to live in this one shell session:
 
 ```bash
 export AWS_ACCESS_KEY_ID=AKIA...
@@ -441,6 +873,11 @@ with the running clock within ~10 seconds.
 
 **Delete the IAM user's access keys once §6 works.** Do not leave them on the device;
 that is exactly the anti-pattern the next phase exists to remove.
+
+```bash
+aws iam list-access-keys --user-name kvs-demo-producer   # confirm the AccessKeyId
+aws iam delete-access-key --user-name kvs-demo-producer --access-key-id AKIA...
+```
 
 ---
 
@@ -547,7 +984,7 @@ gst-launch-1.0 -v \
   ! rtph264depay ! h264parse config-interval=-1 \
   ! video/x-h264,stream-format=avc,alignment=au \
   ! kvssink stream-name="cam-01" aws-region="eu-central-1" \
-      iot-certificate="iot-certificate,endpoint=c2xxxx.credentials.iot.eu-central-1.amazonaws.com,cert-path=/home/pi/certs/adapter.cert.pem,key-path=/home/pi/certs/adapter.private.key,ca-path=/home/pi/certs/cacert.pem,role-aliases=KVSAdapterRoleAlias,iot-thing-name=adapter-01"
+      iot-certificate="iot-certificate,endpoint=c2xxxx.credentials.iot.eu-central-1.amazonaws.com,cert-path=$VMS_HOME/certs/adapter.cert.pem,key-path=$VMS_HOME/certs/adapter.private.key,ca-path=$VMS_HOME/certs/cacert.pem,role-aliases=KVSAdapterRoleAlias,iot-thing-name=adapter-01"
 ```
 
 **Checkpoint 5:** video still flows with no AWS keys anywhere on the device.
@@ -587,10 +1024,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Environment=GST_PLUGIN_PATH=/home/pi/amazon-kinesis-video-streams-producer-sdk-cpp/build
-Environment=LD_LIBRARY_PATH=/home/pi/amazon-kinesis-video-streams-producer-sdk-cpp/open-source/local/lib
-ExecStart=/home/pi/bin/stream-cam01.sh
+User=vladimir
+Environment=GST_PLUGIN_PATH=/home/vladimir/MyProjects/VMS/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/build
+Environment=LD_LIBRARY_PATH=/home/vladimir/MyProjects/VMS/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/open-source/local/lib
+ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/stream-cam01.sh
 Restart=on-failure
 RestartSec=5
 
@@ -598,12 +1035,22 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Put the `gst-launch-1.0` command from §6.5 into `~/bin/stream-cam01.sh`.
+`User=` and `Environment=` don't shell-expand `$VMS_HOME` — systemd unit files need the
+literal absolute path, unlike the bash snippets elsewhere in this doc.
+
+Put the `gst-launch-1.0` command from §6.5 into `$VMS_HOME/adapter/bin/stream-cam01.sh`.
+
+**This unit's `Restart=on-failure` will crash-loop silently, with nothing to show for
+it, if §2.8's three units aren't *also* persisted.** `kvs-cam01.service` is downstream of
+local RTSP existing at all — it has no way to distinguish "camera pipeline never started"
+from any other transient failure, so it just keeps retrying against a 404 indefinitely.
+This is exactly how a real incident happened here (§2.8) — every cloud-facing piece was
+correctly auto-recovering while the actual camera feed silently wasn't running at all.
 
 ### 7.2 Control agent
 
 ```bash
-python3 -m venv ~/venv-adapter && source ~/venv-adapter/bin/activate
+python3 -m venv "$VMS_HOME/venv-adapter" && source "$VMS_HOME/venv-adapter/bin/activate"
 pip install awsiotsdk
 ```
 
@@ -632,25 +1079,46 @@ def on_message(topic, payload, **kwargs):
                      qos=mqtt.QoS.AT_LEAST_ONCE)
 
 conn = mqtt_connection_builder.mtls_from_path(
-    endpoint="xxxxx-ats.iot.eu-central-1.amazonaws.com",
+    endpoint="xxxxx-ats.iot.eu-central-1.amazonaws.com",  # aws iot describe-endpoint --endpoint-type iot:Data-ATS
     port=443,                       # ALPN x-amzn-mqtt-ca — traverses HTTPS-only firewalls
-    cert_filepath="/home/pi/certs/adapter.cert.pem",
-    pri_key_filepath="/home/pi/certs/adapter.private.key",
-    ca_filepath="/home/pi/certs/AmazonRootCA1.pem",
+    cert_filepath="/home/vladimir/MyProjects/VMS/certs/adapter.cert.pem",
+    pri_key_filepath="/home/vladimir/MyProjects/VMS/certs/adapter.private.key",
+    ca_filepath="/home/vladimir/MyProjects/VMS/certs/AmazonRootCA1.pem",
     client_id=THING,
     keep_alive_secs=30,
     clean_session=False,
     will=mqtt.Will(topic=STATE_T,
                    qos=mqtt.QoS.AT_LEAST_ONCE,
                    payload=json.dumps({"online": False}).encode(),
-                   retain=True),
+                   retain=False),
 )
 conn.connect().result()
 conn.subscribe(topic=CMD_T, qos=mqtt.QoS.AT_LEAST_ONCE, callback=on_message)[0].result()
 conn.publish(topic=STATE_T, payload=json.dumps({"online": True}),
-             qos=mqtt.QoS.AT_LEAST_ONCE, retain=True)
+             qos=mqtt.QoS.AT_LEAST_ONCE, retain=False)[0].result()
 threading.Event().wait()
 ```
+
+**`retain=True` on the Will gets the CONNECT itself rejected — `AWS_ERROR_MQTT_UNEXPECTED_HANGUP`.**
+This cost real debugging time (2026-08-20): the exact same certificate, policy, and topic
+work fine for a *normal* `publish()` call after connecting — the failure is specific to
+declaring a **retained** Last Will at CONNECT time. AWS IoT Core appears to apply a
+stricter authorization check to retained LWTs than to regular publishes, and with this
+account's policy it fails outright rather than degrading gracefully — the client just
+sees the TCP connection drop, with no CONNACK error code to explain why. Isolate this
+class of bug the same way: strip the connection down to nothing (no Will, no subscribe)
+and confirm that connects cleanly first; then add pieces back one at a time
+(`will=` with `retain=False`, then `retain=True`) until the specific failing piece is
+obvious, rather than debugging the full `agent.py` as one unit. `retain=False` is enough
+for Checkpoint 6 — the LWT firing for anyone currently subscribed doesn't require message
+retention, and enabling `awscrt.io.init_logging(awscrt.io.LogLevel.Debug, 'stderr')`
+before building the connection is what actually surfaces `AWS_ERROR_MQTT_UNEXPECTED_HANGUP`'s
+context (ALPN negotiation, CONNACK, or lack thereof) — the bare exception message alone
+doesn't say enough to diagnose it.
+
+Also note `conn.publish(...)` returns a **tuple** `(future, packet_id)` in this SDK
+version (`awsiotsdk` 1.31.0 / `awscrt` 0.36.1), not a bare future — `.result()` needs
+`[0]` first, or errors from the publish are silently swallowed.
 
 The SDK's `mtls_from_path` connection already implements exponential-backoff reconnect
 (§14 of the source doc) — you do not write that yourself, but you should be able to say
@@ -662,31 +1130,113 @@ Test from the console's MQTT test client:
 {"action": "start"}
 ```
 
-**Checkpoint 6:** publishing to `adapter/adapter-01/cmd` starts and stops the stream, and
-killing the agent with `kill -9` makes the LWT `{"online": false}` appear.
+**Verifying this properly needs a second, independent MQTT client watching the state
+topic — and it can't just reuse the device certificate with a different `client_id`.**
+The IoT policy's `iot:Connect` resource (`client/${iot:Connection.Thing.ThingName}`)
+resolves against the Thing the certificate is attached to (`adapter-01`); connecting with
+any other `client_id` on the same cert fails to authorize. Two ways around it: use the
+console's MQTT test client (simplest, no code), or authenticate a second connection via
+IAM/SigV4 over WebSockets instead of the certificate — this sidesteps the device policy
+entirely and just needs the connecting IAM principal to have IoT permissions:
+
+```python
+from awscrt import mqtt, auth
+from awsiot import mqtt_connection_builder
+
+credentials_provider = auth.AwsCredentialsProvider.new_default_chain()
+observer = mqtt_connection_builder.websockets_with_default_aws_signing(
+    endpoint="xxxxx-ats.iot.eu-central-1.amazonaws.com",
+    region="eu-central-1",
+    credentials_provider=credentials_provider,
+    client_id="observer-admin",
+    clean_session=True,
+)
+observer.connect().result()
+observer.subscribe(topic="adapter/adapter-01/state", qos=mqtt.QoS.AT_LEAST_ONCE,
+                    callback=lambda topic, payload, **kw: print(topic, payload.decode()))[0].result()
+```
+
+**Checkpoint 6 — verify all three independently, not just the MQTT message:**
+
+```bash
+aws iot-data publish --topic "adapter/adapter-01/cmd" --region eu-central-1 \
+  --cli-binary-format raw-in-base64-out --payload '{"action": "start"}'
+```
+
+- the observer above prints `{"streaming": true}`
+- `sudo systemctl is-active kvs-cam01.service` independently reports `active` — the MQTT
+  message and the real system state are two different things; check both
+- `{"action": "stop"}` reverses both
+- `kill -9 <agent PID>` makes `{"online": false}` appear on the observer within a few
+  seconds, with no further action from you
 
 ### 7.3 Prove the 443 claim
 
-Don't assert it — demonstrate it. Block 8883 outright and confirm the adapter still works:
+Don't assert it — demonstrate it. Block 8883 outright and confirm the adapter still works.
+
+**`iptables` isn't installed on current Raspberry Pi OS (Debian trixie) — it defaults to
+`nftables` with no legacy compat shim present.** `sudo iptables -A OUTPUT ...` fails with
+`command not found`, and because the command errors before doing anything, it's easy to
+miss that **no block was ever applied** and mistake the following "still works" check for
+a real proof rather than a false negative. Use `nft` directly:
 
 ```bash
-sudo iptables -A OUTPUT -p tcp --dport 8883 -j DROP
-sudo systemctl restart adapter-agent.service
-journalctl -u adapter-agent -f          # should connect normally
+sudo nft add table inet filter
+sudo nft add chain inet filter output '{ type filter hook output priority 0; }'
+sudo nft add rule inet filter output tcp dport 8883 drop
 
-# confirm the negotiated ALPN protocol
+sudo systemctl restart kvs-agent.service    # or your agent's actual unit name
+journalctl --user -u kvs-agent -f           # should connect normally, no errors
+
+# confirm 8883 is genuinely dead — this should hang until it times out, not connect
+timeout 5 bash -c 'echo | openssl s_client -connect xxxxx-ats.iot.eu-central-1.amazonaws.com:8883'
+
+# confirm the negotiated ALPN protocol on 443
 openssl s_client -connect xxxxx-ats.iot.eu-central-1.amazonaws.com:443 \
-  -alpn x-amzn-mqtt-ca -brief </dev/null 2>&1 | grep -i alpn
+  -alpn x-amzn-mqtt-ca </dev/null 2>&1 | grep -i alpn
 ```
 
-Leave that iptables rule in place permanently on the demo box. It makes the firewall
-claim unfalsifiable — the prototype provably needs nothing but outbound 443.
+**Make the rule survive a reboot** — an ad-hoc `nft add` (like `iptables -A` would have
+been) only lives in the running kernel's ruleset, and this demo box reboots more than
+you'd like (§1.4). Write it into `/etc/nftables.conf` and enable the service so it's
+reapplied at every boot:
+
+```bash
+sudo tee /etc/nftables.conf > /dev/null <<'EOF'
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+	chain input {
+		type filter hook input priority filter;
+	}
+	chain forward {
+		type filter hook forward priority filter;
+	}
+	chain output {
+		type filter hook output priority filter;
+		# permanent proof for §7.3: the adapter needs nothing but outbound 443
+		tcp dport 8883 drop
+	}
+}
+EOF
+
+sudo systemctl enable --now nftables
+```
+
+Leave that rule in place permanently on the demo box. It makes the firewall claim
+unfalsifiable — the prototype provably needs nothing but outbound 443.
 
 ---
 
 ## 8. Phase 7 — Browser client
 
-Reuse your existing API Gateway + Lambda pattern; only the payload changes.
+Reuse your existing API Gateway + Lambda pattern; only the payload changes. **The guide
+text above stops at "reuse your existing pattern" — if this is your first API
+Gateway + Cognito + Lambda stack, none of §8.2–§8.5 below is optional**; every piece was
+built and verified end-to-end (2026-08-20), including a real `curl` test through Cognito
+auth into a playable HLS URL, not just deployed-and-assumed-working.
 
 ### 8.1 Lambda `get-hls-url` (Python 3.13, arm64)
 
@@ -717,23 +1267,247 @@ def lambda_handler(event, context):
     }
 ```
 
-Execution role needs `kinesisvideo:GetDataEndpoint`,
-`kinesisvideo:GetHLSStreamingSessionURL`, `kinesisvideo:DescribeStream` on the stream ARN.
+**The `/cmd` Lambda the client calls isn't shown anywhere in the source material** —
+here's the actual implementation, `publish_cmd.py`:
 
-Guard the API Gateway route with a **Cognito user pool authorizer** — the "authorization"
-and "session management" bullets of §20 are otherwise just words on a slide.
+```python
+import boto3, os, json
 
-### 8.2 Client
+REGION = os.environ["AWS_REGION"]
+THING  = os.environ.get("THING_NAME", "adapter-01")
+CMD_T  = f"adapter/{THING}/cmd"
 
-Single HTML file, hls.js from CDN:
+def lambda_handler(event, context):
+    body = json.loads(event.get("body") or "{}")
+    action = body.get("action")
+    if action not in ("start", "stop"):
+        return {
+            "statusCode": 400,
+            "headers": {"Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"error": "action must be 'start' or 'stop'"}),
+        }
+
+    iot_data = boto3.client("iot-data", region_name=REGION)
+    iot_data.publish(topic=CMD_T, qos=1, payload=json.dumps({"action": action}))
+
+    return {
+        "statusCode": 200,
+        "headers": {"Access-Control-Allow-Origin": "*"},
+        "body": json.dumps({"published": action}),
+    }
+```
+
+Deploy both as arm64/Python 3.13 zip packages, each with its **own** least-privilege
+execution role (matches the scoping discipline used everywhere else in this guide — don't
+give the URL-fetcher IoT permissions or the command-publisher KVS permissions):
+
+```bash
+cat > "$VMS_HOME/cloud/iam/lambda-trust.json" <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "lambda.amazonaws.com"},
+    "Action": "sts:AssumeRole"
+  }]
+}
+EOF
+
+cat > "$VMS_HOME/cloud/iam/get-hls-url-policy.json" <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["kinesisvideo:GetDataEndpoint", "kinesisvideo:GetHLSStreamingSessionURL",
+               "kinesisvideo:DescribeStream"],
+    "Resource": "$(aws kinesisvideo describe-stream --stream-name cam-01 --region eu-central-1 --query StreamInfo.StreamARN --output text)"
+  }]
+}
+EOF
+
+cat > "$VMS_HOME/cloud/iam/publish-cmd-policy.json" <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": "iot:Publish",
+    "Resource": "arn:aws:iot:eu-central-1:${ACCOUNT_ID}:topic/adapter/adapter-01/cmd"
+  }]
+}
+EOF
+
+for NAME_ROLE_POLICY in "GetHlsUrlLambdaRole:get-hls-url-policy.json:GetHlsUrlAccess" \
+                        "PublishCmdLambdaRole:publish-cmd-policy.json:PublishCmdAccess"; do
+  IFS=: read -r ROLE POLICY_FILE POLICY_NAME <<< "$NAME_ROLE_POLICY"
+  aws iam create-role --role-name "$ROLE" \
+    --assume-role-policy-document "file://$VMS_HOME/cloud/iam/lambda-trust.json"
+  aws iam attach-role-policy --role-name "$ROLE" \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  aws iam put-role-policy --role-name "$ROLE" --policy-name "$POLICY_NAME" \
+    --policy-document "file://$VMS_HOME/cloud/iam/$POLICY_FILE"
+done
+
+sleep 8   # let IAM role propagate before Lambda creation references it — a fresh role
+          # can 404 if you deploy the function immediately after creating it
+
+cd "$VMS_HOME/cloud/lambda"
+zip -q get_hls_url.zip get_hls_url.py && zip -q publish_cmd.zip publish_cmd.py
+
+aws lambda create-function --function-name get-hls-url \
+  --runtime python3.13 --architectures arm64 \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/GetHlsUrlLambdaRole" \
+  --handler get_hls_url.lambda_handler --zip-file fileb://get_hls_url.zip \
+  --environment "Variables={STREAM_NAME=cam-01}" --timeout 10 --region eu-central-1
+
+aws lambda create-function --function-name publish-cmd \
+  --runtime python3.13 --architectures arm64 \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/PublishCmdLambdaRole" \
+  --handler publish_cmd.lambda_handler --zip-file fileb://publish_cmd.zip \
+  --environment "Variables={THING_NAME=adapter-01}" --timeout 10 --region eu-central-1
+```
+
+### 8.2 Cognito user pool
+
+```bash
+POOL_ID=$(aws cognito-idp create-user-pool --pool-name kvs-demo-users \
+  --region eu-central-1 --auto-verified-attributes email --query 'UserPool.Id' --output text)
+
+CLIENT_ID=$(aws cognito-idp create-user-pool-client --user-pool-id "$POOL_ID" \
+  --client-name kvs-demo-web-client \
+  --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH ALLOW_REFRESH_TOKEN_AUTH \
+  --no-generate-secret --region eu-central-1 --query 'UserPoolClient.ClientId' --output text)
+```
+
+`--no-generate-secret` matters — a browser client can't keep a client secret
+confidential, so this app client is deliberately public (the security boundary is the
+username/password + the resulting short-lived JWT, same model as any SPA).
+
+A test user, created and confirmed non-interactively for a demo (a real deployment would
+use self-registration or an admin invite flow instead):
+
+```bash
+aws cognito-idp admin-create-user --user-pool-id "$POOL_ID" --username demo-viewer \
+  --user-attributes Name=email,Value=demo-viewer@example.com Name=email_verified,Value=true \
+  --message-action SUPPRESS --region eu-central-1
+
+aws cognito-idp admin-set-user-password --user-pool-id "$POOL_ID" --username demo-viewer \
+  --password 'ChangeMe2026!' --permanent --region eu-central-1
+```
+
+### 8.3 API Gateway (REST API, Cognito authorizer, both routes)
+
+```bash
+API_ID=$(aws apigateway create-rest-api --name kvs-demo-api --region eu-central-1 --query id --output text)
+ROOT_ID=$(aws apigateway get-resources --rest-api-id "$API_ID" --region eu-central-1 --query 'items[0].id' --output text)
+
+AUTHORIZER_ID=$(aws apigateway create-authorizer --rest-api-id "$API_ID" \
+  --name CognitoAuthorizer --type COGNITO_USER_POOLS \
+  --provider-arns "arn:aws:cognito-idp:eu-central-1:${ACCOUNT_ID}:userpool/$POOL_ID" \
+  --identity-source 'method.request.header.Authorization' \
+  --region eu-central-1 --query id --output text)
+
+for ROUTE in "hls:GET:get-hls-url" "cmd:POST:publish-cmd"; do
+  IFS=: read -r PATH_PART METHOD FUNCTION <<< "$ROUTE"
+  RES_ID=$(aws apigateway create-resource --rest-api-id "$API_ID" --parent-id "$ROOT_ID" \
+    --path-part "$PATH_PART" --region eu-central-1 --query id --output text)
+
+  aws apigateway put-method --rest-api-id "$API_ID" --resource-id "$RES_ID" \
+    --http-method "$METHOD" --authorization-type COGNITO_USER_POOLS \
+    --authorizer-id "$AUTHORIZER_ID" --region eu-central-1 > /dev/null
+
+  aws apigateway put-integration --rest-api-id "$API_ID" --resource-id "$RES_ID" \
+    --http-method "$METHOD" --type AWS_PROXY --integration-http-method POST \
+    --uri "arn:aws:apigateway:eu-central-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-central-1:${ACCOUNT_ID}:function:${FUNCTION}/invocations" \
+    --region eu-central-1 > /dev/null
+
+  aws lambda add-permission --function-name "$FUNCTION" --statement-id apigateway-invoke \
+    --action lambda:InvokeFunction --principal apigateway.amazonaws.com \
+    --source-arn "arn:aws:execute-api:eu-central-1:${ACCOUNT_ID}:${API_ID}/*/${METHOD}/${PATH_PART}" \
+    --region eu-central-1
+
+  # CORS preflight — the client's fetch() calls carry an Authorization header, which
+  # forces the browser to send an OPTIONS preflight first; skip this and every request
+  # fails with a CORS error before it ever reaches Cognito or the Lambda
+  aws apigateway put-method --rest-api-id "$API_ID" --resource-id "$RES_ID" \
+    --http-method OPTIONS --authorization-type NONE --region eu-central-1 > /dev/null
+  aws apigateway put-integration --rest-api-id "$API_ID" --resource-id "$RES_ID" \
+    --http-method OPTIONS --type MOCK \
+    --request-templates '{"application/json":"{\"statusCode\": 200}"}' --region eu-central-1 > /dev/null
+  aws apigateway put-method-response --rest-api-id "$API_ID" --resource-id "$RES_ID" \
+    --http-method OPTIONS --status-code 200 --response-parameters \
+    '{"method.response.header.Access-Control-Allow-Headers":true,"method.response.header.Access-Control-Allow-Methods":true,"method.response.header.Access-Control-Allow-Origin":true}' \
+    --region eu-central-1 > /dev/null
+  aws apigateway put-integration-response --rest-api-id "$API_ID" --resource-id "$RES_ID" \
+    --http-method OPTIONS --status-code 200 --response-parameters \
+    "{\"method.response.header.Access-Control-Allow-Headers\":\"'Content-Type,Authorization'\",\"method.response.header.Access-Control-Allow-Methods\":\"'GET,POST,OPTIONS'\",\"method.response.header.Access-Control-Allow-Origin\":\"'*'\"}" \
+    --region eu-central-1 > /dev/null
+done
+
+aws apigateway create-deployment --rest-api-id "$API_ID" --stage-name prod --region eu-central-1
+```
+
+Guard both routes with a **Cognito user pool authorizer** — the "authorization" and
+"session management" bullets of §20 are otherwise just words on a slide.
+
+**Verify the authorizer actually enforces something**, before touching the client at all:
+
+```bash
+API="https://${API_ID}.execute-api.eu-central-1.amazonaws.com/prod"
+curl -s "$API/hls" -w "\n%{http_code}\n"     # expect 401, no token supplied
+
+ID_TOKEN=$(aws cognito-idp initiate-auth --auth-flow USER_PASSWORD_AUTH --client-id "$CLIENT_ID" \
+  --auth-parameters USERNAME=demo-viewer,PASSWORD='ChangeMe2026!' --region eu-central-1 \
+  --query 'AuthenticationResult.IdToken' --output text)
+curl -s "$API/hls" -H "Authorization: $ID_TOKEN" -w "\n%{http_code}\n"   # expect 200 + a real HLS URL
+```
+
+If that second call 502s with "No fragments found in the stream," that's not a bug in
+this stack — it means `kvs-cam01.service` isn't currently producing (§7's control agent
+manages this; `PlaybackMode=LIVE` needs an actual live stream to return a session URL
+against).
+
+### 8.4 Client
+
+Single HTML file, hls.js from CDN. **The source snippet references a bare `idToken`
+variable that's never defined** — for the client to actually work, something has to
+authenticate against Cognito and produce that token. Rather than pull in a full SDK just
+for this, Cognito's `InitiateAuth` is a plain JSON HTTPS API — callable directly via
+`fetch()`, keeping this a genuine single self-contained file:
 
 ```html
-<video id="v" controls autoplay muted playsinline width="960"></video>
-<button onclick="cmd('start')">Start</button>
-<button onclick="cmd('stop')">Stop</button>
+<div id="login">
+  <input id="username" placeholder="username">
+  <input id="password" type="password" placeholder="password">
+  <button onclick="login()">Sign in</button>
+</div>
+<div id="app" style="display:none">
+  <video id="v" controls autoplay muted playsinline width="960"></video>
+  <button onclick="cmd('start')">Start</button>
+  <button onclick="cmd('stop')">Stop</button>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
 const API = "https://xxxx.execute-api.eu-central-1.amazonaws.com/prod";
+const COGNITO_REGION = "eu-central-1";
+const COGNITO_CLIENT_ID = "xxxxxxxxxxxxxxxxxxxxxxxxxx";
+let idToken = null;
+
+async function login() {
+  const r = await fetch(`https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`, {
+    method: "POST",
+    headers: {"Content-Type": "application/x-amz-json-1.1",
+              "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"},
+    body: JSON.stringify({
+      AuthFlow: "USER_PASSWORD_AUTH", ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: {USERNAME: username.value, PASSWORD: password.value},
+    }),
+  });
+  const data = await r.json();
+  if (!r.ok || !data.AuthenticationResult) { alert(data.message || "sign-in failed"); return; }
+  idToken = data.AuthenticationResult.IdToken;
+  login.style.display = "none"; app.style.display = "block";
+  load();
+}
 async function load() {
   const r = await fetch(`${API}/hls`, {headers: {Authorization: idToken}});
   const {url} = await r.json();
@@ -742,18 +1516,148 @@ async function load() {
 }
 async function cmd(action) {
   await fetch(`${API}/cmd`, {method: "POST",
-    headers: {Authorization: idToken},
+    headers: {Authorization: idToken, "Content-Type": "application/json"},
     body: JSON.stringify({action})});
+  if (action === "start") setTimeout(load, 8000);   // give KVS a moment to receive fragments
 }
-load();
 </script>
 ```
 
-The `/cmd` route points at a second Lambda calling `iot-data.publish()` onto
-`adapter/adapter-01/cmd`.
+(`$VMS_HOME/client/index.html` has the full version with status messages and error
+handling — this is the trimmed version showing the load-bearing pieces.)
 
-**Checkpoint 7:** live video in the browser, on mobile data, with no router changes.
-That last detail is the demo. Show it on a phone with Wi-Fi off.
+### 8.5 Hosting the client
+
+**Don't host this on the Pi.** The whole thesis of this project (§14) is zero inbound
+ports on the adapter — putting the viewer-facing page on the Pi itself would need exactly
+the port-forwarding this architecture exists to avoid, just for a different purpose. The
+natural fit is a static host that's *meant* to be public: S3 static website hosting.
+
+```bash
+BUCKET="vms-demo-client-${ACCOUNT_ID}"
+aws s3 mb "s3://$BUCKET" --region eu-central-1
+aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
+  "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false"
+aws s3api put-bucket-policy --bucket "$BUCKET" --policy '{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect":"Allow","Principal":"*","Action":"s3:GetObject",
+                 "Resource":"arn:aws:s3:::'"$BUCKET"'/*"}]
+}'
+aws s3 website "s3://$BUCKET" --index-document index.html
+aws s3 cp "$VMS_HOME/client/index.html" "s3://$BUCKET/index.html" --content-type text/html
+```
+
+Note the endpoint is **plain HTTP**, not HTTPS (S3 website hosting doesn't offer TLS on
+its own — CloudFront in front of it would be the fix, out of scope for the MVP). This
+isn't a mixed-content problem: the page's own API/Cognito calls are HTTPS regardless of
+what scheme served the page, so the browser doesn't block them.
+
+**Checkpoint 7 — verified two ways.** Backend, independent of any browser
+(`curl` through Cognito auth → API Gateway → Lambda → `ffprobe` the returned URL, same
+method as Checkpoints 4/5); and the actual browser client, opened on a real device —
+confirmed working (2026-08-20), including a `bufferStalledError` from `hls.js` on first
+load that self-recovered, a normal live-HLS startup hiccup, not a pipeline fault. Show it
+on a phone with Wi-Fi off — that's the whole point of §14's thesis, made visible in one
+screenshot.
+
+**§8.6 exists because that curl-based verification, while necessary, isn't sufficient** —
+it proves the backend, not the client. Every bug below only surfaced once a real person
+used the real page in a real browser, including one that made the player spin forever
+with no way out.
+
+### 8.6 Client-side bugs found through real use
+
+Four bugs, found in this order across actual browser sessions (2026-08-20), not caught by
+any backend `curl` test because all four are specific to what a browser does with the
+responses, not whether the responses were correct.
+
+**1. A Lambda exception produces a browser-side `NetworkError`, not a readable error.**
+
+*Symptom:* pressing Start/reloading sometimes showed `NetworkError when attempting to
+fetch resource` in the client — a generic message with no indication of what actually
+went wrong.
+
+*Root cause:* `get_hls_url.py`'s CORS header
+(`"headers": {"Access-Control-Allow-Origin": "*"}`) only gets attached on the function's
+own `return` statement. When `kvs-cam01.service` wasn't producing and
+`get_hls_streaming_session_url` raised `ResourceNotFoundException`, the exception
+propagated *past* that return — API Gateway caught it and generated its own generic 502,
+which has **no CORS headers at all**. The browser can't read a cross-origin response
+missing that header, so `fetch()` throws a raw network-level error instead of resolving
+with a normal (if unsuccessful) response — the actual error message never reaches the
+page's own error handling.
+
+*Fix:* wrap the whole handler body in `try`/`except`, and make every exit path — success
+and failure alike — return through the same code that attaches CORS headers:
+
+```python
+try:
+    ...
+    return {"statusCode": 200, "headers": CORS, "body": ...}
+except kv.exceptions.ResourceNotFoundException:
+    return {"statusCode": 503, "headers": CORS,
+            "body": json.dumps({"error": "stream is not currently live -- press Start"})}
+except Exception as e:
+    return {"statusCode": 500, "headers": CORS, "body": json.dumps({"error": str(e)})}
+```
+
+Applied to both Lambdas. **This class of bug is easy to miss precisely because backend
+testing with `curl` doesn't reproduce it** — `curl` reads whatever body comes back
+regardless of CORS headers; only a browser's same-origin policy enforces that check, so
+the failure is invisible until real browser traffic hits the unhappy path.
+
+**2. `mediaSourceRequiresReset` on every "Reload player" click.**
+
+*Root cause:* the client's `load()` created a fresh `new Hls()` on every call and attached
+it to the same `<video>` element without releasing the previous instance's `MediaSource`
+first. Two overlapping `MediaSource` objects on one element is exactly what that error
+means — not a KVS/HLS problem, a client bookkeeping bug.
+
+*Fix:* track the instance in a module-level variable and destroy it first:
+
+```js
+let hls = null;
+// ...
+if (hls) { hls.destroy(); hls = null; }
+hls = new Hls();
+```
+
+**3. The player spun forever after pressing Stop — no error, no recovery, no exit.**
+
+*Root cause:* `hls.js`'s own recommended fatal-error recovery (`hls.startLoad()` on
+`NETWORK_ERROR`) is correct *for a stream that's still live* — most fatal errors on a live
+HLS stream are transient network blips that clear up on retry. But after Stop,
+`kvs-cam01.service` had genuinely stopped producing, permanently — retrying a playlist
+load against a stream that will *never* produce new segments again doesn't fail
+cleanly, it just retries forever. The recovery logic had no way to distinguish "temporary
+network hiccup, keep trying" from "deliberately stopped, stop trying."
+
+*Fix:* an explicit `userStopped` flag, set the moment Stop is pressed, checked before any
+retry logic runs:
+
+```js
+let userStopped = true;
+// in the fatal-error handler:
+if (userStopped) return;   // this player was torn down on purpose; ignore its errors
+```
+
+Pressing Stop now also tears the player down immediately (`hls.destroy()`, clear the
+video's `src`) instead of leaving the old instance to stall out and retry on its own —
+the two problems (bug 3 and the UX gap in bug 4) share one root cause and one fix.
+
+**4. No visual difference between "loading" and "stopped."**
+
+Even once bug 3 stopped the infinite retry, the user-visible result after Stop was a
+frozen last video frame with a semi-transparent spinner sitting on top indefinitely —
+functionally correct (nothing was retrying anymore) but with no way for a viewer to tell
+"stopped" apart from "still loading." Fixed with an explicit overlay element (solid black,
+`position: absolute; inset: 0` over the video) driven by state, not by player events:
+`"Stream stopped. Press Start to watch again."` on Stop, `"Starting stream…"` immediately
+on Start, cleared automatically on `Hls.Events.FRAG_BUFFERED` (first real video data
+arrived) rather than guessing a fixed delay. Also needed: the `<video>` element has no
+intrinsic size before any source has ever loaded, so the wrapper needs an explicit
+`aspect-ratio: 16 / 9` — without it, the overlay itself collapses to the browser's tiny
+default video height on first page load, before Start has ever been pressed.
 
 ---
 
@@ -946,16 +1850,22 @@ Run it every evening. Recreating the stream in §3 takes ten seconds.
 ## 12. Suggested repository layout
 
 ```text
-vms-cloud-adapter/
+VMS/                            # $VMS_HOME — everything lives here, not scattered in $HOME
 ├── README.md                  # architecture diagram + the numbers from §10
+├── .gitignore                 # excludes certs/, venv-adapter/, built binaries
 ├── adapter/
+│   ├── bin/
+│   │   ├── publish-cam01.sh    # PW310 → v4l2h264enc → MediaMTX (§2.5)
+│   │   ├── camera-init.sh      # v4l2-ctl exposure/WB/focus lock (§2.3)
+│   │   └── stream-cam01.sh     # MediaMTX → kvssink (§6.5)
 │   ├── agent.py
-│   ├── publish-cam01.sh        # PW310 → v4l2h264enc → MediaMTX
-│   ├── camera-init.sh          # v4l2-ctl exposure/WB lock
-│   ├── stream-cam01.sh         # MediaMTX → kvssink
-│   ├── cam01-publish.service
 │   ├── kvs-cam01.service
 │   └── requirements.txt
+├── mediamtx/                  # downloaded binary + mediamtx.yml, run from here
+├── vendor/
+│   └── amazon-kinesis-video-streams-producer-sdk-cpp/   # §4 build, gitignored
+├── certs/                     # adapter cert/key material — gitignored, never committed
+├── venv-adapter/               # python venv for agent.py — gitignored
 ├── cloud/
 │   ├── iam/                   # role trust + producer policy JSON
 │   ├── iot/                   # thing policy, role alias
@@ -1175,7 +2085,7 @@ After=network-online.target
 
 [Service]
 EnvironmentFile=/etc/adapter/channels/%i.env
-ExecStart=/home/pi/bin/stream-channel.sh
+ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/stream-channel.sh
 Restart=on-failure
 RestartSec=5
 CPUAccounting=true
@@ -1391,7 +2301,7 @@ before.
 Non-destructive: `tee` splits the parsed H.264 to both sinks. Nothing existing changes.
 
 ```bash
-sudo mkdir -p /var/spool/vms/cam-01 && sudo chown pi:pi /var/spool/vms/cam-01
+sudo mkdir -p /var/spool/vms/cam-01 && sudo chown vladimir:vladimir /var/spool/vms/cam-01
 
 gst-launch-1.0 -v \
   rtspsrc location="rtsp://127.0.0.1:8554/cam01" protocols=tcp latency=200 ! \
@@ -1463,7 +2373,7 @@ One rule carries the entire outage-resilience story: **delete only after a confi
 200.** If the WAN is down the upload raises, the file stays in the spool, and the next
 pass retries it.
 
-`~/bin/uploader.py`:
+`$VMS_HOME/adapter/bin/uploader.py`:
 
 ```python
 import boto3, os, time, hashlib
@@ -1825,7 +2735,7 @@ gst-launch-1.0 -v \
   v4l2src device="$CAM" ! image/jpeg,width=1280,height=720,framerate=30/1 ! \
     jpegdec ! videoconvert ! video/x-raw,format=I420 ! \
     v4l2h264enc extra-controls="controls,video_bitrate=1500000,h264_i_frame_period=60,repeat_sequence_header=1" ! \
-    video/x-h264,level=(string)4 ! h264parse config-interval=-1 ! queue ! kvs.video_0 \
+    "video/x-h264,level=(string)4" ! h264parse config-interval=-1 ! queue ! kvs.video_0 \
   alsasrc device=hw:CARD=CAM310 ! audioconvert ! audioresample ! \
     audio/x-raw,rate=48000,channels=2 ! avenc_aac bitrate=64000 ! aacparse ! queue ! kvs.audio_0 \
   kvssink name=kvs stream-name="cam-01" aws-region="eu-central-1" \
