@@ -1,0 +1,9 @@
+{
+  "sql": "SELECT * FROM 'adapter/+/event'",
+  "description": "Trigger clip-to-s3 Lambda on any adapter event message",
+  "actions": [{
+    "lambda": {
+      "functionArn": "arn:aws:lambda:eu-central-1:596633517506:function:clip-to-s3"
+    }
+  }]
+}

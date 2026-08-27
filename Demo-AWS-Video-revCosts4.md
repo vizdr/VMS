@@ -3069,3 +3069,90 @@ What survives, and is sufficient:
 Network panel, record exactly 60 seconds, then divide transferred bytes by the number of
 tiles actually streaming (count distinct part URLs, not the camera list). Filtering on
 `_part` isolates media from playlist and preflight traffic.
+
+---
+
+## 20. Appendix C — Storage tiers: KVS Hot vs Warm vs S3 "Cold"
+
+§9 opens with "the hot-tier/cold-tier split from the KVS discussion, implemented" — this
+appendix is that discussion, spelled out, since it's assumed knowledge at that point
+rather than explained there. Numbers below are from `COSTS.md` §2 and §9.
+
+### 20.1 KVS Hot Tier — what this project actually stores video in
+
+The only KVS storage tier this pipeline uses (`cam-01`, 24h retention). Three separate
+cost dimensions:
+
+| Dimension | Rate | When it's charged |
+|---|---|---|
+| Ingest | $0.0085/GB | every frame `kvssink` pushes (§5–§6) |
+| Storage | $0.023/GB-month | continuously, for whatever's inside the retention window |
+| Consumption via HLS | $0.0119/GB | every second anyone watches (§8) |
+
+"Hot" because it's built for **live, low-latency access** — sub-10s glass-to-glass,
+random-access seek within the retention window, no minimum retention (set
+`--data-retention-in-hours 24` in §3, and that's exactly what you pay for). The tradeoff:
+the same bytes are billed **three separate times** — in, held, and read. Fine for 24
+hours of live footage; expensive fast for anything kept longer, which is the entire
+reason §9 and §17 exist.
+
+### 20.2 KVS Warm Tier — a real feature this project deliberately doesn't use
+
+Excluded from the cost model on purpose (`COSTS.md` §9), not an oversight:
+
+- Priced **per 1,000 fragments persisted**, not per GB
+- **30-day minimum retention**, billed regardless of when you actually delete
+
+The minimum is exactly why it doesn't fit here: this stream's retention is 24 hours.
+Warm tier would apply a 30-day billing floor to data that's supposed to be gone in one —
+paying for a month of storage on a fraction of a day's data. It only becomes the right
+tool once you're holding **weeks-to-months of footage inside KVS itself**, which this
+architecture deliberately avoids — that job belongs to S3 instead (§20.3).
+
+### 20.3 S3 as the "Cold Tier" — not a KVS feature, a different service
+
+There's no literal "KVS Cold Tier" — KVS's own ladder stops at Warm. "Cold tier" here
+(and in §17's migration-path table) is architectural shorthand for: once footage matters
+long-term, get it **out of KVS and into S3**, where the economics invert:
+
+| | KVS | S3 Standard |
+|---|---|---|
+| Ingest | $0.0085/GB | **free** |
+| Storage | $0.023/GB-month | $0.023/GB-month — same rate |
+| Read | $0.0119/GB (HLS) | $0.0004 / 1,000 GET requests — negligible at this scale |
+
+Storage cost is identical between the two. The difference is entirely that KVS charges
+for the privilege of getting data in and reading it back out; S3 doesn't (egress to the
+internet is the same ~$0.09/GB either way, dominated by transfer, not by which storage
+service is behind it).
+
+### 20.4 How §9 actually wires the three together
+
+Not a hypothetical — this is the real flow §9 implements:
+
+1. Camera → `kvssink` → **KVS hot tier** (§5–§6) — live viewing happens here (§8)
+2. An event fires → `clip-to-s3` Lambda (§9.2) calls `GetClip`
+   (`FragmentSelectorType: PRODUCER_TIMESTAMP`) to pull a ~12–33 second window **out of**
+   KVS
+3. The clip lands in **S3 Standard** (§9.1) — durable, cheap to keep, no further KVS
+   charges accrue on it from this point on
+4. The bucket's lifecycle rule tiers it down again, *inside* S3:
+   **Standard → Standard-IA at 30 days → Deep Archive at 90 days** — a second, fully
+   independent cold-tiering step for clips nobody's looked at in a while
+
+Three tiers in practice, not two: KVS hot (live, expensive, short-lived) → S3 Standard
+(the actual "cold" export target — cheap, durable) → S3 IA/Deep Archive (colder still,
+for aging evidence). KVS Warm Tier (§20.2) would sit *between* the first two only if this
+project ever needed weeks of continuous **KVS-native** retention — it doesn't, because S3
+does that job for less.
+
+### 20.5 §9 vs §17 — same idea, different scope
+
+§9 applies this pattern to **short event clips** (seconds, triggered, low volume). §17
+applies the identical idea to the **entire continuous archive** (24/7, unbounded volume) —
+because at that scale, the KVS ingest charge alone (§1.2's arithmetic: $4.13/month per
+camera at continuous 24/7 vs $0.00 ingress to S3) dominates the bill regardless of what
+happens to storage or reads. §9 is the small, safe version of the argument; §17 is the
+full one. Neither replaces KVS entirely — both keep it for what it's actually good at
+(live, low-latency, random-seek access), and route only what benefits from S3's
+economics (durable, cheap, long-lived, sequential archive) away from it.

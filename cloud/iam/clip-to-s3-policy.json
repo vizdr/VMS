@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["kinesisvideo:GetDataEndpoint", "kinesisvideo:GetClip"],
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/1787244081283"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::vms-demo-evidence-596633517506/clips/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "dynamodb:PutItem",
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/clips"
+    }
+  ]
+}

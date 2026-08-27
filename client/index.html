@@ -18,6 +18,27 @@
     text-align: center; padding: 1.5rem; box-sizing: border-box; font-size: 1rem;
   }
   #overlay.hidden { display: none; }
+
+  #clips { margin-top: 2rem; }
+  #clipsList { list-style: none; padding: 0; }
+  #clipsList li {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.5rem 0; border-bottom: 1px solid #eee;
+  }
+  .tier-badge {
+    font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 1rem;
+    color: #fff; white-space: nowrap;
+  }
+  .tier-STANDARD { background: #2a7d2a; }        /* readable now, no wait */
+  .tier-STANDARD_IA { background: #b8860b; }      /* readable now, slightly slower/costlier */
+  .tier-DEEP_ARCHIVE, .tier-GLACIER { background: #444; }   /* needs a restore request first */
+  .tier-UNKNOWN { background: #999; }
+  .clip-meta { flex: 1; font-size: 0.9rem; }
+  .clip-labels { color: #888; font-size: 0.8rem; }
+  .clip-duration { color: #888; font-size: 0.85rem; }
+  #clipPlayerWrap { margin-top: 1rem; display: none; }
+  #clipPlayer { width: 100%; background: #000; }
+  #clipStatus { font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
 </style>
 </head>
 <body>
@@ -41,6 +62,33 @@
     <button onclick="load()">Reload player</button>
   </p>
   <div id="status"></div>
+
+  <p>
+    <button id="recordBtn" onclick="toggleRecording()">● Start Recording</button>
+    <span id="recordStatus" style="color:#888; font-size:0.85rem"></span>
+  </p>
+
+  <div id="clips">
+    <h3>Evidence clips
+      <button onclick="loadClips()" style="font-size:0.8rem">Refresh</button>
+    </h3>
+    <p style="color:#888; font-size:0.85rem">
+      Badge shows each clip's current tier. Tiers change automatically with age
+      (§9.1/§20.1) -- Standard → Standard-IA at 30 days → Deep Archive at 90 days -- or
+      pick a tier below and press Apply to change one immediately.
+      <span class="tier-badge tier-STANDARD">Standard</span> /
+      <span class="tier-badge tier-STANDARD_IA">Standard-IA</span> play instantly.
+      Moving <em>into</em> <span class="tier-badge tier-DEEP_ARCHIVE">Deep Archive</span>
+      is instant too; moving back <em>out</em> needs a restore first (press Play,
+      wait ~12 hours, then Apply again).
+    </p>
+    <ul id="clipsList"></ul>
+    <div id="clipPlayerWrap">
+      <video id="clipPlayer" controls muted></video>
+      <p><button onclick="closeClipPlayer()">Stop &amp; close player</button></p>
+      <div id="clipStatus"></div>
+    </div>
+  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
@@ -101,6 +149,7 @@ async function login() {
     idToken = data.AuthenticationResult.IdToken;
     document.getElementById("login").style.display = "none";
     document.getElementById("app").style.display = "block";
+    loadClips();
   } catch (e) {
     errorEl.textContent = "Network error: " + e.message;
   }
@@ -183,6 +232,214 @@ async function cmd(action) {
     setStatus("error: " + e.message);
     showOverlay("Network error sending " + action + ".\n\nPress Start to try again.");
   }
+}
+
+let recording = false;
+let recordingStartTs = null;
+let recordingTimer = null;
+
+function toggleRecording() {
+  recording ? stopRecording() : startRecording();
+}
+
+function startRecording() {
+  recording = true;
+  recordingStartTs = new Date();   // browser wall clock -- record-clip pads +/-2s
+                                    // server-side to absorb clock skew against the
+                                    // camera's own PRODUCER_TIMESTAMP
+  const btn = document.getElementById("recordBtn");
+  btn.textContent = "■ Stop Recording";
+  btn.style.background = "#c0392b";
+  btn.style.color = "#fff";
+
+  const statusEl = document.getElementById("recordStatus");
+  recordingTimer = setInterval(() => {
+    const secs = Math.floor((new Date() - recordingStartTs) / 1000);
+    statusEl.textContent = `Recording… ${secs}s`;
+  }, 1000);
+}
+
+async function stopRecording() {
+  recording = false;
+  clearInterval(recordingTimer);
+  const endTs = new Date();
+  const btn = document.getElementById("recordBtn");
+  const statusEl = document.getElementById("recordStatus");
+  btn.textContent = "● Start Recording";
+  btn.style.background = "";
+  btn.style.color = "";
+  statusEl.textContent = "Saving recording…";
+
+  try {
+    const r = await fetch(`${API}/clips/record`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startTs: recordingStartTs.toISOString(),
+        endTs: endTs.toISOString(),
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      statusEl.textContent = "Error saving recording: " + (data.error || r.status);
+      return;
+    }
+    statusEl.textContent = "Recording saved.";
+    loadClips();   // new clip appears at the top immediately
+  } catch (e) {
+    statusEl.textContent = "Network error saving recording: " + e.message;
+  }
+}
+
+const TIER_LABEL = {
+  STANDARD: "Standard", STANDARD_IA: "Standard-IA",
+  DEEP_ARCHIVE: "Deep Archive", GLACIER: "Glacier", UNKNOWN: "Unknown",
+};
+
+async function loadClips() {
+  const list = document.getElementById("clipsList");
+  list.innerHTML = "<li>Loading…</li>";
+  try {
+    const r = await fetch(`${API}/clips`, { headers: { Authorization: idToken } });
+    const data = await r.json();
+    if (!r.ok) { list.innerHTML = `<li>Error: ${data.error || r.status}</li>`; return; }
+
+    if (data.clips.length === 0) { list.innerHTML = "<li>No clips yet.</li>"; return; }
+
+    list.innerHTML = "";
+    for (const clip of data.clips) {
+      const li = document.createElement("li");
+      const when = new Date(clip.startTs).toLocaleString();
+      const tierClass = "tier-" + clip.tier;
+      const tierText = TIER_LABEL[clip.tier] || clip.tier;
+      const restoreNote = clip.restoring ? " (restoring…)" : "";
+      const duration = clip.durationSec != null ? `${clip.durationSec} sec.` : "duration unknown";
+      li.innerHTML = `
+        <span class="tier-badge ${tierClass}">${tierText}${restoreNote}</span>
+        <span class="clip-meta">${when}
+          <span class="clip-duration">· ${duration}</span>
+          <span class="clip-labels">${(clip.labels || []).join(", ")}</span>
+        </span>
+        <select class="tier-select">
+          <option value="STANDARD">Standard</option>
+          <option value="STANDARD_IA">Standard-IA</option>
+          <option value="DEEP_ARCHIVE">Deep Archive</option>
+        </select>
+        <button class="tier-apply-btn">Apply</button>
+        <button class="play-btn">Play</button>
+        <button class="delete-btn" style="background:#c0392b; color:#fff">Delete</button>
+        <span class="tier-apply-status" style="font-size:0.8rem; color:#888"></span>`;
+      li.querySelector(".tier-select").value =
+        (clip.tier === "GLACIER" ? "DEEP_ARCHIVE" : clip.tier) || "STANDARD";
+      li.querySelector(".tier-apply-btn").onclick =
+        () => setClipTier(clip.s3Key, li.querySelector(".tier-select").value, li);
+      li.querySelector(".delete-btn").onclick =
+        () => deleteClip(clip.s3Key, clip.startTs, when, li);
+      li.querySelector(".play-btn").onclick = () => playClip(clip.s3Key);
+      list.appendChild(li);
+    }
+  } catch (e) {
+    list.innerHTML = `<li>Error: ${e.message}</li>`;
+  }
+}
+
+async function setClipTier(s3Key, tier, li) {
+  const statusEl = li.querySelector(".tier-apply-status");
+  statusEl.textContent = "Applying…";
+  try {
+    const r = await fetch(`${API}/clips/tier`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ s3Key, tier }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      // 409 specifically means: archived and not yet restored -- see set_clip_tier.py
+      statusEl.textContent = data.error || `Error (${r.status})`;
+      return;
+    }
+    statusEl.textContent = "Done.";
+    loadClips();   // refresh badges to reflect the real, now-changed tier
+  } catch (e) {
+    statusEl.textContent = "Network error: " + e.message;
+  }
+}
+
+async function deleteClip(s3Key, startTs, when, li) {
+  if (!confirm(`Delete the clip from ${when}?\n\nThis cannot be undone.`)) return;
+
+  const statusEl = li.querySelector(".tier-apply-status");
+  statusEl.textContent = "Deleting…";
+  try {
+    const r = await fetch(`${API}/clips/delete`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ s3Key, startTs }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      statusEl.textContent = "Error: " + (data.error || r.status);
+      return;
+    }
+    closeClipPlayer();   // in case the deleted clip is the one currently open/playing
+    li.remove();          // immediate feedback, no need to wait for a full loadClips() round trip
+    if (document.getElementById("clipsList").children.length === 0) {
+      document.getElementById("clipsList").innerHTML = "<li>No clips yet.</li>";
+    }
+  } catch (e) {
+    statusEl.textContent = "Network error: " + e.message;
+  }
+}
+
+async function playClip(s3Key) {
+  const wrap = document.getElementById("clipPlayerWrap");
+  const player = document.getElementById("clipPlayer");
+  const statusEl = document.getElementById("clipStatus");
+  wrap.style.display = "block";
+  player.pause(); player.removeAttribute("src"); player.load();
+  statusEl.textContent = "Loading clip…";
+  wrap.scrollIntoView({ behavior: "smooth" });
+
+  try {
+    const r = await fetch(`${API}/clips/play`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ s3Key }),
+    });
+    const data = await r.json();
+    if (!r.ok && r.status !== 202) {
+      statusEl.textContent = "Error: " + (data.error || r.status);
+      return;
+    }
+    if (data.status === "ready") {
+      player.src = data.url;          // plain MP4 -- no hls.js needed, native <video> plays it
+      statusEl.textContent = "";
+      player.play().catch(err => {
+        // Autoplay can still be blocked by browser policy even when muted, on some
+        // mobile browsers in particular -- the video is loaded and ready either way,
+        // this just means the user has to press the visible native play button once.
+        statusEl.textContent = "Loaded -- press the player's play button to watch.";
+      });
+    } else if (data.status === "restore_requested") {
+      statusEl.textContent = `This clip is in Deep Archive and wasn't readable directly. ` +
+        `A restore has been requested -- check back in about ${data.eta_hours} hours ` +
+        `and press Play again.`;
+    } else if (data.status === "restoring") {
+      statusEl.textContent = `Restore already in progress -- check back in about ` +
+        `${data.eta_hours} hours and press Play again.`;
+    }
+  } catch (e) {
+    statusEl.textContent = "Network error: " + e.message;
+  }
+}
+
+function closeClipPlayer() {
+  const player = document.getElementById("clipPlayer");
+  player.pause();
+  player.removeAttribute("src");
+  player.load();   // actually releases the decoder/network resources, not just visually blank
+  document.getElementById("clipStatus").textContent = "";
+  document.getElementById("clipPlayerWrap").style.display = "none";
 }
 
 document.getElementById("login").style.display = "block";
