@@ -4,7 +4,7 @@
     {
       "Effect": "Allow",
       "Action": ["kinesisvideo:GetDataEndpoint", "kinesisvideo:GetClip"],
-      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/1787244081283"
+      "Resource": ["arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/1787244081283", "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-02/1788026766462"]
     },
     {
       "Effect": "Allow",

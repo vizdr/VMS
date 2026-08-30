@@ -874,6 +874,16 @@ paths:
   # my_camera:
   #   source: rtsp://my_camera
 
+  # Real ONVIF IPC (IPC-Y4TR28A-C / YMA42P_C2_WM701_AF) at 192.168.178.67, §16.3(a).
+  # Genuine passthrough -- MediaMTX pulls the camera's own H.264 sub-stream and re-serves
+  # it at rtsp://127.0.0.1:8554/cam02, no GStreamer capture/encode pipeline needed at all
+  # (unlike cam-01's PW310 transcode chain in §2.5). Using the 640x360/500kbps sub-stream,
+  # not the 2560x1440/3000kbps main stream -- matches §2.7's bitrate-consciousness; the
+  # main stream's URL differs only by /stream0 instead of /stream1 if higher res is wanted.
+  cam02:
+    source: rtsp://192.168.178.67:554/stream1?username=admin&password=E10ADC3949BA59ABBE56E057F20F883E
+    sourceProtocol: tcp
+
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
   all_others:

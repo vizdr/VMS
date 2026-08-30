@@ -1809,6 +1809,22 @@ Report CPU %, RSS, and SoC temperature for each. Hardware encode should sit well
 `get_throttled` — if the Pi thermally throttles during the software run, that is itself a
 finding worth writing down.
 
+**Measured** (Pi 4B, real `cam-01`/`cam-02` channels, `ps -p <pid> -o %cpu` sampled over
+10 s each — `pidstat`/`sysstat` isn't installed on this image by default, and `ps`'s
+decaying-average `%cpu` on a long-lived systemd-managed process is a fine substitute for a
+single-process comparison like this):
+
+| Pipeline | Decode | Convert | Encode | CPU |
+|---|---|---|---|---|
+| `cam-01`, software decode/convert | SW `jpegdec` | SW `videoconvert` | HW `v4l2h264enc` | ~28% |
+| `cam-01`, all-hardware | HW `v4l2jpegdec` | HW `v4l2convert` | HW `v4l2h264enc` | ~13% |
+| `cam-02`, ONVIF passthrough | — | — | — (no transcode) | ~3.5% |
+
+`vcgencmd get_throttled` → `0x0` throughout, temp ~57°C with both channels running — this
+Pi never got near its thermal limit even before the hardware-decode fix; the ~28% state
+was a CPU-cycles problem, not a heat problem. Full writeup and the `v4l2jpegdec`/
+`v4l2convert` fix: §16.3(b).
+
 Report CPU % and RSS per stream, then extrapolate: how many cameras fit on one Pi 4B
 before the uplink or the CPU runs out? For a 10 Mbps domestic uplink at 1 Mbps per
 stream, the answer is bandwidth-bound long before it is CPU-bound — and that is the
@@ -2000,16 +2016,72 @@ software.
 
 ### 16.3 The four worth actually doing
 
-**(a) Multi-channel.** Move from one hardcoded pipeline to a JSON camera list and one
-`gst` process per channel, each with its own KVS stream and systemd unit template
-(`kvs-cam@.service`). Full methodology in **§16.6**. Then measure where a Pi 4B saturates — and note that it saturates
-much sooner than the product because you transcode and they pass through. Publishing that
-number, with the reason, is a stronger result than quietly matching their channel count.
+**(a) Multi-channel — done.** Two real channels running concurrently, not synthetic
+loopback sources: `cam-01` (PW310 USB, transcoded) and `cam-02` (a real ONVIF/RTSP IPC
+discovered via WS-Discovery, §16.3b). Each has its own KVS stream, systemd unit
+(`kvs-cam01.service`/`kvs-cam02.service` — note no hyphen before the digit, unlike the
+`cam-01`/`cam-02` identifier used everywhere else; a naming mismatch that once made
+`agent.py` silently no-op on `cam-02` commands, see below), an allow-list entry across all
+four API routes (`/hls`, `/cmd`, `/clips`, `/clips/record`), and its own panel in the
+browser client with independent live view, recording, and clip history. This is not the
+N-channel saturation experiment in §16.6 — that's still open — but it proves the
+per-channel plumbing (naming convention, IAM scoping, MQTT routing) holds up with a second
+*real* source, not just a second config entry.
 
-**(b) Pass-through instead of transcode.** Borrow or buy any cheap ONVIF/RTSP camera and
-run a second profile with no `jpegdec`/`v4l2h264enc` in the chain. CPU per channel drops
-by an order of magnitude. Having both paths measured side by side is the clearest
-demonstration in the whole project that you understand where the cost sits.
+One bug worth keeping as a cautionary note: `agent.py` built the systemd unit name as
+`f"kvs-{camera}.service"`, which for `camera="cam-02"` produced `kvs-cam-02.service` — a
+unit that doesn't exist. `systemctl start`/`stop` against an unknown unit exits non-zero,
+but the code called it with `check=False`, so the failure was swallowed and the API
+returned success while doing nothing. Caught by checking `journalctl` and seeing the wrong
+unit name in the logged `sudo` command, not by any error surfacing on its own — a reminder
+that `check=False` on a command whose success you're about to report to a caller is worth
+a second look.
+
+**(b) Pass-through instead of transcode — done, measured twice.** `cam-02`'s ONVIF camera
+streams genuine H.264 over RTSP, so its pipeline is pure passthrough (`rtspsrc !
+rtph264depay ! h264parse ! kvssink`, no encode stage at all) — measured **~3.5% CPU**.
+`cam-01` must transcode (USB webcam, MJPG only) and went through two measured states:
+
+| `cam-01` pipeline | JPEG decode | colorspace convert | H.264 encode | CPU |
+|---|---|---|---|---|
+| original | software (`jpegdec`) | software (`videoconvert`) | hardware (`v4l2h264enc`) | ~28% |
+| current | hardware (`v4l2jpegdec`) | hardware (`v4l2convert`) | hardware (`v4l2h264enc`) | ~13% |
+
+The fix in both rows comes from the same misconception: `v4l2h264enc` was already
+hardware-accelerated from the start, which made it easy to assume the pipeline was
+therefore "using the hardware." It wasn't — the BCM2711's `bcm2835-codec` block exposes
+JPEG decode (`/dev/video10`) and the ISP's colorspace conversion (`/dev/video13`) as
+*separate* V4L2 M2M devices from the encoder (`/dev/video11`), and GStreamer's
+`v4l2jpegdec`/`v4l2convert` elements only reach them if you ask for them by name instead
+of the generic software `jpegdec`/`videoconvert`. `gst-inspect-1.0 | grep v4l2` is how to
+find out these elements exist at all. Even fully hardware-accelerated, `cam-01` still
+costs ~4x `cam-02`'s CPU — passthrough has no decode/convert/encode stage to accelerate in
+the first place, which is exactly the point this section is making, now with real numbers
+instead of an order-of-magnitude estimate. No thermal throttling at any point in either
+state (`vcgencmd get_throttled` → `0x0`, temp ~57°C with both channels running) — CPU, not
+heat, was always the constraint.
+
+**Bonus, not on the original list: ONVIF device control beyond streaming.** Wiring in a
+real ONVIF camera for (a)/(b) surfaced a control-plane opportunity the guide didn't
+originally scope. The camera's Imaging service (`GetImagingSettings`/`SetImagingSettings`/
+`GetOptions`) exposes `IrCutFilter` (`AUTO`/`ON`/`OFF`) alongside exposure, white balance,
+etc. — the same day/night switch driving the camera's automatic IR illumination. Added as
+a third MQTT action (`ir`, alongside `start`/`stop`) on the same `adapter/adapter-01/cmd`
+topic and `/cmd` Lambda, routed to a new `set_ir_mode()` in `agent.py` (via
+`onvif-zeep-async`, already a dependency from WS-Discovery), and surfaced as three buttons
+on `cam-02`'s client panel — camera-gated, since `cam-01` is a plain USB webcam with no
+ONVIF/IR hardware at all. Two findings worth keeping:
+
+- The WSDL's `Extension` block leaks OEM lineage even when the response body doesn't:
+  this camera's firmware namespaces itself `xmlns:tnshik="http://www.hikvision.com/2011/
+  event/topics"`, i.e. it's a Hikvision-derived rebrand. That normally means a richer
+  proprietary ISAPI is available (`/ISAPI/Image/channels/1/supplementLight` — independent
+  IR-LED control with brightness/schedule, distinct from the IR-cut filter) — worth
+  checking for on any "generic ONVIF" camera before assuming standard ONVIF is the ceiling.
+- On this particular rebrand, ISAPI 404s — disabled or moved by the OEM. Standard ONVIF's
+  `IrCutFilter` was the only lever that actually worked. Worth stating plainly: vendor
+  extensions are opportunistic, not guaranteed, so the standards-based fallback is worth
+  building and shipping first, with the richer vendor path as a strict bonus if reachable.
 
 **(c) Durable outage buffering.** This is the feature the product markets hardest and the
 one your prototype most conspicuously lacks. Minimum viable version: `splitmuxsink`

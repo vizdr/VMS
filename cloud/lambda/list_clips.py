@@ -2,16 +2,22 @@ import boto3, os, json
 
 REGION = os.environ["AWS_REGION"]
 BUCKET = os.environ["BUCKET"]
-CAMERA = os.environ.get("STREAM_NAME", "cam-01")
+DEFAULT_CAMERA = os.environ.get("STREAM_NAME", "cam-01")
+ALLOWED_CAMERAS = {"cam-01", "cam-02"}
 
 CORS = {"Access-Control-Allow-Origin": "*"}
 
 def lambda_handler(event, context):
     try:
+        camera = (event.get("queryStringParameters") or {}).get("camera", DEFAULT_CAMERA)
+        if camera not in ALLOWED_CAMERAS:
+            return {"statusCode": 400, "headers": CORS,
+                     "body": json.dumps({"error": f"unknown camera '{camera}'"})}
+
         table = boto3.resource("dynamodb", region_name=REGION).Table("clips")
         # newest first -- ScanIndexForward=False on Query (not Scan) needs the sort key
         resp = table.query(
-            KeyConditionExpression=boto3.dynamodb.conditions.Key("cameraId").eq(CAMERA),
+            KeyConditionExpression=boto3.dynamodb.conditions.Key("cameraId").eq(camera),
             ScanIndexForward=False,
             Limit=50,
         )

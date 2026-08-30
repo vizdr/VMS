@@ -8,6 +8,9 @@
       "kinesisvideo:PutMedia",
       "kinesisvideo:TagStream"
     ],
-    "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/*"
+    "Resource": [
+      "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/*",
+      "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-02/*"
+    ]
   }]
 }
