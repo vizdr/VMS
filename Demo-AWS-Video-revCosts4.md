@@ -2006,13 +2006,110 @@ software.
 | Recording policy | motion-triggered by default | continuous | **M** — motion detect + event upload |
 | Outage buffering | 32 GB USB, auto-backfill | RAM only (`storage-size`) | **M** — disk-backed queue |
 | Fleet updates | weekly remote push | none | **M** — IoT Jobs + A/B partitions |
-| Camera discovery | hundreds of brands | hardcoded URL | **M** — ONVIF WS-Discovery |
+| Camera discovery | hundreds of brands, auto-onboarded | ONVIF WS-Discovery + a local admin GUI (§16.2.1) do discover → register → control end-to-end | **done** (a camera's IP changing after onboarding still needs a manual re-scan — **S** if self-healing matters) |
 | Local HDMI display | up to 4K live wall | none | **S** — a second GStreamer sink |
 | PTZ / talkdown | yes | command topic only | **M** — ONVIF PTZ, reverse audio |
 | Health monitoring | per-camera status | none | **S** — shadow reporting |
 | Network isolation | dual NIC (Enterprise) | single LAN | **S** — second interface + routes |
 | Retention tiers | 2 days to 10 years | 24 h | already covered by §9 S3 path |
 | AI analytics | Smart Motion, ALPR, people counting, PPE | none | **L** — out of MVP scope |
+
+#### 16.2.1 How WS-Discovery actually works here
+
+`cam-02` was originally found by running WS-Discovery *ad hoc*, once, interactively — not
+by any script that lived in the repo, which is why the gap-analysis row above once called
+it "hardcoded URL" even after a real ONVIF camera was already streaming: the discovery
+step happened, but nothing durable came out of it. That gap is now closed twice over: the
+scan/enrich logic lives in `adapter/onvif_discovery.py`, a shared module with no UI
+opinion of its own, used by both `adapter/bin/discover-onvif.py` (the CLI, kept for
+scripting/debugging) and `adapter/onvif-admin/` (a local web app that turns a scan result
+into a fully working, controllable camera with no hand-editing of any file).
+
+**The protocol, briefly.** WS-Discovery has no central directory — it's a UDP multicast
+convention every ONVIF device implements. A client sends a `Probe` message to
+`239.255.255.250:3702` asking for a specific device type (this project's script asks for
+`NetworkVideoTransmitter`, the ONVIF type for a camera/encoder, to avoid getting answers
+from every other WS-Discovery-capable box on the LAN — printers and NAS units included).
+Any matching device on the *same broadcast domain* replies with a `ProbeMatch` containing
+its `XAddrs` (the URL of its ONVIF `device_service`, e.g.
+`http://192.168.178.67/onvif/device_service`) and a set of `Scopes` — free-text URNs the
+vendor fills in with hardware model, manufacturer, location, supported profiles. It's
+multicast, so it does not cross routers/VLANs by design — a device on a different subnet
+than the Pi will never answer, no matter the timeout.
+
+That `ProbeMatch` is the *entire* payload of WS-Discovery — an address and some tags, not
+a stream URL and not a login. Getting an actual RTSP URL out of a discovered device always
+needs a second, authenticated step against its Media service (`GetProfiles` then
+`GetStreamUri`), which is why `discover-onvif.py` is two stages: an anonymous multicast
+scan, then an optional per-device ONVIF login (`--user`/`--password`) that calls
+`GetDeviceInformation` and `GetStreamUri` to turn each bare match into something you could
+actually paste into `mediamtx.yml`. Real output against this project's camera:
+
+```
+$ python3 adapter/bin/discover-onvif.py --user admin --password ***
+Probing 239.255.255.250:3702 for NetworkVideoTransmitter devices (5s)...
+
+Found 1 device(s):
+
+  XAddrs:  http://192.168.178.67/onvif/device_service
+  Scopes:  ['onvif://www.onvif.org/type/Network_Video_Transmitter', ...,
+            'onvif://www.onvif.org/hardware/YMA42P_C2_WM701', ...]
+  Device:  A_ONVIF_CAMERA YMA42P_C2_WM701_AF (fw V3.3.2.1 build 2024-12-26)
+  Profile: MainStream
+  Stream:  rtsp://192.168.178.67:554/stream0?username=admin&password=...
+```
+
+Matches what onboarding found manually.
+
+**Why a separate local app, not a button in the browser client.** WS-Discovery is UDP
+multicast — it only works from a process on the same LAN segment as the cameras. The
+cloud client (`client/index.html`) is served from S3 and reached over the internet
+through CloudFront/API Gateway; it has no route to the LAN, and neither does Lambda. So
+the discovery *and* registration half of onboarding has to run somewhere on the Pi
+itself, which is what `adapter/onvif-admin/` is: a small Flask app, LAN-only, no login
+(the same trust boundary MediaMTX's own unauthenticated local RTSP already has), reached
+at `http://<pi-ip>:8080`. It does three things the cloud client structurally can't:
+
+- **Discover** — the scan/enrich flow above, exposed as a "Scan LAN" button.
+- **Register** — turns a scan result into a fully working camera with one click: adds the
+  MediaMTX path *live* via MediaMTX's own HTTP control API (`POST
+  /v3/config/paths/add/{name}` — no YAML edit, no restart, so the other cameras already
+  streaming are undisturbed), provisions a systemd unit through the templated
+  `kvs-cam@.service` (§16.6's design, finally implemented for real rather than only
+  described) via a small input-validated script (`provision-camera.sh`) rather than the
+  web app writing under `/etc` itself, creates the KVS stream, and writes a row to a new
+  `cameras` DynamoDB table. That table — not a hardcoded dict — is now what `agent.py`
+  and every camera-aware Lambda read to know which cameras exist and what they support;
+  a camera registered through the GUI works over the cloud MQTT control path immediately,
+  with no code edit anywhere. All of this borrows the adapter's existing X.509 device
+  identity for its AWS calls (the same IoT role-alias credentials `kvssink` already uses)
+  rather than holding a second, separate credential.
+- **Control** — Start/Stop (toggles the KVS push to AWS) and IR mode, per camera, plus a
+  live "KVS push" status column that polls `systemctl is-active` directly rather than
+  trusting a button click's own success response, and a local live-video preview sourced
+  from MediaMTX's own HLS output (no cloud round trip) so you can actually see what a
+  camera is pointed at before deciding to register it.
+
+**Re-scanning an already-registered camera** is handled explicitly rather than left to
+either silently duplicate the entry or hard-fail: the GUI cross-checks scan results
+against the registry by ONVIF host and, for a match, offers "Re-register" instead of
+"Register" — which updates the MediaMTX path's source and the registry row (credentials,
+stream URI) but deliberately does **not** touch systemd, since `cam-01`/`cam-02` predate
+the `kvs-cam@.service` template and re-running the provisioning script against them would
+start a second, conflicting producer rather than updating the first.
+
+**What's still genuinely missing**, and the honest remainder of the gap-analysis row: none
+of this is triggered automatically. If a camera's IP changes (no DHCP reservation), its
+registry entry and MediaMTX path both go stale until someone notices the feed died,
+opens the admin GUI, rescans, and clicks Re-register — there's no background health
+check or scope-based re-matching that would catch and fix this on its own.
+
+Credential storage is deliberately phased, not fully solved: today the registry stores
+ONVIF/RTSP passwords as a plain DynamoDB attribute (Phase 1), with SSM Parameter Store
+`SecureString` (a `credentialRef` in place of the raw password, decrypted only by the
+adapter's own device identity) as a planned Phase 2 that hasn't been built yet — the
+schema and IAM shape were chosen so that swap is a small, localized change rather than a
+redesign when it happens.
 
 ### 16.3 The four worth actually doing
 

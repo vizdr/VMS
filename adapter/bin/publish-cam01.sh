@@ -7,6 +7,6 @@ gst-launch-1.0 -v \
   v4l2jpegdec ! videorate drop-only=true ! video/x-raw,framerate=15/1 ! \
   v4l2convert ! video/x-raw,format=I420 ! \
   v4l2h264enc extra-controls="controls,video_bitrate=1000000,h264_i_frame_period=30,repeat_sequence_header=1" ! \
-  "video/x-h264,level=(string)4" ! \
+  "video/x-h264,level=(string)4,profile=(string)high" ! \
   h264parse config-interval=-1 ! \
   rtspclientsink location=rtsp://127.0.0.1:8554/cam01 protocols=tcp

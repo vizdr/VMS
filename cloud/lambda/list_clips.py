@@ -3,14 +3,14 @@ import boto3, os, json
 REGION = os.environ["AWS_REGION"]
 BUCKET = os.environ["BUCKET"]
 DEFAULT_CAMERA = os.environ.get("STREAM_NAME", "cam-01")
-ALLOWED_CAMERAS = {"cam-01", "cam-02"}
 
 CORS = {"Access-Control-Allow-Origin": "*"}
+cameras_table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
 
 def lambda_handler(event, context):
     try:
         camera = (event.get("queryStringParameters") or {}).get("camera", DEFAULT_CAMERA)
-        if camera not in ALLOWED_CAMERAS:
+        if "Item" not in cameras_table.get_item(Key={"cameraId": camera}):
             return {"statusCode": 400, "headers": CORS,
                      "body": json.dumps({"error": f"unknown camera '{camera}'"})}
 

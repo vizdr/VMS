@@ -144,9 +144,16 @@ authJWTAudience:
 # Global settings -> Control API
 
 # Enable the control API server, which allows to control the server.
-api: false
-# Address of the TCP/HTTP listener.
-apiAddress: :9997
+# Used by adapter/onvif-admin to add a newly-registered camera's path live
+# (POST /v3/config/paths/add/{name}) instead of rewriting this file and restarting the
+# process -- a restart drops every other camera's RTSP session mid-stream, which is
+# exactly the disruption a "register a new camera" action shouldn't cause to the others.
+# Bound to 127.0.0.1 below (apiAddress), so this is reachable only from the Pi itself.
+api: true
+# Address of the TCP/HTTP listener. Localhost-only -- this API can add/remove paths,
+# so it has no business being reachable from the rest of the LAN, only from
+# adapter/onvif-admin running on this same Pi.
+apiAddress: 127.0.0.1:9997
 # Enable HTTPS.
 apiEncryption: false
 # Path to the server key. This is needed only when encryption is yes.

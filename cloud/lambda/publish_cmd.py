@@ -3,11 +3,10 @@ import boto3, os, json
 REGION = os.environ["AWS_REGION"]
 THING  = os.environ.get("THING_NAME", "adapter-01")
 CMD_T  = f"adapter/{THING}/cmd"
-ALLOWED_CAMERAS = {"cam-01", "cam-02"}
 ALLOWED_IR_MODES = {"AUTO", "ON", "OFF"}
-IR_CAPABLE_CAMERAS = {"cam-02"}  # only the real ONVIF IPC has IR-cut control; cam-01 is a plain USB webcam
 
 CORS = {"Access-Control-Allow-Origin": "*"}
+cameras_table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
 
 def lambda_handler(event, context):
     # See get_hls_url.py for why every path returns through here rather than letting
@@ -22,7 +21,8 @@ def lambda_handler(event, context):
                 "headers": CORS,
                 "body": json.dumps({"error": "action must be 'start', 'stop', or 'ir'"}),
             }
-        if camera not in ALLOWED_CAMERAS:
+        cam_item = cameras_table.get_item(Key={"cameraId": camera}).get("Item")
+        if not cam_item:
             return {
                 "statusCode": 400,
                 "headers": CORS,
@@ -31,7 +31,7 @@ def lambda_handler(event, context):
 
         payload = {"action": action, "camera": camera}
         if action == "ir":
-            if camera not in IR_CAPABLE_CAMERAS:
+            if not cam_item.get("hasIrControl"):
                 return {
                     "statusCode": 400,
                     "headers": CORS,

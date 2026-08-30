@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 REGION = os.environ["AWS_REGION"]
 S3B = os.environ["BUCKET"]
 DEFAULT_STREAM = os.environ.get("STREAM_NAME", "cam-01")
-ALLOWED_STREAMS = {"cam-01", "cam-02"}  # IAM is also scoped to exactly these two ARNs
 
 CORS = {"Access-Control-Allow-Origin": "*"}
+cameras_table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
 
 # Small safety padding on both ends -- the browser's Start/Stop button presses are wall
 # clock on the *viewer's* machine, not the producer's; a couple of seconds of margin
@@ -23,7 +23,7 @@ def lambda_handler(event, context):
     try:
         body = json.loads(event.get("body") or "{}")
         stream = body.get("stream", DEFAULT_STREAM)
-        if stream not in ALLOWED_STREAMS:
+        if "Item" not in cameras_table.get_item(Key={"cameraId": stream}):
             return {"statusCode": 400, "headers": CORS,
                      "body": json.dumps({"error": f"unknown stream '{stream}'"})}
         start = datetime.fromisoformat(body["startTs"]) - PAD

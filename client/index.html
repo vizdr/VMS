@@ -75,25 +75,18 @@ const API = "https://svfvg7xh9g.execute-api.eu-central-1.amazonaws.com/prod";
 const COGNITO_REGION = "eu-central-1";
 const COGNITO_CLIENT_ID = "1r0n2cor1pgqvahfogs6cfno7s";
 
-// One entry per camera. "id" must match the KVS stream name / cameraId / systemd unit
-// suffix (kvs-cam01.service etc, see agent.py's hyphen-stripping note) used throughout
-// the backend. §16.3(a)/§16.6: one adapter identity, multiple independently-controlled
-// channels.
-const CAMERAS = [
-  { id: "cam-01", title: "cam-01 -- PW310 (USB, transcoded)",
-    subtitle: "MJPG capture -> HW decode/convert/encode on the Pi's VPU (§16.3(b)) -- ~13% CPU (was ~28% with software jpegdec/videoconvert)" },
-  { id: "cam-02", title: "cam-02 -- Real ONVIF IPC (passthrough)",
-    subtitle: "Genuine H.264 passthrough via ONVIF discovery (§16.3(a)) -- ~3.5% CPU",
-    hasIrControl: true },
-];
+// Fetched from GET /cameras (backed by the "cameras" DynamoDB registry) after login,
+// rather than hardcoded here -- a camera added through the registry shows up on next
+// login with no client redeploy. "id" matches the KVS stream name / cameraId / systemd
+// unit suffix (kvs-cam01.service etc, see agent.py's hyphen-stripping note) used
+// throughout the backend.
+let CAMERAS = [];
 
 let idToken = null;
-// Per-camera player/recording state, keyed by camera id -- replaces what used to be a
-// handful of bare global variables when this page only had one camera.
+// Per-camera player/recording state, keyed by camera id -- populated once CAMERAS is
+// fetched (see login()), since it used to be a handful of bare global variables back
+// when this page only had one hardcoded camera.
 const state = {};
-for (const cam of CAMERAS) {
-  state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null, recordingTimer: null };
-}
 
 function el(camera, base) { return document.getElementById(`${base}-${camera}`); }
 function setStatus(camera, msg) { el(camera, "status").textContent = msg; }
@@ -115,9 +108,10 @@ function teardownPlayer(camera) {
 function renderCameraPanel(cam) {
   const div = document.createElement("div");
   div.className = "camera-panel";
+  const modeLabel = cam.mode === "passthrough" ? "ONVIF, passthrough" : "USB, transcoded";
   div.innerHTML = `
-    <h2>${cam.title}</h2>
-    <p class="camera-subtitle">${cam.subtitle}</p>
+    <h2>${cam.id}</h2>
+    <p class="camera-subtitle">${modeLabel}${cam.hasIrControl ? " · IR control" : ""}</p>
     <div class="video-wrap">
       <video id="video-${cam.id}" controls autoplay muted playsinline></video>
       <div id="overlay-${cam.id}" class="overlay">Press Start to begin watching</div>
@@ -183,11 +177,23 @@ async function login() {
       return;
     }
     idToken = data.AuthenticationResult.IdToken;
+
+    const camerasDiv = document.getElementById("cameras");
+    camerasDiv.innerHTML = "<p>Loading cameras…</p>";
+    const cr = await fetch(`${API}/cameras`, { headers: { Authorization: idToken } });
+    const cdata = await cr.json();
+    if (!cr.ok) {
+      errorEl.textContent = "Could not load camera list: " + (cdata.error || cr.status);
+      return;
+    }
+    CAMERAS = cdata.cameras;
+
     document.getElementById("login").style.display = "none";
     document.getElementById("app").style.display = "block";
 
-    const camerasDiv = document.getElementById("cameras");
+    camerasDiv.innerHTML = "";
     for (const cam of CAMERAS) {
+      state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null, recordingTimer: null };
       camerasDiv.appendChild(renderCameraPanel(cam));
       loadClips(cam.id);
     }
