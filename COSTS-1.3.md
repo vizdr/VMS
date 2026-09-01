@@ -405,6 +405,41 @@ obviously correct and the gap compounds indefinitely. This is the number that ex
 the product's architecture — and note that it moved by 74 % on a single corrected input,
 which is why §10 insists on measurement over estimation.
 
+### 7.1 Delta under H.265 — the break-even moves the *other* way
+
+Intuition says a cheaper codec should make building your own pipeline pay off sooner.
+It's the reverse, and the reason is worth sitting with: H.265 erodes KVS's one structural
+weakness (per-GB ingest) far more than it erodes S3's, because S3's recording cost was
+never ingest-driven to begin with — its PUT/index lines don't move with bitrate at all
+(§6.4). Cutting bitrate therefore shrinks the *numerator* of the Delta much faster than
+the *denominator*, and the Delta itself is what §7's whole break-even calculation runs
+on.
+
+Using the same 0.9 Mbps H.264 baseline and §6.4's two HEVC scenarios, applied only to
+`cam-02`-type passthrough channels (§6.4's hardware caveat still applies — `cam-01` can't
+do this):
+
+| Scenario | KVS recording | S3 recording | Delta/camera-month | Delta/camera-year |
+|---|---|---|---|---|
+| H.264 baseline (0.9 Mbps) | $2.93 | $0.74 | $2.19 | $26.28 |
+| H.265 @ 40 % cut (0.54 Mbps) | $1.76 | $0.56 | $1.20 | $14.40 |
+| H.265 @ 50 % cut (0.45 Mbps) | $1.46 | $0.51 | $0.95 | $11.40 |
+
+Re-running the same $33 k build-cost break-even against the smaller Delta:
+
+```text
+H.265 @ 40 %:  $33,000 ÷ $1.20 ≈ 27,500 camera-months  ≈ 2,290 camera-years
+H.265 @ 50 %:  $33,000 ÷ $0.95 ≈ 34,700 camera-months  ≈ 2,890 camera-years
+```
+
+**H.265 pushes the break-even from ~1,250 to roughly 2,300–2,900 cameras run for a
+year** — nearly double. A more efficient codec doesn't just save money in absolute terms;
+it makes the *managed service* rational for longer, precisely because it attacks KVS's
+weakest line item harder than it attacks S3's. A real fleet's actual break-even sits
+between the H.264 and H.265 lines above, weighted by how many channels are
+passthrough-capable (`cam-02`-like) versus transcode-locked (`cam-01`-like) — this isn't
+a single number until the fleet's camera mix is known.
+
 ---
 
 ## 8. What the MVP actually costs to run
@@ -420,6 +455,19 @@ The prototype is not operated 24/7, so demo cost is trivial either way.
 **Cost is not the reason to implement the S3 path in the prototype.** At one camera the
 difference is cents. The reason is to demonstrate that the trade-off is understood, and
 to have built the same capability from primitives as well as from a managed service.
+
+**Delta if `cam-02`-type channels run H.265 instead.** Applying §6.4's 40–50 % cut to the
+rows above (only valid for passthrough channels — `cam-01` is hardware-locked to H.264):
+
+| Scenario | KVS cost (H.264) | KVS cost (H.265, 40–50 % cut) |
+|---|---|---|
+| Weekend testing, 6 h streaming | ~$0.05 | ~$0.025–0.03 |
+| One camera continuous, 1 month | ~$3.50 | ~$1.75–2.10 |
+| Ten channels continuous, 1 month (all passthrough) | ~$35 | ~$17.50–21 |
+
+At this scale the absolute saving is cents to a couple of dollars — same conclusion as
+above, it's not the reason to do this yet. The saving only becomes a real number at fleet
+scale, which is exactly what §7.1 works out.
 
 Set a $10 monthly budget alarm regardless (`Demo-AWS-Video.md` §1.1). The realistic
 failure mode is a `gst-launch` left running for a week, not a design error.
@@ -504,3 +552,11 @@ measured-versus-modelled in the README is worth more than either figure alone.
    both KVS ingest and viewing egress by ~40–50 % — the one lever that pays off harder on
    KVS than on S3 — but only if browser HEVC playback is solved first, which has its own
    unmodeled cost (§6.4).
+9. This is not a revision of point 6's break-even — the system as built runs H.264, and
+   ~1,250 cameras/year stands as the baseline number. It is the effect of a *hypothetical
+   codec switch*: if passthrough channels moved from H.264 to H.265, that same asymmetry
+   would cut the other way for build-vs-buy. H.265 erodes KVS's ingest penalty much faster
+   than it erodes S3's already-ingest-free cost, so *if* the fleet ran H.265, the
+   break-even would move from ~1,250 to roughly **2,300–2,900 cameras run for a year**
+   (§7.1) — a more efficient codec makes the managed service rational for *longer*, not
+   shorter, which is easy to get backwards on intuition alone.

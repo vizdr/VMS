@@ -357,6 +357,16 @@ rather than assuming — in keeping with the main doc's "measure, don't assert" 
 5. Either accept `cam-02` only plays reliably on HEVC-capable clients, or measure that gap
    explicitly across browsers/devices as its own result.
 
+### Cost implication
+
+`COSTS-1.3.md` §6.4 works the dollar side of this: switching `cam-02` to H.265 cuts KVS
+ingest and viewing egress by roughly the same 40–50 % as the bitrate reduction, since KVS
+recording cost is linear in bitrate. It also shows the saving is larger on KVS than on S3
+(S3's PUT/index costs don't scale with bitrate at all), and prices out — qualitatively,
+pending measurement — the two ways to close the browser-HEVC gap above: on-demand
+transcode at playback time, or a dual H.265-archive/H.264-live stream pair using the Pi's
+hardware HEVC decode block feeding the already-proven `v4l2h264enc` encode path.
+
 ---
 
 ## Open items
