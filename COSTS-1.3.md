@@ -45,9 +45,20 @@ more for continuous daytime traffic.
 | Live grid preview | below archive, unquantified | — | — | inferred, Appendix B §19.9 |
 | 2 MP @ 10 fps (old assumption) | 1.5 Mbps | 16.2 | 486 | *superseded* |
 | 1080p30 (reference) | 2.0 Mbps | 21.6 | 648 | typical |
+| **`cam-02` sub-stream (measured, current)** | **0.047 Mbps** | **0.51** | **15.2** | **measured, 60s stream-copy capture, §6.4** |
+| **`cam-02` main / 4MP stream (measured)** | **0.937 Mbps** | **10.1** | **303.6** | **measured, 60s stream-copy capture, §6.4** |
+| **`cam-02` main / 4MP @ 10 fps (measured, benchmarking only)** | **0.6475 Mbps** | **7.0** | **209.8** | **measured, ONVIF-forced 10fps, §3.1** |
 
 Note the corrected row against our own: **they carry 2.25× our pixel count at 90 % of our
 bitrate.** §3.1 explains why.
+
+`cam-02`'s own rows are our own measurement, not a proxy — see §6.4 for method and the
+resulting recomputation of every `cam-02`-labelled figure downstream. The reference
+product's 0.9 Mbps row above is unrelated to `cam-02` (it's Videoloft's own camera, not
+ours) and stays as the baseline for §4.3/§5's revenue-viability argument, which is about
+them, not us. The last row (10 fps) exists only to frame-rate-match that comparison
+(§3.1) — it is not `cam-02`'s running configuration and isn't used anywhere in the cost
+model, which stays on the 15 fps row above it.
 
 Two corrections the arithmetic omits:
 
@@ -166,6 +177,33 @@ reasons that are mostly *not* about encoder skill:
 response is to document the gap and note that the pass-through path (§16.3b of
 `Demo-AWS-Video.md`) eliminates items 5 and 6 entirely.
 
+**`cam-02`, measured at the same 10 fps, beats even the reference figure.** All of the
+`cam-02` bitrates elsewhere in this document (§6.4: 0.047 / 0.937 Mbps) were measured at
+`cam-02`'s own 15 fps — not frame-rate-matched to Videoloft's 10 fps, so not directly
+comparable on a bpp basis to the row above. Measured separately, purely for this
+comparison: ONVIF `FrameRateLimit` set to 10 on `cam-02`'s main-stream encoder
+configuration for the duration of a 60-second capture, then reverted to its normal 15 fps
+immediately after — no other change:
+
+```text
+cam-02 @ 10fps (measured)   647,500 ÷ (2560 × 1440 × 10) = 0.0176 bpp
+```
+
+At matched frame rate, `cam-02`'s camera runs **~59 % lower bpp than Videoloft's own
+figure** (0.0176 vs. 0.0434 — about 2.5× more efficient), while carrying **1.78× the
+pixel count** (2560×1440 vs. 1920×1080). Items 1–4 above explain the shape of this too —
+`cam-02` is also genuine passthrough, also apparently a static/indoor scene during the
+test window, and items 5–6 don't apply to it at all (no MJPG transcode step, no
+`v4l2h264enc` rate-control limitations — passthrough, same as the reference product's own
+setup). What this *doesn't* mean: that 0.0176 bpp is `cam-02`'s general-purpose
+efficiency figure — it's one 60-second sample under whatever lighting and motion
+happened to be present, and §1's quiescent-scene caveat applies here as much as
+anywhere. Re-measure under varied conditions before relying on it beyond this
+comparison. **Scoped deliberately:** this 10 fps figure is for benchmarking against
+Videoloft only — the cost-model figures in §4.1/§6.4/§7.1/§8 stay keyed to `cam-02`'s
+actually-configured 15 fps (0.937 Mbps), since that's what would actually be ingested if
+the main stream were switched on, not the temporary 10 fps test configuration.
+
 ---
 
 ## 4. Separating recording cost from viewing cost
@@ -187,6 +225,31 @@ it and egress is priced the same whatever produced the bytes.
 
 **Ratio: 4.0×.** One line item accounts for essentially all of it — KVS charges $0.0085
 for every ingested gigabyte, S3 charges nothing for ingress.
+
+**`cam-02`, measured, is a different camera from the row above** — the table above uses
+the reference product's own 0.9 Mbps (their camera, §3). `cam-02` is ours, measured
+directly (§6.4: 60s stream-copy capture): its main/4MP stream runs **0.937 Mbps**, close
+enough to 0.9 that the two are easy to conflate, but it's a real number for our own
+camera, not a stand-in for theirs. Recording cost at that measured bitrate, H.264 vs.
+H.265 (§6.4's hardware caveat still applies — `cam-01` can't do this):
+
+| | H.264 (measured) | H.265 @ 40 % cut | H.265 @ 50 % cut |
+|---|---|---|---|
+| KVS recording | $3.05 | $1.83 | $1.52 |
+| S3 recording | $0.76 | $0.57 | $0.52 |
+| vs. its own H.264 figure (KVS) | — | 60 % | 50 % |
+| vs. its own H.264 figure (S3) | — | 75 % | 68 % |
+
+**The KVS:S3 ratio narrows from 4.0× to ~2.9–3.2×.** Not because S3 gets relatively more
+expensive — it drops too — but because KVS's recording cost is nearly all ingest (moves
+almost 1:1 with bitrate) while S3's is only partly storage (moves with bitrate) plus
+fixed PUT/index charges (don't move at all). The same asymmetry that shifts the §7.1
+fleet break-even shows up here as a shrinking, not closing, ratio.
+
+`cam-02`'s currently-configured stream (the sub-stream MediaMTX actually pulls, measured
+0.047 Mbps) is far below either of these — KVS recording ≈$0.15, S3 ≈$0.31. At that
+bitrate codec choice barely moves the bill either way; the H.265 comparison above only
+matters if `cam-02` (or a future camera) runs at main-stream quality.
 
 ### 4.2 Viewing — per GB actually watched
 
@@ -211,6 +274,30 @@ $0.74 ÷ ($0.034 / 0.89 h) ≈ 19 hours
 **Roughly 20 hours of viewing per month costs as much as recording that camera 24/7 for
 the entire month.** A security desk with a video wall inverts the economics completely —
 continuous viewing of a single camera would cost ~36× its recording cost.
+
+**Under H.265, that 20-hour figure moves — and not by the same 40–50 % as everything
+else.** This is still about the reference product's own hypothetical (their 0.9 Mbps,
+their measured session) — not `cam-02`, which has its own, separate H.265 treatment in
+§6.4/§7.1 now that it's been measured. Recomputing the S3 recording cost at their 0.9 Mbps
+under the same two cuts (storage line only: $0.45×0.6+$0.29=$0.56 at 40%,
+$0.45×0.5+$0.29=$0.51 at 50%) — the same method as §6.4. The $/GB rate itself doesn't
+change; what changes is how many GB one hour of viewing costs, since H.265 needs fewer
+bytes for the same footage. Redoing the arithmetic at 0.2534 GB/h (40 % cut) and
+0.2112 GB/h (50 % cut) against that H.265 recording cost ($0.56 / $0.51, not the H.264
+$0.74) — keeping the same $0.09/GB generic egress rate the baseline example above used
+(not the $0.085 CloudFront-specific rate from the table above, since this traffic is the
+reference product's own, of unknown delivery architecture):
+
+```text
+H.265 @ 40 %:  $0.56 ÷ ($0.2534 GB/h × $0.09/GB) ≈ 25 hours
+H.265 @ 50 %:  $0.51 ÷ ($0.2112 GB/h × $0.09/GB) ≈ 27 hours
+```
+
+**The break-even stretches from ~20 hours to ~25–27 hours.** Recording cost and viewing
+cost don't shrink by the same amount under H.265 — recording carries S3's fixed PUT/index
+charges that don't respond to bitrate at all, while viewing cost is pure $/GB and moves
+in lockstep with bitrate — so a more efficient codec buys more viewing headroom per
+dollar of recording cost, the same asymmetry as §4.1 and §7.1, one level down.
 
 Three consequences follow directly:
 
@@ -243,6 +330,22 @@ SaaS business needs infrastructure COGS below roughly 20–25 %, and only the S3
 reaches it — before support, engineering, the viewing application, payment processing or
 sales.
 
+**Under H.265**, viewing volume is cut the same way as §4.2 (3.0 GB / 2.5 GB instead of
+5.0 GB), priced at each service's own rate:
+
+| | Recording | Viewing | Total | vs. €5.39 (≈$5.92) retail |
+|---|---|---|---|---|
+| KVS, H.265 @ 40 % | $1.76 | $0.31 | **$2.07** | **35 % of revenue** |
+| KVS, H.265 @ 50 % | $1.46 | $0.26 | **$1.72** | **29 % of revenue** |
+| S3, H.265 @ 40 % | $0.56 | $0.26 | **$0.82** | 14 % of revenue |
+| S3, H.265 @ 50 % | $0.51 | $0.21 | **$0.72** | 12 % of revenue |
+
+H.265 takes the KVS design from 58 % of revenue down to **29–35 %** — a real
+improvement, and closer to viable than it looked at H.264. **It still doesn't cross the
+20–25 % COGS threshold.** The S3 design, meanwhile, drops further still, from 20 % to
+**12–14 %**, widening its already-comfortable margin. Codec efficiency narrows the gap
+between the two architectures; it doesn't reverse which one is viable.
+
 ---
 
 ## 5. The conclusion this forces
@@ -261,7 +364,23 @@ discounts — which a fleet of their size will certainly hold. That is a viable 
 
 **What they must therefore have built themselves:** the time index, the HLS packager, and
 clip export — precisely the three things KVS sells. The trade is a one-off engineering
-cost against $3.84 per camera per month, forever.
+cost against $2.27 per camera per month, forever (§4.3's total recording-plus-viewing
+Delta at the measured 0.9 Mbps bitrate — a correction from an earlier revision of this
+document, which quoted $3.84 here, carried over from the superseded 1.5 Mbps assumption
+and never updated alongside it).
+
+**A robustness check, not a rescue: would H.265 change this conclusion?** No — and it's
+worth stress-testing rather than assuming. §4.1/§4.3 show that even in the most favorable
+case for KVS — a stream already well-tuned per §3.1 (High-profile CABAC, no transcode
+generation loss, camera-side noise reduction) *plus* a further best-case HEVC cut on top
+— a KVS-based design still lands at **29–35 % of revenue**, above the 20–25 % ceiling a
+SaaS business needs. There is no codec assumption within HEVC's realistic savings range
+that makes a naive KVS-backed archive viable at this retail price. This also means §5's
+conclusion doesn't depend on knowing which codec the reference product actually runs
+(nothing in Appendix B indicates HEVC — §3.1's gap is fully explained by H.264 tuning
+choices, not a codec difference) — the structural argument holds regardless: bulk archive
+on KVS doesn't clear this bar, codec choice narrows the gap but never closes it, so a
+custom S3-based packager remains the only architecture that does.
 
 ---
 
@@ -326,28 +445,54 @@ Glacier object carries ~40 KB overhead — archive 60 s segments, never 6 s ones
 
 `cam-02` (the real ONVIF camera, running genuine passthrough) is the only channel where
 this is viable — `cam-01` (PW310) is hardware-locked to H.264 encode; the Pi's VideoCore
-VI has no HEVC encode block (`NETWORK.md` §4). No bitrate has been measured for `cam-02`
-yet, so the table below applies this document's own bitrate-driven cost model (the
-`$ ≈ 3.25 × B(Mbps)` relationship implicit in §6.1's own figures — ingest at
-$0.0085/GB plus 2-day storage at $0.023/GB-month) to a range of plausible H.264
-baselines, with HEVC's typical **40–50 % bitrate reduction at equal quality** applied on
-top. Every number here is provisional until `cam-02`'s actual H.264 bitrate is measured
-(§10) — same "verify before quoting" discipline as the rest of this document.
+VI has no HEVC encode block (`NETWORK.md` §4).
+
+**Measured directly, 2026-09-01**, running on the Pi with MediaMTX live: 60-second
+`ffmpeg -rtsp_transport tcp -i <url> -t 60 -c copy -f mp4` stream-copy captures of each
+stream, bitrate computed as video-payload bytes × 8 ÷ actual capture duration — avoids
+relying on RTSP's unreliable live bitrate metadata, and avoids re-encoding, which would
+change the number being measured. (A third figure, `cam-02`'s main stream forced to
+10 fps via ONVIF to frame-rate-match Videoloft's own reference figure, lives in §3.1
+rather than here — it's a benchmarking comparison, not a cost-model input, since it was
+never `cam-02`'s running configuration.)
+
+| Stream | Resolution | Configured in `mediamtx.yml` | Measured bitrate |
+|---|---|---|---|
+| `stream1` (sub) — **what `cam-02` actually ingests today** | 640×360 @ 15 fps | yes (`cam02` path source) | **0.047 Mbps** |
+| `stream0` (main, "4MP") — not currently used | 2560×1440 @ 15 fps | no | **0.937 Mbps** |
+
+Two consequences follow before any H.265 arithmetic:
+
+- **`cam-02`'s actual recording cost today is trivial regardless of codec.** At
+  0.047 Mbps, KVS recording ≈$0.15/camera-month (2-day retention, §4.1) — about 19× below
+  every H.264 baseline this document previously used as a stand-in for `cam-02`. H.265
+  would save a few cents here; not worth pursuing on its own.
+- **The 0.9 Mbps figure this document used earlier as a provisional proxy for `cam-02`
+  turns out to almost exactly match the *main* stream (0.937 Mbps), not the stream
+  actually configured.** That was luck, not derivation — the proxy was borrowed from the
+  reference product's own measured bitrate (§3), a different camera entirely. The table
+  below uses the real 0.937 Mbps figure, replacing the placeholder.
 
 | H.264 baseline | KVS $ (H.264) | H.265 @ 40 % cut | KVS $ (H.265) | H.265 @ 50 % cut | KVS $ (H.265) |
 |---|---|---|---|---|---|
-| 0.9 Mbps | $2.93 | 0.54 Mbps | $1.76 | 0.45 Mbps | $1.46 |
-| 1.0 Mbps | $3.25 | 0.60 Mbps | $1.95 | 0.50 Mbps | $1.63 |
-| 1.5 Mbps | $4.88 | 0.90 Mbps | $2.93 | 0.75 Mbps | $2.44 |
-| 2.0 Mbps | $6.51 | 1.20 Mbps | $3.90 | 1.00 Mbps | $3.25 |
+| **0.047 Mbps (measured, current sub-stream)** | **$0.15** | 0.028 Mbps | $0.09 | 0.024 Mbps | $0.08 |
+| **0.937 Mbps (measured, main/4MP stream)** | **$3.05** | 0.562 Mbps | $1.83 | 0.469 Mbps | $1.52 |
+| 1.0 Mbps (MVP target, for reference) | $3.25 | 0.60 Mbps | $1.95 | 0.50 Mbps | $1.63 |
+| 1.5 Mbps (for reference) | $4.88 | 0.90 Mbps | $2.93 | 0.75 Mbps | $2.44 |
+| 2.0 Mbps (for reference) | $6.51 | 1.20 Mbps | $3.90 | 1.00 Mbps | $3.25 |
+
+The H.265 comparison only has practical weight for the main-stream row — the sub-stream
+row is included for completeness, not because a few cents of saving justifies the
+engineering effort described in the browser-HEVC complication further down this
+section.
 
 **Because KVS recording cost is linear in bitrate (ingest dominates), the dollar saving
 equals the bitrate saving exactly — 40–50 % off, no discounting.** That is *not* true on
-the S3 side: per §4.1, only the storage line (~60 % of S3's $0.74 recording total at
-0.9 Mbps) scales with bitrate — PUT and index costs are per-segment, not per-byte. The
-same H.265 switch would cut S3 recording cost by only ~(40–50 %) × 60 % ≈ 24–30 %. Put
+the S3 side: per §4.1, only the storage line (~62 % of S3's $0.76 recording total at
+0.937 Mbps) scales with bitrate — PUT and index costs are per-segment, not per-byte. The
+same H.265 switch would cut S3 recording cost by only ~25–32 %. Put
 differently: **H.265 pays off hardest on exactly the architecture (KVS) this document
-otherwise argues against at scale** — it narrows, but does not close, the 4× ratio in
+otherwise argues against at scale** — it narrows, but does not close, the ~4× ratio in
 §4.1.
 
 **Viewing cost compounds the same saving.** KVS HLS and S3+CloudFront egress are both
@@ -373,9 +518,11 @@ HEVC; only Safari/iOS is dependable. Two ways to close that gap, neither costed 
   it means paying KVS ingest **twice**, so the codec saving and the dual-stream cost must
   be netted against each other, not assumed independently additive.
 
-Before committing to either: confirm `gst-inspect-1.0` exposes a working HEVC decode
-element on this Pi's build, and measure `cam-02`'s actual current bitrate — everything in
-this subsection is a model, not yet a measurement.
+Bitrate is now measured (above); what's still a model, not yet a measurement: confirm
+`gst-inspect-1.0` exposes a working HEVC decode element on this Pi's build, and rerun the
+same 60-second capture method after any actual H.265 switch to confirm the 40–50 % cut
+assumption holds for this specific camera and scene rather than just the general HEVC
+literature figure.
 
 ---
 
@@ -415,30 +562,71 @@ never ingest-driven to begin with — its PUT/index lines don't move with bitrat
 the *denominator*, and the Delta itself is what §7's whole break-even calculation runs
 on.
 
-Using the same 0.9 Mbps H.264 baseline and §6.4's two HEVC scenarios, applied only to
-`cam-02`-type passthrough channels (§6.4's hardware caveat still applies — `cam-01` can't
-do this):
+Using `cam-02`'s own measured main-stream bitrate (0.937 Mbps, §6.4 — not the 0.9 Mbps
+placeholder this section used before measurement) and §6.4's two HEVC scenarios, applied
+only to `cam-02`-type passthrough channels (§6.4's hardware caveat still applies —
+`cam-01` can't do this):
 
 | Scenario | KVS recording | S3 recording | Delta/camera-month | Delta/camera-year |
 |---|---|---|---|---|
-| H.264 baseline (0.9 Mbps) | $2.93 | $0.74 | $2.19 | $26.28 |
-| H.265 @ 40 % cut (0.54 Mbps) | $1.76 | $0.56 | $1.20 | $14.40 |
-| H.265 @ 50 % cut (0.45 Mbps) | $1.46 | $0.51 | $0.95 | $11.40 |
+| H.264 baseline (0.937 Mbps, measured) | $3.05 | $0.76 | $2.29 | $27.48 |
+| H.265 @ 40 % cut (0.562 Mbps) | $1.83 | $0.57 | $1.26 | $15.12 |
+| H.265 @ 50 % cut (0.469 Mbps) | $1.52 | $0.52 | $1.00 | $12.00 |
+
+(This baseline row is close to but not identical to §7's own $2.19/~1,250 figure — that
+one is the reference product's own measured 0.9 Mbps, a different camera; this one is
+`cam-02`'s own measurement. Two real numbers, coincidentally close, not the same thing.)
 
 Re-running the same $33 k build-cost break-even against the smaller Delta:
 
 ```text
-H.265 @ 40 %:  $33,000 ÷ $1.20 ≈ 27,500 camera-months  ≈ 2,290 camera-years
-H.265 @ 50 %:  $33,000 ÷ $0.95 ≈ 34,700 camera-months  ≈ 2,890 camera-years
+H.264 baseline:  $33,000 ÷ $2.29 ≈ 14,400 camera-months  ≈ 1,200 camera-years
+H.265 @ 40 %:    $33,000 ÷ $1.26 ≈ 26,200 camera-months  ≈ 2,180 camera-years
+H.265 @ 50 %:    $33,000 ÷ $1.00 ≈ 33,000 camera-months  ≈ 2,750 camera-years
 ```
 
-**H.265 pushes the break-even from ~1,250 to roughly 2,300–2,900 cameras run for a
+**H.265 pushes the break-even from ~1,200 to roughly 2,200–2,750 cameras run for a
 year** — nearly double. A more efficient codec doesn't just save money in absolute terms;
 it makes the *managed service* rational for longer, precisely because it attacks KVS's
 weakest line item harder than it attacks S3's. A real fleet's actual break-even sits
 between the H.264 and H.265 lines above, weighted by how many channels are
 passthrough-capable (`cam-02`-like) versus transcode-locked (`cam-01`-like) — this isn't
 a single number until the fleet's camera mix is known.
+
+**Check: does folding in viewing cost change this?** The table above is recording-only,
+matching §7's own stated scope. But §6.4 also claims H.265 compounds the saving on the
+viewing side, and that claim was never run through the break-even math above — it should
+be. There's no measured viewing behaviour for `cam-02` (nobody's watched it enough to
+measure), so this reuses §4.3's viewing-volume assumption (5 GB/month/camera, itself
+borrowed from the reference product's measured session) as the best available proxy —
+worth flagging as a borrowed assumption sitting alongside a real measurement, not another
+measurement itself.
+
+Applying the same H.265 cut to that 5 GB assumption (fewer bytes for the same watch time)
+and pricing it at both services' HLS/CloudFront rates (§4.2: $0.102/GB KVS, $0.085/GB
+S3+CloudFront) — these viewing-side figures are unchanged by `cam-02`'s bitrate
+correction, since viewing volume was never derived from the recording bitrate:
+
+| Scenario | Recording Delta | Viewing volume | Viewing Delta | **Total Delta** | Break-even |
+|---|---|---|---|---|---|
+| H.264 baseline | $2.29 | 5.0 GB | $0.08 | **$2.37** | ~1,160 camera-years |
+| H.265 @ 40 % cut | $1.26 | 3.0 GB | $0.05 | **$1.31** | ~2,100 camera-years |
+| H.265 @ 50 % cut | $1.00 | 2.5 GB | $0.05 | **$1.05** | ~2,620 camera-years |
+
+(Viewing Delta here is the KVS-viewing-minus-S3-viewing figure straight from §4.3's own
+table — $0.51−$0.43, $0.31−$0.26, $0.26−$0.21 — so it's directly cross-checkable against
+that table rather than a separately-rounded number.)
+
+Including viewing cost moves every break-even figure slightly *earlier* (more total
+savings per camera than recording alone gives), including the H.264 baseline itself
+(~1,160 here vs. the ~1,200 recording-only figure above). But it doesn't change the H.265
+finding in any material way: **total-Delta break-even lands at ~2,100–2,620
+camera-years, essentially the same near-doubling** as the recording-only ~1,200→2,200–
+2,750. That's expected, not a coincidence — §4 already established that viewing cost is
+"very nearly architecture-independent" (KVS-HLS and S3+CloudFront egress rates are close,
+$0.102 vs. $0.085/GB) precisely because both are dominated by the same internet-egress
+charge, so folding it in barely moves a conclusion that recording cost already drives on
+its own.
 
 ---
 
@@ -456,18 +644,28 @@ The prototype is not operated 24/7, so demo cost is trivial either way.
 difference is cents. The reason is to demonstrate that the trade-off is understood, and
 to have built the same capability from primitives as well as from a managed service.
 
-**Delta if `cam-02`-type channels run H.265 instead.** Applying §6.4's 40–50 % cut to the
-rows above (only valid for passthrough channels — `cam-01` is hardware-locked to H.264):
+**What `cam-02` itself actually costs, now measured (§6.4) — replaces an earlier version
+of this table that incorrectly applied the H.265 cut to the 1.0 Mbps `cam-01`/MVP figures
+above instead of `cam-02`'s own bitrate.** The rows above are `cam-01`'s (PW310,
+720p15 MVP target); `cam-02` is a different camera with its own measured numbers, at 24 h
+retention to match this section's convention:
 
-| Scenario | KVS cost (H.264) | KVS cost (H.265, 40–50 % cut) |
-|---|---|---|
-| Weekend testing, 6 h streaming | ~$0.05 | ~$0.025–0.03 |
-| One camera continuous, 1 month | ~$3.50 | ~$1.75–2.10 |
-| Ten channels continuous, 1 month (all passthrough) | ~$35 | ~$17.50–21 |
+| Scenario | KVS cost, sub-stream (0.047 Mbps, current) | KVS cost, main/4MP (0.937 Mbps, measured) | KVS cost, main/4MP under H.265 (40–50 % cut) |
+|---|---|---|---|
+| Weekend testing, 6 h streaming | ~$0.001 | ~$0.02 | ~$0.01 |
+| One camera continuous, 1 month | ~$0.14 | ~$2.81 | ~$1.41–1.69 |
+| Ten channels continuous, 1 month (all at main-stream quality) | ~$1.40 | ~$28.10 | ~$14.10–16.90 |
 
-At this scale the absolute saving is cents to a couple of dollars — same conclusion as
-above, it's not the reason to do this yet. The saving only becomes a real number at fleet
-scale, which is exactly what §7.1 works out.
+`cam-02` today (sub-stream column) costs less than the rounding error in the `cam-01`
+table above it — codec choice is genuinely irrelevant at this bitrate. The middle and
+right columns are the realistic comparison if `cam-02` (or a future camera) is switched
+to main-stream quality for evidentiary value: H.264 main-stream costs about as much as
+`cam-01`'s own MVP config despite carrying **4×** the pixel count (2560×1440 vs
+1280×720 — 3,686,400 vs 921,600) — a data point for §16.6's per-channel-cost story once
+multi-channel testing starts. At
+this single-camera scale the absolute saving is still cents to a couple of dollars — not
+the reason to do this yet. The saving only becomes a real number at fleet scale, which is
+exactly what §7.1 works out.
 
 Set a $10 monthly budget alarm regardless (`Demo-AWS-Video.md` §1.1). The realistic
 failure mode is a `gst-launch` left running for a week, not a design error.
@@ -502,7 +700,11 @@ Understating these does not change the conclusion, but they should be named:
 
 ## 10. How to verify against reality
 
-Do not ship this document with estimates alone. Three measurements make it credible:
+Do not ship this document with estimates alone. Three measurements make it credible —
+one of the three is now done for `cam-02`, method and result in §6.4: a 60-second
+`ffmpeg -c copy` stream capture rather than the interface-counter method below, but the
+same principle (measure the actual bytes, don't trust live-stream bitrate metadata).
+`cam-01` and the AWS-side cross-checks below are still open:
 
 ```bash
 # 1. Actual bytes on the wire vs. the arithmetic (expect +3–8 %)
@@ -542,21 +744,31 @@ measured-versus-modelled in the README is worth more than either figure alone.
    Normalise to bits-per-pixel-per-frame before trusting any bitrate estimate (§3.1).
 4. Segment length is a first-order cost variable: at 6 s, requests exceed storage 3×.
    The archive path needs 60 s segments, which forces live onto a separate path.
-5. The build pays back at roughly **700 cameras over a year**; below a few hundred, the
-   managed service is the correct engineering choice.
-6. The build pays back at roughly **1,250 cameras over a year**; below a few hundred, the
-   managed service is the correct engineering choice.
-7. For a prototype, KVS remains right. Knowing precisely why it would be wrong at scale
+5. The build pays back at roughly **1,250 cameras over a year**; below a few hundred, the
+   managed service is the correct engineering choice. (This bullet used to read 700
+   cameras, computed under the superseded 1.5 Mbps bitrate assumption §3.1 corrects, and
+   duplicated as a separate bullet alongside this one — a leftover from before that
+   correction that this consistency pass caught and merged.)
+6. For a prototype, KVS remains right. Knowing precisely why it would be wrong at scale
    is the point of this document.
-8. Codec matters as much as architecture: switching `cam-02` to native H.265 would cut
-   both KVS ingest and viewing egress by ~40–50 % — the one lever that pays off harder on
-   KVS than on S3 — but only if browser HEVC playback is solved first, which has its own
-   unmodeled cost (§6.4).
-9. This is not a revision of point 6's break-even — the system as built runs H.264, and
-   ~1,250 cameras/year stands as the baseline number. It is the effect of a *hypothetical
-   codec switch*: if passthrough channels moved from H.264 to H.265, that same asymmetry
-   would cut the other way for build-vs-buy. H.265 erodes KVS's ingest penalty much faster
-   than it erodes S3's already-ingest-free cost, so *if* the fleet ran H.265, the
-   break-even would move from ~1,250 to roughly **2,300–2,900 cameras run for a year**
-   (§7.1) — a more efficient codec makes the managed service rational for *longer*, not
-   shorter, which is easy to get backwards on intuition alone.
+7. `cam-02`'s bitrate is now measured, not assumed (§6.4: 60s stream-copy capture,
+   2026-09-01) — 0.047 Mbps on the sub-stream it actually runs today (recording cost
+   ≈$0.15/month, codec-irrelevant), 0.937 Mbps on its main/4MP stream (not currently
+   used). The 0.9 Mbps figure this document used as a placeholder for `cam-02` before
+   measurement turns out to almost exactly match the main stream — coincidence, not
+   derivation; it was borrowed from the reference product's own camera.
+8. Codec matters as much as architecture: switching `cam-02`'s main stream to H.265
+   would cut both KVS ingest and viewing egress by ~40–50 % — the one lever that pays off
+   harder on KVS than on S3 — but only if browser HEVC playback is solved first, which
+   has its own unmodeled cost (§6.4).
+9. This is not a revision of point 5's break-even — the system as built runs H.264, and
+   ~1,250 cameras/year stands as the baseline number (for the reference product's own
+   camera, not `cam-02`). It is the effect of a *hypothetical codec switch on `cam-02`'s
+   main stream*: if passthrough channels moved from H.264 to H.265, that same asymmetry
+   would cut the other way for build-vs-buy. Using `cam-02`'s own measured 0.937 Mbps
+   baseline (not the earlier 0.9 Mbps placeholder), its break-even moves from ~1,200 to
+   roughly **2,200–2,750 cameras run for a year** (§7.1) — a more efficient codec makes
+   the managed service rational for *longer*, not shorter, which is easy to get backwards
+   on intuition alone. Checked against viewing cost too, not just recording: folding in
+   §4.3's egress Delta lands in the same ~2,100–2,620 range (§7.1), because recording
+   cost — not viewing — is what drives this comparison either way.
