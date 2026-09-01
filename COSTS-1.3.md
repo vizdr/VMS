@@ -322,6 +322,61 @@ Two traps when tiering: S3 Standard-IA bills a 30-day minimum duration and Glaci
 classes 90–180 days, so tiering footage that expires at 2 days *increases* cost. And each
 Glacier object carries ~40 KB overhead — archive 60 s segments, never 6 s ones.
 
+### 6.4 Codec — H.265 on `cam-02`
+
+`cam-02` (the real ONVIF camera, running genuine passthrough) is the only channel where
+this is viable — `cam-01` (PW310) is hardware-locked to H.264 encode; the Pi's VideoCore
+VI has no HEVC encode block (`NETWORK.md` §4). No bitrate has been measured for `cam-02`
+yet, so the table below applies this document's own bitrate-driven cost model (the
+`$ ≈ 3.25 × B(Mbps)` relationship implicit in §6.1's own figures — ingest at
+$0.0085/GB plus 2-day storage at $0.023/GB-month) to a range of plausible H.264
+baselines, with HEVC's typical **40–50 % bitrate reduction at equal quality** applied on
+top. Every number here is provisional until `cam-02`'s actual H.264 bitrate is measured
+(§10) — same "verify before quoting" discipline as the rest of this document.
+
+| H.264 baseline | KVS $ (H.264) | H.265 @ 40 % cut | KVS $ (H.265) | H.265 @ 50 % cut | KVS $ (H.265) |
+|---|---|---|---|---|---|
+| 0.9 Mbps | $2.93 | 0.54 Mbps | $1.76 | 0.45 Mbps | $1.46 |
+| 1.0 Mbps | $3.25 | 0.60 Mbps | $1.95 | 0.50 Mbps | $1.63 |
+| 1.5 Mbps | $4.88 | 0.90 Mbps | $2.93 | 0.75 Mbps | $2.44 |
+| 2.0 Mbps | $6.51 | 1.20 Mbps | $3.90 | 1.00 Mbps | $3.25 |
+
+**Because KVS recording cost is linear in bitrate (ingest dominates), the dollar saving
+equals the bitrate saving exactly — 40–50 % off, no discounting.** That is *not* true on
+the S3 side: per §4.1, only the storage line (~60 % of S3's $0.74 recording total at
+0.9 Mbps) scales with bitrate — PUT and index costs are per-segment, not per-byte. The
+same H.265 switch would cut S3 recording cost by only ~(40–50 %) × 60 % ≈ 24–30 %. Put
+differently: **H.265 pays off hardest on exactly the architecture (KVS) this document
+otherwise argues against at scale** — it narrows, but does not close, the 4× ratio in
+§4.1.
+
+**Viewing cost compounds the same saving.** KVS HLS and S3+CloudFront egress are both
+priced per GB transferred (§4.2, ~$0.10/GB watched); H.265 output is fewer bytes for the
+same footage, so that line drops by the same ~40–50 % for any viewer that can decode it
+directly. Recording and viewing savings stack, unlike a segment-length change (§6.2),
+which only ever touches the request-count line.
+
+**The complication this table doesn't price in: browser HEVC playback isn't guaranteed**
+(`NETWORK.md` §4). `hls.js` in Chrome/Firefox/most Android builds can't reliably decode
+HEVC; only Safari/iOS is dependable. Two ways to close that gap, neither costed above:
+
+- **On-demand transcode at playback time**, only for non-HEVC clients — no continuous
+  second ingest stream, but a real per-viewing-minute compute cost (Lambda has no
+  practical path to sustained HW-accelerated transcode; would need a small always-on
+  service or Elemental MediaConvert) that isn't quantified here and must be verified
+  against current pricing before it's assumed cheaper than the egress it saves.
+- **Dual continuous streams** — H.265 archive plus a separate H.264 "live" profile, using
+  the Pi's hardware HEVC *decode* block (BCM2711 has one, unlike encode) feeding
+  `v4l2h264enc` already proven on `cam-01`. This reproduces the archive/live-preview
+  split §3.0 and §4.2 already identify as the reference product's highest-value cost
+  lever — except now the archive leg also gets the codec-efficiency win. The trade-off:
+  it means paying KVS ingest **twice**, so the codec saving and the dual-stream cost must
+  be netted against each other, not assumed independently additive.
+
+Before committing to either: confirm `gst-inspect-1.0` exposes a working HEVC decode
+element on this Pi's build, and measure `cam-02`'s actual current bitrate — everything in
+this subsection is a model, not yet a measurement.
+
 ---
 
 ## 7. Fleet scaling
@@ -445,3 +500,7 @@ measured-versus-modelled in the README is worth more than either figure alone.
    managed service is the correct engineering choice.
 7. For a prototype, KVS remains right. Knowing precisely why it would be wrong at scale
    is the point of this document.
+8. Codec matters as much as architecture: switching `cam-02` to native H.265 would cut
+   both KVS ingest and viewing egress by ~40–50 % — the one lever that pays off harder on
+   KVS than on S3 — but only if browser HEVC playback is solved first, which has its own
+   unmodeled cost (§6.4).
