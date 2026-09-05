@@ -26,16 +26,22 @@ def lambda_handler(event, context):
 
         kvam = boto3.client("kinesis-video-archived-media",
                             endpoint_url=ep, region_name=REGION)
+        # KVS allows 300-43200s. 300 (the minimum, and the old value here) meant the
+        # session URL died five minutes into every viewing session -- the client then
+        # sat retrying a permanently-dead URL and the browser showed a spinner forever.
+        # An hour keeps refreshes rare without leaving a usable URL lying around for
+        # half a day; the client refreshes at 80% of this (see scheduleSessionRefresh).
+        session_ttl = 3600
         url = kvam.get_hls_streaming_session_url(
             StreamName=stream,
             PlaybackMode="LIVE",
-            Expires=300,
+            Expires=session_ttl,
         )["HLSStreamingSessionURL"]
 
         return {
             "statusCode": 200,
             "headers": CORS,
-            "body": json.dumps({"url": url, "expires_in": 300}),
+            "body": json.dumps({"url": url, "expires_in": session_ttl}),
         }
     except kv.exceptions.ResourceNotFoundException:
         return {

@@ -99,10 +99,24 @@ function hideOverlay(camera) { el(camera, "overlay").classList.add("hidden"); }
 
 function teardownPlayer(camera) {
   const s = state[camera];
+  clearTimeout(s.refreshTimer);
+  s.refreshTimer = null;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = el(camera, "video");
   v.removeAttribute("src");
   v.load();
+}
+
+// A KVS HLS session URL dies at `expires_in` seconds and cannot be revived -- every
+// later request against it 403s. Refresh at 80% of that so a fresh session is playing
+// before the old URL lapses. Without this the player ends up retrying a permanently
+// dead URL: hls.js keeps failing, the <video> element sits in a "waiting" state, and
+// the browser shows its own spinner forever while the last buffered seconds play out.
+function scheduleSessionRefresh(camera, expiresIn) {
+  const s = state[camera];
+  clearTimeout(s.refreshTimer);
+  const ms = Math.max(30, Math.floor((expiresIn || 300) * 0.8)) * 1000;
+  s.refreshTimer = setTimeout(() => { if (!s.userStopped) load(camera); }, ms);
 }
 
 function renderCameraPanel(cam) {
@@ -193,7 +207,8 @@ async function login() {
 
     camerasDiv.innerHTML = "";
     for (const cam of CAMERAS) {
-      state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null, recordingTimer: null };
+      state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null,
+                        recordingTimer: null, refreshTimer: null, netRetries: 0 };
       camerasDiv.appendChild(renderCameraPanel(cam));
       loadClips(cam.id);
     }
@@ -218,20 +233,34 @@ async function load(camera) {
     const s = state[camera];
 
     if (s.hls) { s.hls.destroy(); s.hls = null; }
+    clearTimeout(s.refreshTimer);
     s.userStopped = false;
+    s.netRetries = 0;
 
     if (Hls.isSupported()) {
       s.hls = new Hls();
       s.hls.loadSource(url);
       s.hls.attachMedia(v);
-      s.hls.on(Hls.Events.FRAG_BUFFERED, () => hideOverlay(camera));
+      s.hls.on(Hls.Events.FRAG_BUFFERED, () => { hideOverlay(camera); s.netRetries = 0; });
       s.hls.on(Hls.Events.ERROR, (evt, data) => {
         if (!data.fatal) return;
         if (s.userStopped) return;
         setStatus(camera, "player error: " + data.details);
         switch (data.type) {
           case Hls.ErrorTypes.NETWORK_ERROR:
-            s.hls.startLoad();
+            // Usually the KVS session URL having expired, which startLoad() can never
+            // fix -- it just re-requests the same dead URL. Allow a couple of retries
+            // for genuinely transient blips, then go get a whole new session. The
+            // overlay matters too: without it the only feedback is the browser's own
+            // spinner, which looks identical to "still buffering".
+            if (++s.netRetries <= 2) {
+              s.hls.startLoad();
+            } else {
+              s.netRetries = 0;
+              showOverlay(camera, "Reconnecting…");
+              clearTimeout(s.refreshTimer);
+              s.refreshTimer = setTimeout(() => { if (!s.userStopped) load(camera); }, 1000);
+            }
             break;
           case Hls.ErrorTypes.MEDIA_ERROR:
             s.hls.recoverMediaError();
@@ -244,6 +273,7 @@ async function load(camera) {
       v.src = url;
       hideOverlay(camera);
     }
+    scheduleSessionRefresh(camera, data.expires_in);
     setStatus(camera, "stream loaded");
   } catch (e) {
     setStatus(camera, "error: " + e.message);
