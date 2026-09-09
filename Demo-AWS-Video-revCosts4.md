@@ -1547,10 +1547,65 @@ aws s3 website "s3://$BUCKET" --index-document index.html
 aws s3 cp "$VMS_HOME/client/index.html" "s3://$BUCKET/index.html" --content-type text/html
 ```
 
-Note the endpoint is **plain HTTP**, not HTTPS (S3 website hosting doesn't offer TLS on
-its own — CloudFront in front of it would be the fix, out of scope for the MVP). This
-isn't a mixed-content problem: the page's own API/Cognito calls are HTTPS regardless of
-what scheme served the page, so the browser doesn't block them.
+Note the endpoint is **plain HTTP**, not HTTPS — S3 website hosting doesn't offer TLS on
+its own. This isn't a mixed-content problem (the page's own API/Cognito calls are HTTPS
+regardless of what scheme served the page, so the browser doesn't block them), but it does
+mean the page is served in the clear and some browsers increasingly discourage or block
+plain-HTTP pages outright. **§8.5.1 replaces this with CloudFront + TLS.**
+
+#### 8.5.1 HTTPS via CloudFront + Origin Access Control
+
+Adding TLS here costs nothing and needs no domain: a CloudFront distribution serves the
+bucket over `https://<id>.cloudfront.net` with an AWS-managed certificate, and it stays
+inside the perpetual free tier at this traffic level. The work is in three parts.
+
+**Origin Access Control (OAC)** is the part worth understanding. Left alone, the bucket
+policy above (`Principal: "*"`) keeps the S3 URL publicly readable *alongside* the
+CloudFront one — so anyone who knows it bypasses CloudFront and your TLS redirect
+entirely. OAC makes CloudFront sign its origin requests with SigV4, which lets the bucket
+go fully private and grant read access to exactly one distribution:
+
+```bash
+aws cloudfront create-origin-access-control --origin-access-control-config '{
+  "Name": "vms-demo-client-oac", "SigningProtocol": "sigv4", "SigningBehavior": "always",
+  "OriginAccessControlOriginType": "s3", "Description": "OAC for the client bucket"}'
+```
+
+The bucket policy that replaces the public one (`cloud/iam/client-bucket-oac-policy.json`)
+allows the `cloudfront.amazonaws.com` **service** principal, conditioned on
+`AWS:SourceArn` matching the distribution. That condition is load-bearing: without it you
+would be granting the CloudFront service in general, which is not the same as granting
+*your* distribution.
+
+**Two constraints that dictate the distribution's shape:**
+
+- OAC works only against the S3 **REST** endpoint (`<bucket>.s3.<region>.amazonaws.com`),
+  never the **website** endpoint (`<bucket>.s3-website-<region>.amazonaws.com`) — website
+  endpoints serve anonymous requests only and have no way to evaluate a signed one.
+- Switching to the REST endpoint loses S3 website mode's index-document behaviour, so
+  CloudFront must take that job over via `DefaultRootObject: index.html`. Skip it and `/`
+  returns an XML `AccessDenied` instead of the page.
+
+Distribution settings that matter: `ViewerProtocolPolicy: redirect-to-https` (the actual
+point of the exercise), `CloudFrontDefaultCertificate: true` (a trusted cert with no
+domain to buy or validate), `PriceClass_100`, compression on, and the AWS-managed
+`CachingOptimized` policy. Deployment takes 5–15 minutes.
+
+**Order matters, and the guide's own numbering is misleading here.** The bucket policy
+references the distribution ARN, so the distribution must exist first; and swapping the
+policy before the CloudFront URL is confirmed working takes the site offline with no
+fallback. The safe sequence is: create OAC → create distribution → **verify the HTTPS URL
+serves the app** → only then swap the bucket policy, enable Block Public Access, and
+`aws s3api delete-bucket-website`. Both URLs work simultaneously in the middle of that,
+which is the point — rollback is just deleting the distribution.
+
+Verified after deployment: `200` over HTTP/2 at `/` (proving `DefaultRootObject`), `301`
+on the HTTP URL, a valid chain (`CN=*.cloudfront.net`, Amazon RSA 2048 M04), and byte-identical
+content to the S3 object. One operational note: CloudFront is now a cache between you and
+S3, but the `--cache-control "no-cache, must-revalidate"` this project already uses on
+every client deploy (added after an earlier stale-client incident) makes it revalidate
+rather than serve stale — deploys show up as `x-cache: RefreshHit`. Without that header
+you would need `aws cloudfront create-invalidation` after each upload.
 
 **Checkpoint 7 — verified two ways.** Backend, independent of any browser
 (`curl` through Cognito auth → API Gateway → Lambda → `ffprobe` the returned URL, same
@@ -1567,9 +1622,11 @@ with no way out.
 
 ### 8.6 Client-side bugs found through real use
 
-Four bugs, found in this order across actual browser sessions (2026-08-20), not caught by
-any backend `curl` test because all four are specific to what a browser does with the
-responses, not whether the responses were correct.
+Five bugs, found in this order across actual browser sessions (the first four on
+2026-08-20, the fifth weeks later), none caught by any backend `curl` test — they are all
+specific to what a browser does with the responses over time, not whether the responses
+were correct at the moment they were issued. Bug 5 in particular was invisible to every
+health check the project had: each one passed while the page was unusable.
 
 **1. A Lambda exception produces a browser-side `NetworkError`, not a readable error.**
 
@@ -1658,6 +1715,56 @@ arrived) rather than guessing a fixed delay. Also needed: the `<video>` element 
 intrinsic size before any source has ever loaded, so the wrapper needs an explicit
 `aspect-ratio: 16 / 9` — without it, the overlay itself collapses to the browser's tiny
 default video height on first page load, before Start has ever been pressed.
+
+**5. The player spun forever after exactly five minutes — because the session URL had a
+five-minute lifetime and nothing ever renewed it** (found 2026-09-06, long after the
+above four).
+
+*Symptom:* a few minutes into watching, the browser's own buffering ring appeared over
+the video and never went away, while the already-buffered seconds kept playing out. No
+error text, no failed request visible in the UI, and the backend was entirely healthy —
+`systemctl` green, fragments arriving in KVS on a perfectly regular cadence.
+
+*Root cause, three links in a chain:*
+
+1. `get_hls_url.py` requested `Expires=300` — the KVS **minimum**. `GetHLSStreamingSessionURL`
+   hands back a URL that is dead at that deadline, so every viewing session had a
+   five-minute fuse regardless of stream health.
+2. The client received `expires_in` in the response body and never used it. Nothing
+   renewed the session.
+3. The killer: the fatal-`NETWORK_ERROR` branch called `hls.startLoad()`, which
+   re-requests **the same URL**. Against an expired session that is a loop that cannot
+   terminate successfully — hls.js retried forever, the `<video>` element stayed in a
+   `waiting` state, and the browser painted its native spinner indefinitely. The
+   `NETWORK_ERROR` path also showed no overlay (only the `default:` branch did), so the
+   only feedback was a bare ring identical to normal buffering.
+
+*Proving it rather than inferring it.* The timing ("a few minutes") was suggestive but not
+proof, so: mint a session URL, poll the master playlist every 30s, print the status code.
+
+```
+session created at 22:05:58Z, Expires=300
+t=+270s  master_playlist_http=200
+t=+300s  master_playlist_http=403     <- dead, to the second
+```
+
+Then the same probe against a URL from the fixed Lambda: `200` at t=+385s. That before/after
+pair is what turns "probably the expiry" into a closed question, and it costs ten minutes.
+
+*Fix, all three links:* `Expires` raised to 3600; the client schedules a refresh at 80% of
+whatever `expires_in` comes back (so a fresh session is playing before the old one lapses);
+and the error handler now allows two `startLoad()` retries for genuinely transient blips
+before fetching a **new** session, behind a `"Reconnecting…"` overlay so it can never again
+be a silent spinner. The tradeoff accepted: rebuilding the player once an hour flashes the
+"Loading stream…" overlay briefly.
+
+*Why it surfaced on `cam-02` first, though it affected both cameras equally.* Measured over
+a 3-minute window, both streams ingest with no gaps — but `cam-02`'s fragments are **2.93 s**
+against `cam-01`'s **1.93 s**, because the ONVIF camera emits keyframes less often than our
+`h264_i_frame_period=30`. Longer fragments mean less headroom at the live edge, so `cam-02`
+is simply where a player-side problem becomes visible first (`ffprobe` also reports
+reference-picture errors joining it mid-GOP). A useful reminder that "it only happens on
+camera X" can mean "camera X is the most sensitive detector," not "the bug is in camera X."
 
 ---
 

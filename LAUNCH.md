@@ -166,9 +166,16 @@ sudo systemctl is-active kvs-cam01.service
 
 ## Part D — Access the browser client (§8, Checkpoint 7)
 
-**URL:** http://vms-demo-client-596633517506.s3-website.eu-central-1.amazonaws.com
+**URL:** https://dugyd3kkt36pw.cloudfront.net  (CloudFront + TLS, §8.5.1)
 
 **Login:** username `demo-viewer`, password `DemoViewer2026!`
+
+The old plain-HTTP S3 website URL
+(`http://vms-demo-client-596633517506.s3-website.eu-central-1.amazonaws.com`) still
+works today — the bucket is still public pending the cutover in §8.5.1's last step
+(swap to the OAC-only bucket policy, enable Block Public Access, `delete-bucket-website`).
+Until that runs, there is still an unencrypted way to reach the page. Prefer the HTTPS
+URL, and expect some browsers to complain about the HTTP one.
 
 This is a genuinely public URL, reachable from anywhere (no VPN, no router changes, no
 geographic restriction — that's the point). Sign in, press **Start** if the stream isn't

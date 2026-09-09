@@ -42,6 +42,18 @@
   .clip-labels { color: #888; font-size: 0.8rem; }
   .clip-duration { color: #888; font-size: 0.85rem; }
   .tier-apply-status { font-size: 0.8rem; color: #888; }
+  .clips-alert {
+    display: none;                 /* only present when there is something to say */
+    margin: 0.6rem 0;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid #c0392b;
+    border-left: 5px solid #c0392b;
+    border-radius: 4px;
+    background: #fdecea;
+    color: #c0392b;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
 </style>
 </head>
 <body>
@@ -119,6 +131,49 @@ function scheduleSessionRefresh(camera, expiresIn) {
   s.refreshTimer = setTimeout(() => { if (!s.userStopped) load(camera); }, ms);
 }
 
+// One place for the mode wording, so the initial render and the post-save message can't
+// drift apart. The stream caveat matters: the event watcher publishes a clip trigger on
+// detection, but clip_to_s3 pulls from KVS, which only has footage while the producer is
+// running -- a detection with the stream stopped produces nothing.
+function recModeHint(mode, supportsDetection) {
+  if (!supportsDetection) return "no ONVIF — manual only";
+  if (!mode || mode === "manual") return "manual only — use Start Recording";
+  return `${mode} detection armed — a clip is written ~40 s after a detection (post-roll + processing), then announced below within 30 s. Requires the stream to be running.`;
+}
+
+// Detection-created clips arrive without the page doing anything, so unlike manual
+// recording there is no local event to refresh the list on. Poll only to *notice* them
+// and raise a hint -- deliberately not reloading the list underneath the user, which
+// would reset a tier dropdown or a scroll position mid-interaction.
+function syncClipPolling(camera, mode) {
+  const s = state[camera];
+  if (!s) return;
+  clearInterval(s.clipsTimer);
+  s.clipsTimer = null;
+  if (mode && mode !== "manual") {
+    s.clipsTimer = setInterval(() => checkForNewClips(camera), 30000);
+  }
+}
+
+// Compares the newest clip on the server against the newest one currently rendered.
+async function checkForNewClips(camera) {
+  const s = state[camera];
+  const alertEl = document.getElementById(`clipsAlert-${camera}`);
+  if (!s || !alertEl) return;
+  try {
+    const r = await fetch(`${API}/clips?camera=${camera}`, { headers: { Authorization: idToken } });
+    if (!r.ok) return;
+    const data = await r.json();
+    const newest = data.clips.length ? data.clips[0].startTs : null;
+    // renderedLatest === null means the rendered list was empty, so the first clip to
+    // arrive is still news -- don't require a previous value
+    if (newest && newest !== s.renderedLatest) {
+      alertEl.textContent = "New clips are available. Refresh to watch.";
+      alertEl.style.display = "block";
+    }
+  } catch (e) { /* transient; the next tick retries */ }
+}
+
 function renderCameraPanel(cam) {
   const div = document.createElement("div");
   div.className = "camera-panel";
@@ -147,6 +202,18 @@ function renderCameraPanel(cam) {
     </p>` : ""}
 
     <p>
+      Recording mode:
+      <select id="recMode-${cam.id}" onchange="setRecordingMode('${cam.id}', this.value)"
+              ${cam.supportsDetection ? "" : "disabled"}>
+        <option value="manual">Manual only</option>
+        <option value="motion">Motion detected</option>
+        <option value="cellMotion">Motion in zones (cell grid)</option>
+        <option value="human">Human detected</option>
+      </select>
+      <span id="recModeStatus-${cam.id}" class="status">${recModeHint(cam.recordingMode, cam.supportsDetection)}</span>
+    </p>
+
+    <p>
       <button id="recordBtn-${cam.id}" onclick="toggleRecording('${cam.id}')">&#9679; Start Recording</button>
       <span id="recordStatus-${cam.id}" class="status"></span>
     </p>
@@ -155,6 +222,7 @@ function renderCameraPanel(cam) {
       <h3>Evidence clips
         <button onclick="loadClips('${cam.id}')" style="font-size:0.8rem">Refresh</button>
       </h3>
+      <div id="clipsAlert-${cam.id}" class="clips-alert"></div>
       <ul id="clipsList-${cam.id}" class="clips-list"></ul>
     </div>`;
   return div;
@@ -208,8 +276,14 @@ async function login() {
     camerasDiv.innerHTML = "";
     for (const cam of CAMERAS) {
       state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null,
-                        recordingTimer: null, refreshTimer: null, netRetries: 0 };
+                        recordingTimer: null, refreshTimer: null, netRetries: 0,
+                        clipsTimer: null, renderedLatest: null };
       camerasDiv.appendChild(renderCameraPanel(cam));
+      // The <select> is built via innerHTML, so the stored value has to be applied after
+      // the node is in the DOM rather than as a `selected` attribute in the template.
+      const sel = document.getElementById(`recMode-${cam.id}`);
+      if (sel) sel.value = cam.recordingMode || "manual";
+      syncClipPolling(cam.id, cam.recordingMode);
       loadClips(cam.id);
     }
   } catch (e) {
@@ -307,6 +381,27 @@ async function cmd(camera, action) {
   }
 }
 
+// Writes recordingMode to the registry. The event watcher (kvs-event-watcher.service on
+// the Pi) polls that registry and re-subscribes within ~60s, so a change here really does
+// change recording behaviour -- see recModeHint() for the caveat the status text carries.
+async function setRecordingMode(camera, mode) {
+  const el = document.getElementById(`recModeStatus-${camera}`);
+  el.textContent = "saving…";
+  try {
+    const r = await fetch(`${API}/cameras/mode`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ cameraId: camera, recordingMode: mode }),
+    });
+    const data = await r.json();
+    if (!r.ok) { el.textContent = "error: " + (data.error || r.status); return; }
+    el.textContent = `saved — ${recModeHint(mode, true)}`;
+    syncClipPolling(camera, mode);
+  } catch (e) {
+    el.textContent = "error: " + e.message;
+  }
+}
+
 async function setIrMode(camera, mode) {
   const statusEl = document.getElementById(`irStatus-${camera}`);
   statusEl.textContent = `setting ${mode}...`;
@@ -384,6 +479,12 @@ async function loadClips(camera) {
     const r = await fetch(`${API}/clips?camera=${camera}`, { headers: { Authorization: idToken } });
     const data = await r.json();
     if (!r.ok) { list.innerHTML = `<li>Error: ${data.error || r.status}</li>`; return; }
+    // remember the newest rendered clip so checkForNewClips() can spot arrivals, and
+    // clear any pending hint since the list is now current
+    state[camera].renderedLatest = data.clips.length ? data.clips[0].startTs : null;
+    const alertEl = document.getElementById(`clipsAlert-${camera}`);
+    if (alertEl) { alertEl.textContent = ""; alertEl.style.display = "none"; }
+
     if (data.clips.length === 0) { list.innerHTML = "<li>No clips yet.</li>"; return; }
 
     list.innerHTML = "";

@@ -55,9 +55,22 @@
 <h2>2. Registered cameras</h2>
 <button onclick="loadCameras()">Refresh</button>
 <table id="camerasTable">
-  <thead><tr><th>ID</th><th>Mode</th><th>IR</th><th>Host</th><th>Local preview</th><th>KVS push</th><th>Control</th></tr></thead>
+  <thead><tr><th>ID</th><th>Mode</th><th>IR</th><th>Host</th><th>Local preview</th><th>KVS push</th><th>Recording</th><th>Control</th></tr></thead>
   <tbody id="camerasBody"></tbody>
 </table>
+
+<h2>3. Motion analytics (read-only)</h2>
+<p class="status">
+  Tuning lives on the camera. <strong>This camera ignores ONVIF writes</strong> —
+  <code>SetVideoAnalyticsConfiguration</code> returns success and changes nothing
+  (verified: sent Sensitivity=55, read back 80). Change these in the camera's own web UI;
+  shown here to explain why detection behaves as it does.
+</p>
+<p>
+  <label>Camera <select id="anCam"></select></label>
+  <button onclick="loadAnalytics()">Read settings</button>
+</p>
+<div id="analytics"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
@@ -214,7 +227,7 @@ let currentCameraIds = [];
 async function loadCameras() {
   for (const id in previewPlayers) stopPreview(id);
   const body = document.getElementById("camerasBody");
-  body.innerHTML = "<tr><td colspan=7>loading...</td></tr>";
+  body.innerHTML = "<tr><td colspan=8>loading...</td></tr>";
   try {
     const data = await api("/api/cameras");
     registeredByHost = {};
@@ -236,6 +249,17 @@ async function loadCameras() {
         </td>
         <td><span id="kvsState-${c.cameraId}" class="kvs-state">…</span></td>
         <td>
+          <select id="recMode-${c.cameraId}"
+                  onchange="setRecordingMode('${c.cameraId}', this.value)"
+                  style="font-size:0.8rem" ${c.onvifHost ? "" : "disabled"}>
+            <option value="manual">Manual</option>
+            <option value="motion">Motion</option>
+            <option value="cellMotion">Cell grid</option>
+            <option value="human">Human</option>
+          </select>
+          <div id="recModeStatus-${c.cameraId}" class="status"></div>
+        </td>
+        <td>
           <div class="ctl-row">
             <button onclick="streamAction('${c.cameraId}','start')">Start Remote</button>
             <button onclick="streamAction('${c.cameraId}','stop')">Stop Remote</button>
@@ -249,10 +273,19 @@ async function loadCameras() {
           <span id="ctlStatus-${c.cameraId}" class="status"></span>
         </td>`;
       body.appendChild(tr);
+      // set after insertion: the row is built via innerHTML, so a `selected` attribute
+      // in the template would need per-option conditionals
+      const sel = tr.querySelector(`#recMode-${c.cameraId}`);
+      if (sel) sel.value = c.recordingMode || "manual";
+    }
+    const anSel = document.getElementById("anCam");
+    if (anSel) {
+      anSel.innerHTML = data.cameras.filter(c => c.onvifHost)
+        .map(c => `<option value="${c.cameraId}">${c.cameraId}</option>`).join("");
     }
     refreshAllStreamStatuses();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan=7 class="error">${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan=8 class="error">${e.message}</td></tr>`;
   }
 }
 
@@ -278,6 +311,48 @@ function refreshAllStreamStatuses() {
 }
 
 setInterval(refreshAllStreamStatuses, 4000);
+
+// Phase 1: writes the registry only. Nothing consumes recordingMode yet (the event
+// watcher is Phase 2), so say so rather than implying behaviour changed.
+async function setRecordingMode(id, mode) {
+  const el = document.getElementById(`recModeStatus-${id}`);
+  el.textContent = "saving…";
+  try {
+    await api(`/api/cameras/${id}/mode`, { method: "POST",
+      body: JSON.stringify({ recordingMode: mode }) });
+    el.textContent = mode === "manual"
+      ? "manual only"
+      : `${mode} active — needs KVS push running`;
+  } catch (e) {
+    el.textContent = e.message;
+  }
+}
+
+async function loadAnalytics() {
+  const id = document.getElementById("anCam").value;
+  const box = document.getElementById("analytics");
+  if (!id) { box.innerHTML = '<p class="status">no ONVIF camera registered</p>'; return; }
+  box.innerHTML = "<p class='status'>reading…</p>";
+  try {
+    const d = await api(`/api/cameras/${id}/analytics`);
+    const rows = Object.entries(d.rule.params)
+      .filter(([k]) => k !== "ActiveCells")
+      .map(([k, v]) => `<tr><td>${k}</td><td><strong>${v}</strong></td></tr>`).join("");
+    const sens = Object.entries(d.module.params)
+      .map(([k, v]) => `<tr><td>${k}</td><td><strong>${v}</strong></td></tr>`).join("");
+    const ac = d.activeCells;
+    box.innerHTML = `
+      <p class="status">config <code>${d.configName}</code> ·
+        engine <code>${d.module.type}</code> · rule <code>${d.rule.type}</code></p>
+      <table style="max-width:420px">${sens}${rows}</table>
+      ${ac ? `<p class="status">ActiveCells mask: <code>${ac.hex}</code>
+        (${ac.cellCount} cells) — grid geometry ${ac.gridGeometry}<br>
+        <code style="font-size:0.75rem">${ac.bits}</code></p>` : ""}
+      <p class="status error">${d.readOnlyReason}</p>`;
+  } catch (e) {
+    box.innerHTML = `<p class="error">${e.message}</p>`;
+  }
+}
 
 async function streamAction(id, action) {
   const el = document.getElementById(`ctlStatus-${id}`);

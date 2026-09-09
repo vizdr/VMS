@@ -13,6 +13,8 @@ Access: LAN-only, no login. Consistent with this project's existing trust bounda
 MediaMTX's local RTSP endpoints and the camera's own ONVIF/RTSP services are equally
 unauthenticated on this LAN. Not intended to be port-forwarded or exposed beyond it.
 """
+import asyncio
+import base64
 import re
 import subprocess
 import sys
@@ -187,6 +189,97 @@ def stream_status(camera_id):
     # this is the actual ground truth (also catches the unit crashing or being stopped
     # by something other than this GUI, not just this GUI's own actions).
     return jsonify({"cameraId": camera_id, "state": camera_control.get_stream_status(camera_id)})
+
+
+@app.get("/api/cameras/<camera_id>/analytics")
+def get_analytics(camera_id):
+    """Read the camera's motion-analytics tuning (Phase 4).
+
+    Read-only, and not by choice: `SetVideoAnalyticsConfiguration` is a **silent no-op**
+    on this camera. It returns success and changes nothing -- verified by sending
+    Sensitivity=55 and reading back 80 immediately after, twice. The advertised ONVIF 2.0
+    analytics service (`ver20/analytics/wsdl`) exposes no callable operations either, and
+    the vendor ISAPI path 404s. So these values can only be changed in the camera's own
+    web UI; surfacing them here at least explains *why* detection behaves as it does.
+    """
+    item = cameras_table().get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item or not item.get("onvifHost"):
+        return jsonify({"error": "unknown or non-ONVIF camera"}), 404
+
+    async def _read():
+        from onvif import ONVIFCamera
+        cam = ONVIFCamera(item["onvifHost"], int(item.get("onvifPort", 80)),
+                          item["onvifUser"], item["onvifPassword"],
+                          wsdl_dir=camera_control.WSDL_DIR)
+        await cam.update_xaddrs()
+        media = await cam.create_media_service()
+        vac = (await media.GetVideoAnalyticsConfigurations())[0]
+        mod = vac.AnalyticsEngineConfiguration.AnalyticsModule[0]
+        rule = vac.RuleEngineConfiguration.Rule[0]
+        out = {
+            "configName": vac.Name,
+            "module": {"name": mod.Name, "type": mod.Type,
+                       "params": {s.Name: s.Value for s in mod.Parameters.SimpleItem}},
+            "rule": {"name": rule.Name, "type": rule.Type,
+                     "params": {s.Name: s.Value for s in rule.Parameters.SimpleItem}},
+            "writable": False,
+            "readOnlyReason": "SetVideoAnalyticsConfiguration is a no-op on this camera "
+                              "(accepted, ignored) — change these in the camera's web UI",
+        }
+        await cam.close()
+        return out
+
+    try:
+        data = asyncio.run(_read())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {str(e)[:200]}"}), 502
+
+    # ActiveCells is a base64 bitmap of enabled detection cells. The camera returns an
+    # empty Layout element, so it never tells us the grid's Columns/Rows -- report the
+    # bit count and let the reader draw their own conclusion rather than inventing a
+    # geometry that might be wrong.
+    cells = data["rule"]["params"].get("ActiveCells")
+    if cells:
+        try:
+            raw = base64.b64decode(cells)
+            data["activeCells"] = {
+                "base64": cells,
+                "hex": raw.hex(),
+                "bits": "".join(f"{b:08b}" for b in raw),
+                "cellCount": len(raw) * 8,
+                "gridGeometry": "unknown — camera returns an empty Layout element",
+            }
+        except Exception:
+            pass
+    return jsonify(data)
+
+
+@app.post("/api/cameras/<camera_id>/mode")
+def set_recording_mode(camera_id):
+    """Phase 1 (Camera-Features.md §9) -- writes recordingMode to the registry only.
+
+    Mirrors the cloud `set-camera-mode` Lambda deliberately: same validation, same
+    allowed values, same ONVIF-host requirement. Both write the one registry row, so
+    whichever GUI you use, the other sees it on next refresh.
+    """
+    VALID = {"manual", "motion", "cellMotion", "human"}
+    mode = (request.get_json(force=True, silent=True) or {}).get("recordingMode")
+    if mode not in VALID:
+        return jsonify({"error": f"recordingMode must be one of {sorted(VALID)}"}), 400
+
+    table = cameras_table()
+    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if mode != "manual" and not item.get("onvifHost"):
+        return jsonify({"error": "no ONVIF host — this camera supports only 'manual'"}), 400
+
+    table.update_item(
+        Key={"cameraId": camera_id},
+        UpdateExpression="SET recordingMode = :m",
+        ExpressionAttributeValues={":m": mode},
+    )
+    return jsonify({"cameraId": camera_id, "recordingMode": mode})
 
 
 @app.post("/api/cameras/<camera_id>/ir")

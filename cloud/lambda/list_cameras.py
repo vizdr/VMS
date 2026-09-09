@@ -15,6 +15,15 @@ def lambda_handler(event, context):
                     "id": i["cameraId"],
                     "mode": i.get("mode"),
                     "hasIrControl": bool(i.get("hasIrControl", False)),
+                    # How clips get created for this camera. "manual" (the default, and
+                    # what every camera had before Phase 1) means only the Record button
+                    # makes clips; the detection modes are consumed by the event watcher.
+                    "recordingMode": i.get("recordingMode", "manual"),
+                    # Detection needs an ONVIF event subscription, so it is only possible
+                    # for cameras we have an ONVIF host for. cam-01 is a USB webcam with
+                    # no ONVIF at all and can therefore only ever be "manual" -- the GUIs
+                    # gate the selector on this, the same way they gate IR control.
+                    "supportsDetection": bool(i.get("onvifHost")),
                 }
                 for i in items
             ),

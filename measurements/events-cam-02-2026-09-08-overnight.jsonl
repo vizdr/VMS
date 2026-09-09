@@ -1,0 +1,350 @@
+{"t": "2026-09-08T19:33:05.541747+00:00", "kind": "start", "host": "192.168.178.67", "duration_sec": 34200}
+{"t": "2026-09-08T19:33:05.840862+00:00", "kind": "subscribed"}
+{"t": "2026-09-08T19:34:23.208240+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:34:23.270790+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:34:23.315721+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:34:28.200372+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:34:28.250721+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:34:28.302181+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:36:58.802520+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:36:58.860254+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:36:58.906608+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:37:03.799965+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:37:03.862254+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:37:03.904928+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:37:04.013949+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:37:04.062618+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:37:08.873178+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:37:08.972540+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:38:05.458453+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:38:05.522293+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:38:10.467609+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:38:10.468002+00:00", "kind": "heartbeat", "elapsed_sec": 305, "events_so_far": 19}
+{"t": "2026-09-08T19:38:10.522042+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:38:10.574240+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:41:30.522375+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:41:30.584236+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:41:30.628829+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:41:35.513896+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:41:35.577235+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:41:35.619453+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:41:40.517136+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:41:40.573209+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:41:57.587330+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:41:57.653628+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:41:57.697500+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:42:02.593491+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:42:02.639317+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:42:02.689930+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:42:07.598805+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:42:07.654894+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:42:07.705837+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:42:56.386771+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:42:56.447849+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:42:56.493907+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:01.386026+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:01.448291+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:43:01.493855+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:01.542490+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:01.597673+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:43:01.648169+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:06.461947+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:06.517309+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:43:06.570842+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:06.649313+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:06.708284+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:43:11.655512+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:43:11.655749+00:00", "kind": "heartbeat", "elapsed_sec": 606, "events_so_far": 53}
+{"t": "2026-09-08T19:43:11.705106+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:43:11.754065+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:19.503911+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:19.573352+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:45:19.610270+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:24.512584+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:24.578821+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:45:24.664276+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:24.770144+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:29.580448+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:29.632818+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:45:45.782242+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:45.835528+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:45:45.886851+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:50.789280+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:45:50.849146+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:45:50.897823+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:34.444984+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:34.501743+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:34.545546+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:39.443237+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:39.499573+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:39.553347+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:39.602090+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:39.658152+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:44.594245+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:44.681491+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:49.568875+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:49.629645+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:49.669932+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:49.723963+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:49.775671+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:49.825825+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:54.664543+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:54.708694+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:54.790211+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:54.889543+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:59.781377+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:59.830604+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:46:59.880294+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:46:59.989905+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:47:00.039211+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:47:04.925149+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:47:04.976024+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:47:05.031627+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:48:14.846567+00:00", "kind": "heartbeat", "elapsed_sec": 909, "events_so_far": 98}
+{"t": "2026-09-08T19:49:23.168541+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:49:23.234372+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:49:28.171748+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:49:28.225747+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:49:28.276277+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:03.034941+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:03.092473+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:50:03.141396+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:08.054701+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:41.291522+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:41.356129+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:50:41.394186+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:46.299190+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:46.356060+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:50:46.410690+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:46.493118+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:46.541874+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:50:46.596010+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:51.496311+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:51.556710+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:50:51.603400+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:51.657118+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:51.713946+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:50:51.763832+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:56.569960+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:50:56.620713+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:50:56.675065+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:53:15.833540+00:00", "kind": "heartbeat", "elapsed_sec": 1210, "events_so_far": 125}
+{"t": "2026-09-08T19:54:36.490782+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:54:36.544593+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:54:36.592719+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:54:41.489999+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:54:41.544442+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:56:01.151658+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:56:01.209903+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:56:01.254349+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:56:06.152942+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:56:06.204044+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:56:06.252958+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:56:26.345823+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:56:26.403534+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:56:26.445788+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:56:31.345449+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:56:31.394287+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:57:13.806619+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:57:13.911648+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:57:18.816576+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-08T19:57:18.871579+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-08T19:57:18.918672+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-08T19:58:18.819008+00:00", "kind": "heartbeat", "elapsed_sec": 1513, "events_so_far": 146}
+{"t": "2026-09-08T20:03:28.806680+00:00", "kind": "heartbeat", "elapsed_sec": 1823, "events_so_far": 146}
+{"t": "2026-09-08T20:08:38.789401+00:00", "kind": "heartbeat", "elapsed_sec": 2133, "events_so_far": 146}
+{"t": "2026-09-08T20:13:48.774885+00:00", "kind": "heartbeat", "elapsed_sec": 2443, "events_so_far": 146}
+{"t": "2026-09-08T20:18:58.762321+00:00", "kind": "heartbeat", "elapsed_sec": 2753, "events_so_far": 146}
+{"t": "2026-09-08T20:24:08.746144+00:00", "kind": "heartbeat", "elapsed_sec": 3063, "events_so_far": 146}
+{"t": "2026-09-08T20:29:18.733270+00:00", "kind": "heartbeat", "elapsed_sec": 3373, "events_so_far": 146}
+{"t": "2026-09-08T20:34:28.717919+00:00", "kind": "heartbeat", "elapsed_sec": 3683, "events_so_far": 146}
+{"t": "2026-09-08T20:39:38.706968+00:00", "kind": "heartbeat", "elapsed_sec": 3993, "events_so_far": 146}
+{"t": "2026-09-08T20:44:48.690198+00:00", "kind": "heartbeat", "elapsed_sec": 4303, "events_so_far": 146}
+{"t": "2026-09-08T20:49:58.677439+00:00", "kind": "heartbeat", "elapsed_sec": 4613, "events_so_far": 146}
+{"t": "2026-09-08T20:55:08.661096+00:00", "kind": "heartbeat", "elapsed_sec": 4923, "events_so_far": 146}
+{"t": "2026-09-08T21:00:18.646817+00:00", "kind": "heartbeat", "elapsed_sec": 5233, "events_so_far": 146}
+{"t": "2026-09-08T21:05:28.631923+00:00", "kind": "heartbeat", "elapsed_sec": 5543, "events_so_far": 146}
+{"t": "2026-09-08T21:10:38.620383+00:00", "kind": "heartbeat", "elapsed_sec": 5853, "events_so_far": 146}
+{"t": "2026-09-08T21:15:48.605250+00:00", "kind": "heartbeat", "elapsed_sec": 6163, "events_so_far": 146}
+{"t": "2026-09-08T21:20:58.591892+00:00", "kind": "heartbeat", "elapsed_sec": 6473, "events_so_far": 146}
+{"t": "2026-09-08T21:26:08.577772+00:00", "kind": "heartbeat", "elapsed_sec": 6783, "events_so_far": 146}
+{"t": "2026-09-08T21:31:18.563721+00:00", "kind": "heartbeat", "elapsed_sec": 7093, "events_so_far": 146}
+{"t": "2026-09-08T21:36:28.550029+00:00", "kind": "heartbeat", "elapsed_sec": 7403, "events_so_far": 146}
+{"t": "2026-09-08T21:41:38.535677+00:00", "kind": "heartbeat", "elapsed_sec": 7713, "events_so_far": 146}
+{"t": "2026-09-08T21:46:48.521796+00:00", "kind": "heartbeat", "elapsed_sec": 8023, "events_so_far": 146}
+{"t": "2026-09-08T21:51:58.507785+00:00", "kind": "heartbeat", "elapsed_sec": 8333, "events_so_far": 146}
+{"t": "2026-09-08T21:57:08.495009+00:00", "kind": "heartbeat", "elapsed_sec": 8643, "events_so_far": 146}
+{"t": "2026-09-08T22:02:18.480789+00:00", "kind": "heartbeat", "elapsed_sec": 8953, "events_so_far": 146}
+{"t": "2026-09-08T22:07:28.466552+00:00", "kind": "heartbeat", "elapsed_sec": 9263, "events_so_far": 146}
+{"t": "2026-09-08T22:12:38.452758+00:00", "kind": "heartbeat", "elapsed_sec": 9573, "events_so_far": 146}
+{"t": "2026-09-08T22:17:48.438817+00:00", "kind": "heartbeat", "elapsed_sec": 9883, "events_so_far": 146}
+{"t": "2026-09-08T22:22:58.425540+00:00", "kind": "heartbeat", "elapsed_sec": 10193, "events_so_far": 146}
+{"t": "2026-09-08T22:27:58.426122+00:00", "kind": "heartbeat", "elapsed_sec": 10493, "events_so_far": 146}
+{"t": "2026-09-08T22:33:08.394399+00:00", "kind": "heartbeat", "elapsed_sec": 10803, "events_so_far": 146}
+{"t": "2026-09-08T22:38:18.380713+00:00", "kind": "heartbeat", "elapsed_sec": 11113, "events_so_far": 146}
+{"t": "2026-09-08T22:43:28.364469+00:00", "kind": "heartbeat", "elapsed_sec": 11423, "events_so_far": 146}
+{"t": "2026-09-08T22:48:38.349449+00:00", "kind": "heartbeat", "elapsed_sec": 11733, "events_so_far": 146}
+{"t": "2026-09-08T22:53:48.338861+00:00", "kind": "heartbeat", "elapsed_sec": 12043, "events_so_far": 146}
+{"t": "2026-09-08T22:58:58.325261+00:00", "kind": "heartbeat", "elapsed_sec": 12353, "events_so_far": 146}
+{"t": "2026-09-08T23:04:08.305019+00:00", "kind": "heartbeat", "elapsed_sec": 12663, "events_so_far": 146}
+{"t": "2026-09-08T23:09:18.295888+00:00", "kind": "heartbeat", "elapsed_sec": 12973, "events_so_far": 146}
+{"t": "2026-09-08T23:14:28.277579+00:00", "kind": "heartbeat", "elapsed_sec": 13283, "events_so_far": 146}
+{"t": "2026-09-08T23:19:38.269029+00:00", "kind": "heartbeat", "elapsed_sec": 13593, "events_so_far": 146}
+{"t": "2026-09-08T23:24:48.250033+00:00", "kind": "heartbeat", "elapsed_sec": 13903, "events_so_far": 146}
+{"t": "2026-09-08T23:29:58.239069+00:00", "kind": "heartbeat", "elapsed_sec": 14213, "events_so_far": 146}
+{"t": "2026-09-08T23:35:08.220199+00:00", "kind": "heartbeat", "elapsed_sec": 14523, "events_so_far": 146}
+{"t": "2026-09-08T23:40:18.208921+00:00", "kind": "heartbeat", "elapsed_sec": 14833, "events_so_far": 146}
+{"t": "2026-09-08T23:45:28.196538+00:00", "kind": "heartbeat", "elapsed_sec": 15143, "events_so_far": 146}
+{"t": "2026-09-08T23:50:38.181234+00:00", "kind": "heartbeat", "elapsed_sec": 15453, "events_so_far": 146}
+{"t": "2026-09-08T23:55:48.167003+00:00", "kind": "heartbeat", "elapsed_sec": 15763, "events_so_far": 146}
+{"t": "2026-09-09T00:00:58.152619+00:00", "kind": "heartbeat", "elapsed_sec": 16073, "events_so_far": 146}
+{"t": "2026-09-09T00:06:08.136924+00:00", "kind": "heartbeat", "elapsed_sec": 16383, "events_so_far": 146}
+{"t": "2026-09-09T00:11:18.125903+00:00", "kind": "heartbeat", "elapsed_sec": 16693, "events_so_far": 146}
+{"t": "2026-09-09T00:16:28.110402+00:00", "kind": "heartbeat", "elapsed_sec": 17003, "events_so_far": 146}
+{"t": "2026-09-09T00:21:38.097292+00:00", "kind": "heartbeat", "elapsed_sec": 17313, "events_so_far": 146}
+{"t": "2026-09-09T00:26:48.078471+00:00", "kind": "heartbeat", "elapsed_sec": 17623, "events_so_far": 146}
+{"t": "2026-09-09T00:31:58.064080+00:00", "kind": "heartbeat", "elapsed_sec": 17933, "events_so_far": 146}
+{"t": "2026-09-09T00:37:08.050751+00:00", "kind": "heartbeat", "elapsed_sec": 18243, "events_so_far": 146}
+{"t": "2026-09-09T00:42:18.039317+00:00", "kind": "heartbeat", "elapsed_sec": 18552, "events_so_far": 146}
+{"t": "2026-09-09T00:47:19.084753+00:00", "kind": "heartbeat", "elapsed_sec": 18854, "events_so_far": 146}
+{"t": "2026-09-09T00:52:29.070402+00:00", "kind": "heartbeat", "elapsed_sec": 19164, "events_so_far": 146}
+{"t": "2026-09-09T00:57:39.056841+00:00", "kind": "heartbeat", "elapsed_sec": 19474, "events_so_far": 146}
+{"t": "2026-09-09T01:02:49.042714+00:00", "kind": "heartbeat", "elapsed_sec": 19784, "events_so_far": 146}
+{"t": "2026-09-09T01:07:59.029640+00:00", "kind": "heartbeat", "elapsed_sec": 20093, "events_so_far": 146}
+{"t": "2026-09-09T01:13:09.014120+00:00", "kind": "heartbeat", "elapsed_sec": 20403, "events_so_far": 146}
+{"t": "2026-09-09T01:18:18.998564+00:00", "kind": "heartbeat", "elapsed_sec": 20713, "events_so_far": 146}
+{"t": "2026-09-09T01:21:51.738799+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:21:51.797920+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:21:51.845872+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:21:56.748625+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:21:56.806553+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:21:56.858013+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:14.331436+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:14.407824+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:14.439847+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:19.331460+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:19.331664+00:00", "kind": "heartbeat", "elapsed_sec": 21014, "events_so_far": 156}
+{"t": "2026-09-09T01:23:19.391105+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:19.455179+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:24.334738+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:24.385688+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:24.439378+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:29.329096+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:29.390946+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:29.439313+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:29.493551+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:29.551800+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:29.597813+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:34.396737+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:34.454872+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:34.507839+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:34.612056+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:34.665547+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:39.528124+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:39.585062+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:39.638435+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:44.531737+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:44.585781+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:44.639874+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:44.743323+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:44.796635+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:49.666340+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:23:49.720212+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:23:49.768597+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:24:02.858006+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:24:02.963436+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:24:07.867658+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T01:24:07.917020+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T01:24:07.969989+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T01:28:27.976982+00:00", "kind": "heartbeat", "elapsed_sec": 21322, "events_so_far": 188}
+{"t": "2026-09-09T01:33:37.961566+00:00", "kind": "heartbeat", "elapsed_sec": 21632, "events_so_far": 188}
+{"t": "2026-09-09T01:38:47.947652+00:00", "kind": "heartbeat", "elapsed_sec": 21942, "events_so_far": 188}
+{"t": "2026-09-09T01:43:57.934825+00:00", "kind": "heartbeat", "elapsed_sec": 22252, "events_so_far": 188}
+{"t": "2026-09-09T01:49:07.921076+00:00", "kind": "heartbeat", "elapsed_sec": 22562, "events_so_far": 188}
+{"t": "2026-09-09T01:54:17.905748+00:00", "kind": "heartbeat", "elapsed_sec": 22872, "events_so_far": 188}
+{"t": "2026-09-09T01:59:27.893341+00:00", "kind": "heartbeat", "elapsed_sec": 23182, "events_so_far": 188}
+{"t": "2026-09-09T02:04:37.874671+00:00", "kind": "heartbeat", "elapsed_sec": 23492, "events_so_far": 188}
+{"t": "2026-09-09T02:09:47.864270+00:00", "kind": "heartbeat", "elapsed_sec": 23802, "events_so_far": 188}
+{"t": "2026-09-09T02:14:57.850699+00:00", "kind": "heartbeat", "elapsed_sec": 24112, "events_so_far": 188}
+{"t": "2026-09-09T02:20:07.838668+00:00", "kind": "heartbeat", "elapsed_sec": 24422, "events_so_far": 188}
+{"t": "2026-09-09T02:25:17.818639+00:00", "kind": "heartbeat", "elapsed_sec": 24732, "events_so_far": 188}
+{"t": "2026-09-09T02:30:27.809963+00:00", "kind": "heartbeat", "elapsed_sec": 25042, "events_so_far": 188}
+{"t": "2026-09-09T02:35:37.795238+00:00", "kind": "heartbeat", "elapsed_sec": 25352, "events_so_far": 188}
+{"t": "2026-09-09T02:40:37.853964+00:00", "kind": "heartbeat", "elapsed_sec": 25652, "events_so_far": 188}
+{"t": "2026-09-09T02:45:47.765535+00:00", "kind": "heartbeat", "elapsed_sec": 25962, "events_so_far": 188}
+{"t": "2026-09-09T02:47:05.938171+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:06.010110+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:06.040576+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:10.934677+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:10.992623+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:11.043390+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:16.018369+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:16.075327+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:16.120586+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:21.012588+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:21.061712+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:21.112303+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:21.749831+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:21.810644+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:26.752708+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:26.856295+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:26.962509+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:27.013489+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:31.822797+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:31.881362+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:31.930617+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:32.225993+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:32.281803+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:32.337142+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:37.232353+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:37.337235+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:39.490995+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:39.562286+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:39.596392+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:44.494889+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:47:44.547532+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:47:44.597620+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:49:02.935499+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:49:02.990650+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:49:07.935508+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T02:49:07.991144+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T02:49:08.040530+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T02:50:57.747741+00:00", "kind": "heartbeat", "elapsed_sec": 26272, "events_so_far": 225}
+{"t": "2026-09-09T02:56:07.736186+00:00", "kind": "heartbeat", "elapsed_sec": 26582, "events_so_far": 225}
+{"t": "2026-09-09T03:01:17.728876+00:00", "kind": "heartbeat", "elapsed_sec": 26892, "events_so_far": 225}
+{"t": "2026-09-09T03:06:27.715862+00:00", "kind": "heartbeat", "elapsed_sec": 27202, "events_so_far": 225}
+{"t": "2026-09-09T03:11:37.696512+00:00", "kind": "heartbeat", "elapsed_sec": 27512, "events_so_far": 225}
+{"t": "2026-09-09T03:16:47.678073+00:00", "kind": "heartbeat", "elapsed_sec": 27822, "events_so_far": 225}
+{"t": "2026-09-09T03:21:57.664536+00:00", "kind": "heartbeat", "elapsed_sec": 28132, "events_so_far": 225}
+{"t": "2026-09-09T03:27:07.653162+00:00", "kind": "heartbeat", "elapsed_sec": 28442, "events_so_far": 225}
+{"t": "2026-09-09T03:32:17.635525+00:00", "kind": "heartbeat", "elapsed_sec": 28752, "events_so_far": 225}
+{"t": "2026-09-09T03:37:27.626608+00:00", "kind": "heartbeat", "elapsed_sec": 29062, "events_so_far": 225}
+{"t": "2026-09-09T03:42:37.611726+00:00", "kind": "heartbeat", "elapsed_sec": 29372, "events_so_far": 225}
+{"t": "2026-09-09T03:47:47.592298+00:00", "kind": "heartbeat", "elapsed_sec": 29682, "events_so_far": 225}
+{"t": "2026-09-09T03:52:57.578989+00:00", "kind": "heartbeat", "elapsed_sec": 29992, "events_so_far": 225}
+{"t": "2026-09-09T03:58:07.565887+00:00", "kind": "heartbeat", "elapsed_sec": 30302, "events_so_far": 225}
+{"t": "2026-09-09T04:03:17.549391+00:00", "kind": "heartbeat", "elapsed_sec": 30612, "events_so_far": 225}
+{"t": "2026-09-09T04:08:27.539786+00:00", "kind": "heartbeat", "elapsed_sec": 30922, "events_so_far": 225}
+{"t": "2026-09-09T04:13:37.525563+00:00", "kind": "heartbeat", "elapsed_sec": 31232, "events_so_far": 225}
+{"t": "2026-09-09T04:18:47.511336+00:00", "kind": "heartbeat", "elapsed_sec": 31542, "events_so_far": 225}
+{"t": "2026-09-09T04:23:57.494322+00:00", "kind": "heartbeat", "elapsed_sec": 31852, "events_so_far": 225}
+{"t": "2026-09-09T04:29:07.485238+00:00", "kind": "heartbeat", "elapsed_sec": 32162, "events_so_far": 225}
+{"t": "2026-09-09T04:34:17.473551+00:00", "kind": "heartbeat", "elapsed_sec": 32472, "events_so_far": 225}
+{"t": "2026-09-09T04:39:27.453527+00:00", "kind": "heartbeat", "elapsed_sec": 32782, "events_so_far": 225}
+{"t": "2026-09-09T04:44:37.438459+00:00", "kind": "heartbeat", "elapsed_sec": 33092, "events_so_far": 225}
+{"t": "2026-09-09T04:49:47.427155+00:00", "kind": "heartbeat", "elapsed_sec": 33402, "events_so_far": 225}
+{"t": "2026-09-09T04:54:57.411457+00:00", "kind": "heartbeat", "elapsed_sec": 33712, "events_so_far": 225}
+{"t": "2026-09-09T05:00:07.400101+00:00", "kind": "heartbeat", "elapsed_sec": 34022, "events_so_far": 225}
+{"t": "2026-09-09T05:02:32.918567+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T05:02:32.969171+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T05:02:37.917088+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T05:02:37.975717+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T05:02:38.024467+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T05:02:38.189619+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T05:02:38.245871+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "true", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T05:02:38.296991+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T05:02:43.182254+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T05:02:43.231443+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
+{"t": "2026-09-09T05:02:43.279758+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-09T05:03:05.574747+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-09T05:03:05.575662+00:00", "kind": "stop", "events_total": 237}
