@@ -1,4 +1,5 @@
 import boto3, os, json
+from botocore.exceptions import ClientError
 
 REGION = os.environ["AWS_REGION"]
 DEFAULT_STREAM = os.environ.get("STREAM_NAME", "cam-01")
@@ -7,9 +8,6 @@ CORS = {"Access-Control-Allow-Origin": "*"}
 cameras_table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
 
 def lambda_handler(event, context):
-    # created outside the try block -- see record_clip.py for why: referencing
-    # kv.exceptions.* in the except clause needs kv to exist even if validation fails
-    # before the line that would normally assign it.
     kv = boto3.client("kinesisvideo", region_name=REGION)
     try:
         stream = (event.get("queryStringParameters") or {}).get("stream", DEFAULT_STREAM)
@@ -43,11 +41,25 @@ def lambda_handler(event, context):
             "headers": CORS,
             "body": json.dumps({"url": url, "expires_in": session_ttl}),
         }
-    except kv.exceptions.ResourceNotFoundException:
+    except ClientError as e:
+        # Matched on the error *code*, not on a client's generated exception class.
+        # This used to be `except kv.exceptions.ResourceNotFoundException`, which never
+        # fired for the common case: "no fragments" is raised by the **kvam** client
+        # (kinesis-video-archived-media), and boto3 generates a separate exception class
+        # per client, so kvam's ResourceNotFoundException is not kv's. The friendly 503
+        # below was dead code and users saw the raw AWS text via the generic handler.
+        if e.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+            return {
+                "statusCode": 503,
+                "headers": CORS,
+                "body": json.dumps({"error":
+                    "stream is not live -- no footage is reaching the cloud. "
+                    "Press Start; if it stays down, check the camera is online."}),
+            }
         return {
-            "statusCode": 503,
+            "statusCode": 500,
             "headers": CORS,
-            "body": json.dumps({"error": "stream is not currently live -- press Start"}),
+            "body": json.dumps({"error": str(e)}),
         }
     except Exception as e:
         return {

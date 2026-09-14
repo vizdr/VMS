@@ -67,8 +67,15 @@ IAM policy documents for each function's role live in `cloud/iam/`.
 aws s3 cp client/index.html s3://vms-demo-client-596633517506/index.html \
   --content-type text/html --cache-control "no-cache, must-revalidate"
 ```
-The `--cache-control` flag is required — S3's static-website default caching previously
-caused stale-client incidents.
+Served at **https://dugyd3kkt36pw.cloudfront.net** (CloudFront + OAC, guide §8.5.1). The
+`--cache-control` flag is required and now does double duty: it prevented S3
+static-website stale-client incidents, and it makes CloudFront revalidate rather than
+serve a cached copy, so an upload is live immediately (`x-cache: RefreshHit`). Drop the
+header and you also need `aws cloudfront create-invalidation --distribution-id
+E1B12167KKII6B --paths '/*'`.
+
+The plain-HTTP S3 website URL is still live pending §8.5.1's final cutover (OAC-only
+bucket policy → Block Public Access → `delete-bucket-website`).
 
 ### systemd — two separate managers, easy to mix up
 
@@ -77,7 +84,8 @@ caused stale-client incidents.
 actual KVS producers that cost money while running.
 
 **User units** (`~/.config/systemd/user/`, `systemctl --user`, no sudo): `kvs-mediamtx`,
-`kvs-camera-init`, `kvs-camera-publish`, `kvs-agent`, `onvif-admin`.
+`kvs-camera-init`, `kvs-camera-publish`, `kvs-agent`, `onvif-admin`,
+`kvs-event-watcher` (ONVIF detection → clips).
 
 A unit in one manager **cannot** `Requires=`/`After=` a unit in the other — they're
 independent systemd instances. (A templated system unit once declared
@@ -192,4 +200,4 @@ The guide's §1.2 cost model treats "never leave `kvs-cam0N.service` running una
 as a hard rule (it's what incurs `PutMedia` charges) — this shows up throughout the code
 as the reason Start/Stop exists as an explicit action rather than the producer just
 running continuously, and why "stop the stream" is step one of the teardown/shutdown
-sequence in `LAUNCH.md` Part E.
+sequence in `LAUNCH.md` Part F.

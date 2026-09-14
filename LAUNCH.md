@@ -106,19 +106,25 @@ S3 static site `vms-demo-client-596633517506`. Full commands for each are in the
 Everything below is a proper systemd unit — nothing here needs a manually-run background
 process anymore.
 
-**All four matter — a partial launch fails silently, not obviously.** A real incident
+**A partial launch fails silently, not obviously.** A real incident
 (2026-08-20): `kvs-camera-publish` was missing from an earlier version of this list.
 Everything else came up "active" and *looked* healthy — `kvs-cam01.service` was even
 `activating` with `Restart=on-failure` doing its job — but with nothing actually feeding
-`rtsp://127.0.0.1:8554/cam01`, the whole chain was quietly producing nothing. Run all
-four, then verify with **Part C**, not just `systemctl ... is-active`.
+`rtsp://127.0.0.1:8554/cam01`, the whole chain was quietly producing nothing. Run them
+all, then verify with **Part C**, not just `systemctl ... is-active`.
 
 ```bash
 systemctl --user enable --now kvs-camera-init     # one-shot: locks exposure/WB/focus
 systemctl --user enable --now kvs-mediamtx        # RTSP server
 systemctl --user enable --now kvs-camera-publish  # camera → rtsp://127.0.0.1:8554/cam01 (§2.8)
 systemctl --user enable --now kvs-agent           # MQTT control agent (adapter-01)
+systemctl --user enable --now onvif-admin         # local camera admin GUI, port 8080 (Part E)
+systemctl --user enable --now kvs-event-watcher   # ONVIF detection -> evidence clips
 ```
+
+The last two are additions since the original list. `onvif-admin` is only needed when you
+want to discover/register/control cameras (Part E); `kvs-event-watcher` only does anything
+for a camera whose `recordingMode` is a detection mode — it idles otherwise, at no cost.
 
 That's it — the actual KVS producer (`kvs-cam01.service`, a **system** unit, not user) is
 deliberately *not* auto-started here. It's controlled on demand by the agent, either via
@@ -140,8 +146,8 @@ pressure), `sudo systemctl is-active earlyoom nftables` (should both be `active`
 
 ## Part C — Verify
 
-**Check in this order — `systemctl ... is-active` alone is not proof of anything.** All
-four units can report `active` while the stream is genuinely dead (§2.8's incident). Only
+**Check in this order — `systemctl ... is-active` alone is not proof of anything.** Every
+unit can report `active` while the stream is genuinely dead (§2.8's incident). Only
 the first two commands below actually prove media is flowing; the systemd check at the
 end is a secondary sanity check, not the primary one.
 
@@ -184,7 +190,102 @@ player** if it doesn't auto-recover from the initial buffering.
 
 ---
 
-## Part E — Stop everything / cost control
+## Part E — Add an ONVIF camera (local admin GUI)
+
+**URL:** http://192.168.178.53:8080 — LAN only, no login. If it isn't up:
+`systemctl --user enable --now onvif-admin`.
+
+**Why this is a separate local app and not part of the browser client:** WS-Discovery is
+UDP multicast. It only works from a process on the same LAN segment as the cameras — the
+cloud client is served from S3 and reached over the internet, and Lambda has no route to
+your LAN at all. Discovery and registration therefore have to run on the Pi (guide
+§16.2.1).
+
+**Prerequisite:** the camera must be on the *same broadcast domain* as the Pi. Multicast
+does not cross routers or VLANs by design, so a camera on a different subnet will never
+answer a scan no matter how long you wait.
+
+### E1. Discover
+
+1. Enter the camera's **ONVIF username / password** (for the existing camera: `admin`).
+2. Press **Scan LAN**.
+
+Each device that answers shows its XAddrs, ONVIF scopes, and — because credentials were
+supplied — its manufacturer/model, media profile and a real RTSP URL. A camera already in
+the registry is labelled **"Registered as cam-NN"** and its button reads *Re-register*
+instead of *Register*.
+
+Same thing from the CLI, useful when the GUI is not running:
+
+```bash
+venv-adapter/bin/python3 adapter/bin/discover-onvif.py --user admin --password *** --timeout 5
+```
+
+### E2. Register
+
+Press **Register this camera**, check the pre-filled fields, and give it an ID matching
+`cam-NN` (e.g. `cam-03`). One click then does all of this:
+
+| Step | What happens |
+|---|---|
+| MediaMTX path | added **live** via its local API — no config rewrite, no restart, so other cameras keep streaming |
+| systemd | `/etc/adapter/channels/camNN.env` written, then `kvs-cam@camNN.service` enabled (templated unit, guide §16.6) |
+| KVS | stream `cam-NN` created, 24 h retention |
+| Registry | row written to the `cameras` DynamoDB table |
+
+That registry row is the single source of truth: the cloud client, the MQTT control plane
+and every camera-aware Lambda read it, so a camera registered here works **everywhere
+immediately, with no code change and no redeploy**.
+
+### E3. Re-register an existing camera
+
+Use this when a camera's IP moved (no DHCP reservation) or its credentials changed. It
+updates the MediaMTX path source and the registry row — and deliberately **does not touch
+systemd**, because `cam-01`/`cam-02` predate the `kvs-cam@` template and re-provisioning
+them would start a second, conflicting producer for the same KVS stream.
+
+### E4. Control, from the same table
+
+| Column | Does what |
+|---|---|
+| **Local preview** | live video straight from MediaMTX (port 8888) — no cloud round trip, works before AWS is involved at all |
+| **KVS push** | polls `systemctl is-active` for the producer — actual state, not what a button last claimed |
+| **Recording** | `manual` / `motion` / `cellMotion` / `human` — consumed by `kvs-event-watcher` |
+| **Start/Stop Remote** | starts/stops the KVS producer, i.e. what costs money |
+| **IR Auto/Off/On** | day-night switch, where the camera supports it |
+
+Motion analytics (sensitivity, cell mask, alarm delays) are shown **read-only** in section
+3 of the page. That is not a UI shortcut: `SetVideoAnalyticsConfiguration` is a silent
+no-op on this camera — it returns success and changes nothing (verified). Change those in
+the camera's own web UI.
+
+### E5. Verify — same rule as Part C
+
+`systemctl is-active` is not proof. After registering:
+
+```bash
+ffprobe -rtsp_transport tcp rtsp://127.0.0.1:8554/camNN     # is the camera actually feeding MediaMTX?
+systemctl is-active kvs-cam@camNN.service                   # is the producer up?
+```
+
+Then Part C's KVS check to confirm media is reaching the cloud.
+
+### Gotchas found the hard way
+
+- **Detection recording needs the producer running.** `clip_to_s3` cuts `ts-12s..ts+33s`
+  from KVS, and KVS only returns footage it already ingested. Arming a detection mode
+  while the stream is stopped produces triggers with no footage behind them — the clip
+  fails and the only trace is a Lambda log. Start the stream first.
+- **A clip takes ~40 s to appear** after a detection (38 s post-roll so the full window
+  exists, plus Lambda time), then up to 30 s more before the browser client announces it.
+  Not a fault — pressing Refresh sooner simply finds nothing.
+- **Registration is not idempotent against a half-finished attempt.** If provisioning
+  fails the MediaMTX path is rolled back, but check `/etc/adapter/channels/` before
+  retrying with the same ID.
+
+---
+
+## Part F — Stop everything / cost control
 
 Per §1.2's cost rule — never leave the producer running unattended:
 
