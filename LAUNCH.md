@@ -168,6 +168,33 @@ systemctl --user list-units 'kvs-*' --no-pager
 sudo systemctl is-active kvs-cam01.service
 ```
 
+### If the camera has audio enabled (guide §18)
+
+Audio is off by default. When it is on, two extra checks matter, because both of its
+failure modes are **silent** at the level of step 1–3 above — fragments persist, both
+tracks appear, and `ffprobe` is happy:
+
+```bash
+# 4. frames being rejected? want exactly 0.
+#    Anything above zero is the shared-DTS trap (§18.3) and you are losing audio.
+journalctl -u kvs-cam01.service --since "-60 s" | grep -c 0x30000005
+
+# 5. is the audio actually all arriving, and is it real?
+#    delivered kb/s well below the configured bitrate = frames being dropped;
+#    RMS at the noise floor with a high flat factor = a dead or clipping mic.
+ffmpeg -i "$URL" -t 20 -c copy -y /tmp/s.mp4
+ffprobe /tmp/s.mp4                     # expect BOTH streams
+ffmpeg -i /tmp/s.mp4 -vn -af astats=metadata=1 -f null - 2>&1 | grep -E 'RMS|Flat'
+```
+
+Note that step 2 is the step that catches codec-private-data errors: a stream can ingest
+perfectly and still fail `GetHLSStreamingSessionURL` with
+`InvalidCodecPrivateDataException`. And as always, finish in a **browser** — MSE is
+stricter than `ffmpeg` and has caught two regressions here that `ffmpeg` passed.
+
+To toggle audio: tick "Record audio with video" in the cloud client, or "with audio" in
+the local admin table. It applies on the camera's **next Start**, by design (§18.7).
+
 ---
 
 ## Part D — Access the browser client (§8, Checkpoint 7)

@@ -130,6 +130,25 @@ explicitly, since GStreamer's `v4l2h264enc` wrapper otherwise negotiates Baselin
 though the hardware control's own default is High, and Baseline broke browser (but not
 `ffmpeg`) playback.
 
+**Audio is optional, per-camera, and off by default** (guide §18). Two registry flags gate
+it — `audioCapable` (hardware fact, set at registration) and `audioEnabled` (user choice,
+set from either GUI) — and the producer scripts read them once at startup via
+`adapter/bin/camera-audio.py`. The setting therefore applies on the camera's **next
+Start**, which is deliberate: KVS rejects a stream whose fragments change from video-only
+to audio+video partway through, so applying it live would break `GetClip` across the
+boundary. With audio off, every pipeline is byte-for-byte the pre-audio one.
+
+The constraint that shapes all of it: **KVS's ingest and playback paths accept different
+codecs, and ingest is the permissive one.** `kvssink` takes G.711 and malformed AAC
+codec-private-data without complaint; `GetHLSStreamingSessionURL`/`GetClip` then refuse to
+serve them. So audio is always transcoded to AAC at the producer (never encoded earlier
+and passed through RTSP — `rtspclientsink` payloads AAC as LATM, which mangles the CPD),
+and the sample rate is chosen against the *video frame rate* rather than for fidelity,
+because `kvssink` synthesises the DTS that GStreamer audio buffers lack from a counter
+shared with the video track. Guide §18.3 has the arithmetic; the short version is that
+audio frame duration must exceed the video frame interval, and getting it wrong silently
+loses half the audio.
+
 A separate KVS producer process per camera (`kvs-cam01.service` / `kvs-cam02.service` /
 future `kvs-cam@<id>.service` instances) pulls from MediaMTX's RTSP and pushes to its own
 Kinesis Video Stream. **This is the layer Start/Stop buttons (in either GUI) actually

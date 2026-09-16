@@ -10,6 +10,29 @@
   input { display: block; margin: 0.5rem 0; padding: 0.5rem; width: 100%; box-sizing: border-box; }
   button { padding: 0.5rem 1rem; margin-right: 0.5rem; }
   .status { color: #666; font-size: 0.9rem; }
+  /* Audio gets its own small panel: the two settings in it mean different things (one
+     changes the stream for everyone, one only changes this browser) and sitting them
+     loose among the buttons made that unreadable. */
+  .audio-section {
+    margin: 1rem 0; padding: 0.55rem 0.85rem;
+    border: 1px solid #e0e0e0; border-radius: 6px; background: #fafafa;
+  }
+  .audio-section h3 { margin: 0 0 0.35rem; font-size: 0.95rem; }
+  .audio-row {
+    display: flex; align-items: baseline; gap: 0.45rem;
+    margin: 0.25rem 0; cursor: pointer; line-height: 1.35; font-size: 0.9rem;
+  }
+  /* The global `input` rule above is written for the login form -- display:block,
+     width:100%, padding. Applied to a checkbox it makes the box fill the whole row and
+     pushes the label clean out of the panel, so every part of it has to be undone here
+     explicitly; `flex: none` alone does not do it. */
+  .audio-row input[type="checkbox"] {
+    display: inline-block; width: auto; margin: 0; padding: 0;
+    flex: none; position: relative; top: 2px;
+  }
+  .audio-row small { color: #666; }
+  .audio-row.disabled { opacity: 0.55; cursor: default; }
+  .audio-section > .status { margin: 0.4rem 0 0; }
   .video-wrap { position: relative; background: #000; aspect-ratio: 16 / 9; }
   video { display: block; width: 100%; height: 100%; }
   .overlay {
@@ -115,8 +138,12 @@ function teardownPlayer(camera) {
   s.refreshTimer = null;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = el(camera, "video");
+  v.onvolumechange = null;        // or it fires during load() and rewrites s.listen
   v.removeAttribute("src");
   v.load();
+  // Stopping leaves nothing to listen to. s.listen is deliberately NOT cleared -- it is
+  // the user's standing preference and is reapplied when a stream with sound comes back.
+  setListenAvailable(camera, false);
 }
 
 // A KVS HLS session URL dies at `expires_in` seconds and cannot be revived -- every
@@ -139,6 +166,60 @@ function recModeHint(mode, supportsDetection) {
   if (!supportsDetection) return "no ONVIF — manual only";
   if (!mode || mode === "manual") return "manual only — use Start Recording";
   return `${mode} detection armed — a clip is written ~40 s after a detection (post-roll + processing), then announced below within 30 s. Requires the stream to be running.`;
+}
+
+// One place for the audio wording, same reasoning as recModeHint(). The "next Start"
+// caveat is not a UI nicety and must not be softened: the producer reads audioEnabled
+// once at startup and never re-reads, because KVS rejects a stream whose fragments
+// change from video-only to audio+video mid-stream ("Track changes aren't supported" --
+// GetClip and GetHLSStreamingSessionURL both). Applying this live would break clips
+// across the boundary, so a restart is the correct behaviour, not a limitation.
+function audioHint(enabled, capable) {
+  if (!capable) return "this camera has no microphone";
+  return enabled
+    ? "microphone is included — you can hear it live and in clips"
+    : "video only — no microphone in the live view or in clips";
+}
+
+// "Include microphone" and "Listen here" are deliberately two controls, because they are
+// two different things and conflating them confuses people:
+//
+//   Include microphone -> whether audio exists in the KVS stream at all. Affects the live
+//                         view AND every clip. Costs bandwidth. Applies on next Start.
+//   Listen here        -> whether THIS browser plays that audio out loud. Local only,
+//                         instant, affects nobody else, costs nothing.
+//
+// The second is useless without the first, so it stays disabled until the player reports
+// an audio track actually present in the stream it is playing.
+function setListenAvailable(camera, available) {
+  const box = document.getElementById(`listen-${camera}`);
+  const lbl = document.getElementById(`listenLabel-${camera}`);
+  const hint = document.getElementById(`listenHint-${camera}`);
+  if (!box || !lbl) return;
+  box.disabled = !available;
+  lbl.classList.toggle("disabled", !available);
+  if (hint) {
+    hint.textContent = available
+      ? "— your speakers only; changes nothing for anyone else"
+      : "— no sound in this stream · tick Record microphone, then Stop and Start";
+  }
+  if (!available) { box.checked = false; return; }
+  // Restore the choice across a session refresh: load() re-attaches the player roughly
+  // hourly (scheduleSessionRefresh), and silently re-muting each time would look like
+  // the audio had cut out.
+  const s = state[camera];
+  if (s && s.listen) { box.checked = true; setListen(camera, true); }
+}
+
+function setListen(camera, on) {
+  const v = el(camera, "video");
+  const s = state[camera];
+  if (!v) return;
+  // Browsers block unmuted autoplay, which is why the player starts muted. Unmuting from
+  // inside a change handler is fine: the click is the user gesture that permits it.
+  v.muted = !on;
+  if (on && v.paused) v.play().catch(() => {});
+  if (s) s.listen = on;   // survives the session-refresh reload (see load())
 }
 
 // Detection-created clips arrive without the page doing anything, so unlike manual
@@ -213,6 +294,27 @@ function renderCameraPanel(cam) {
       <span id="recModeStatus-${cam.id}" class="status">${recModeHint(cam.recordingMode, cam.supportsDetection)}</span>
     </p>
 
+    <div class="audio-section">
+      <h3>Audio</h3>
+
+      <label class="audio-row ${cam.audioCapable ? "" : "disabled"}" id="audioLabel-${cam.id}">
+        <input type="checkbox" id="audio-${cam.id}"
+               onchange="setAudio('${cam.id}', this.checked)"
+               ${cam.audioCapable ? "" : "disabled"}>
+        <span><strong>Record microphone</strong> <small>${cam.audioCapable
+          ? "— into the live view and clips, for everyone · applies on next Start"
+          : "— this camera has no microphone"}</small></span>
+      </label>
+
+      <label class="audio-row disabled" id="listenLabel-${cam.id}">
+        <input type="checkbox" id="listen-${cam.id}"
+               onchange="setListen('${cam.id}', this.checked)" disabled>
+        <span><strong>Play sound here</strong> <small id="listenHint-${cam.id}">— needs a running stream that has sound</small></span>
+      </label>
+
+      <div id="audioStatus-${cam.id}" class="status">${audioHint(cam.audioEnabled, cam.audioCapable)}</div>
+    </div>
+
     <p>
       <button id="recordBtn-${cam.id}" onclick="toggleRecording('${cam.id}')">&#9679; Start Recording</button>
       <span id="recordStatus-${cam.id}" class="status"></span>
@@ -277,12 +379,14 @@ async function login() {
     for (const cam of CAMERAS) {
       state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null,
                         recordingTimer: null, refreshTimer: null, netRetries: 0,
-                        clipsTimer: null, renderedLatest: null };
+                        clipsTimer: null, renderedLatest: null, listen: false };
       camerasDiv.appendChild(renderCameraPanel(cam));
       // The <select> is built via innerHTML, so the stored value has to be applied after
       // the node is in the DOM rather than as a `selected` attribute in the template.
       const sel = document.getElementById(`recMode-${cam.id}`);
       if (sel) sel.value = cam.recordingMode || "manual";
+      const aud = document.getElementById(`audio-${cam.id}`);
+      if (aud) aud.checked = !!cam.audioEnabled;
       syncClipPolling(cam.id, cam.recordingMode);
       loadClips(cam.id);
     }
@@ -311,10 +415,19 @@ async function load(camera) {
     s.userStopped = false;
     s.netRetries = 0;
 
+    // Every reload starts muted and unavailable; MANIFEST_PARSED below re-enables it if
+    // the stream really does carry sound. Assuming from the registry flag instead would
+    // be wrong -- the flag can have been changed since this producer was started.
+    v.muted = true;
+    setListenAvailable(camera, false);
+
     if (Hls.isSupported()) {
       s.hls = new Hls();
       s.hls.loadSource(url);
       s.hls.attachMedia(v);
+      s.hls.on(Hls.Events.MANIFEST_PARSED, (evt, data) => {
+        setListenAvailable(camera, !!(data.audioTracks && data.audioTracks.length));
+      });
       s.hls.on(Hls.Events.FRAG_BUFFERED, () => { hideOverlay(camera); s.netRetries = 0; });
       s.hls.on(Hls.Events.ERROR, (evt, data) => {
         if (!data.fatal) return;
@@ -344,9 +457,23 @@ async function load(camera) {
         }
       });
     } else {
+      // Native HLS (Safari). There is no manifest event here, so ask the element once it
+      // has metadata. audioTracks is the standard answer; webkitAudioDecodedByteCount is
+      // the fallback for the browsers that never implemented it.
       v.src = url;
+      v.addEventListener("loadedmetadata", () => {
+        const n = v.audioTracks ? v.audioTracks.length
+                                : (v.webkitAudioDecodedByteCount > 0 ? 1 : 0);
+        setListenAvailable(camera, n > 0);
+      }, { once: true });
       hideOverlay(camera);
     }
+    // The <video> has native controls, so the user can mute from there too. Mirror it
+    // back, or the checkbox starts lying about what they can hear.
+    v.onvolumechange = () => {
+      const box = document.getElementById(`listen-${camera}`);
+      if (box && !box.disabled) { box.checked = !v.muted; s.listen = !v.muted; }
+    };
     scheduleSessionRefresh(camera, data.expires_in);
     setStatus(camera, "stream loaded");
   } catch (e) {
@@ -398,6 +525,40 @@ async function setRecordingMode(camera, mode) {
     el.textContent = `saved — ${recModeHint(mode, true)}`;
     syncClipPolling(camera, mode);
   } catch (e) {
+    el.textContent = "error: " + e.message;
+  }
+}
+
+// Writes audioEnabled to the registry. Unlike setRecordingMode, nothing picks this up
+// while the producer runs -- see audioHint() -- so the message says so explicitly, and
+// says it differently depending on whether a stream is currently up.
+async function setAudio(camera, enabled) {
+  const el = document.getElementById(`audioStatus-${camera}`);
+  const box = document.getElementById(`audio-${camera}`);
+  el.textContent = "saving…";
+  try {
+    const r = await fetch(`${API}/cameras/audio`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ cameraId: camera, audioEnabled: enabled }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      // Put the box back where the server says it is, so the UI can't claim a setting
+      // that was refused.
+      if (box) box.checked = !enabled;
+      el.textContent = "error: " + (data.error || r.status);
+      return;
+    }
+    const target = enabled ? "sound will be recorded" : "video only";
+    // userStopped starts true and is cleared by Start, so this is "did this page start
+    // the stream" rather than proof of producer state -- it can be started from the
+    // local admin GUI too. Phrased as a prompt, not an assertion, for that reason.
+    el.textContent = state[camera] && !state[camera].userStopped
+      ? `Saved — ${target} from the next Start. Press Stop then Start to apply it now.`
+      : `Saved — ${target} from the next Start.`;
+  } catch (e) {
+    if (box) box.checked = !enabled;
     el.textContent = "error: " + e.message;
   }
 }

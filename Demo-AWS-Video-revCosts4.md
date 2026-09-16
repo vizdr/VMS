@@ -2981,54 +2981,320 @@ near 700 cameras over a year (`COSTS.md` §7).
 
 ---
 
-## 18. Appendix A — audio track from the PW310 microphone
+## 18. Appendix A — recording audio alongside video
 
-Optional, but it makes the demo feel like a product rather than a lab rig. The PW310 has
-a built-in microphone that shows up as a separate ALSA card.
+Optional, and off by default. Both cameras can do it: `cam-01` through the PW310's
+built-in microphone (a separate ALSA card), `cam-02` through the G.711 track its RTSP
+stream has been carrying all along and the pipeline was throwing away.
 
-### 18.1 Find the card by name, not by number
+**This section was rewritten after the feature was actually built.** The original version
+was written before MediaMTX became the hub and got several things wrong in ways that only
+showed up on contact with the hardware — each is called out below, because the wrong
+version looked entirely reasonable.
+
+### 18.1 The one constraint that decides everything: AAC
+
+KVS's **ingest** and its **playback** paths do not accept the same codecs, and this
+catches you out because ingest is the permissive one.
+
+`kvssink`'s pad template accepts `audio/mpeg` (AAC), `audio/x-alaw` and `audio/x-mulaw`.
+So G.711 goes in without complaint. But `GetHLSStreamingSessionURL` and `GetClip` both
+require "codec private data in the **AAC** format", and reject anything else with
+`UnsupportedStreamMediaTypeException` — the documented expectation is codec ID `A_AAC` on
+track 2. G.711 therefore ingests happily, costs you `PutMedia`, and fails only when
+someone tries to watch it.
+
+**So audio is always transcoded to AAC before `kvssink`, on both cameras.** There is no
+passthrough option even for `cam-02`, whose audio is already compressed.
+
+Two corollaries worth internalising:
+
+- "`ffprobe` played it" proves nothing about the cloud path, and the cloud path succeeding
+  at ingest proves nothing about playback. Check `GetHLSStreamingSessionURL` explicitly.
+- A track that is present in `tracks2` and looks healthy in MediaMTX can still be
+  unplayable downstream.
+
+### 18.2 Find the ALSA card by name, not by number
 
 Card numbers shift on reboot — `hw:3,0` is not stable.
 
 ```bash
 arecord -l
-arecord -L | grep -i -A2 cam
-# use the persistent form:
-arecord -D hw:CARD=CAM310,DEV=0 -f S16_LE -r 48000 -c 2 -d 5 test.wav
-aplay test.wav
+arecord -L | grep -i -B1 -A2 PW310
 ```
 
-### 18.2 Muxed A/V straight into kvssink
-
-KVS accepts H.264 video plus AAC audio in one stream. For this variant, bypass the RTSP
-hop — carrying synchronised audio through MediaMTX adds complexity for no architectural
-gain:
+The PW310 comes up as `hw:CARD=Webcam,DEV=0`. Check what it will actually give you
+before designing a pipeline around it:
 
 ```bash
-sudo apt install -y gstreamer1.0-libav
-
-gst-launch-1.0 -v \
-  v4l2src device="$CAM" ! image/jpeg,width=1280,height=720,framerate=30/1 ! \
-    jpegdec ! videoconvert ! video/x-raw,format=I420 ! \
-    v4l2h264enc extra-controls="controls,video_bitrate=1500000,h264_i_frame_period=60,repeat_sequence_header=1" ! \
-    "video/x-h264,level=(string)4" ! h264parse config-interval=-1 ! queue ! kvs.video_0 \
-  alsasrc device=hw:CARD=CAM310 ! audioconvert ! audioresample ! \
-    audio/x-raw,rate=48000,channels=2 ! avenc_aac bitrate=64000 ! aacparse ! queue ! kvs.audio_0 \
-  kvssink name=kvs stream-name="cam-01" aws-region="eu-central-1" \
-    iot-certificate="iot-certificate,endpoint=...,cert-path=...,key-path=...,ca-path=...,role-aliases=KVSAdapterRoleAlias,iot-thing-name=adapter-01"
+arecord -D hw:CARD=Webcam,DEV=0 --dump-hw-params -d 1 /dev/null
 ```
 
-### 18.3 Caveats
+```
+CHANNELS: 2                 # a fixed value, NOT a range
+RATE: [8000 48000]
+FORMAT: S16_LE S24_3LE
+```
 
-- AAC is required; KVS will not accept raw PCM or Opus in the archived-media path.
-- Audio adds ~64 kbps — negligible against 1.5 Mbps of video, but it does change the HLS
-  manifest, so re-test the browser client after enabling it.
-- A/V sync depends on both sources sharing the pipeline clock. If lip-sync drifts, set
-  `alsasrc provide-clock=false` and let the video source drive.
-- Check whether recording audio is lawful for your use case before putting it in a
-  portfolio video of a real space — in Germany this is not a formality.
+**`CHANNELS: 2` is fixed**, so `arecord -c 1` fails outright with `Channels count non
+available`, and so does an `alsasrc` caps filter asking for mono. Capture stereo and let
+`audioconvert` downmix.
+
+Verify there is actually a signal before going further — a dead microphone still produces
+a perfectly valid WAV file:
+
+```bash
+arecord -D hw:CARD=Webcam,DEV=0 -f S16_LE -r 48000 -c 2 -d 5 /tmp/t.wav
+ffmpeg -i /tmp/t.wav -af astats=metadata=1 -f null - 2>&1 | grep -E 'RMS level|Peak level|Flat factor'
+```
+
+`Flat factor: 0.00` with an RMS well above the noise floor means a live microphone.
+A high flat factor and a peak count at full scale means the opposite problem — see §18.5.
+
+### 18.3 The DTS trap — why the sample rate is not a quality decision
+
+This is the part that is impossible to guess and expensive to debug.
+
+GStreamer audio buffers carry **no DTS** (audio has no frame reordering, so the convention
+is PTS only). `kvssink` synthesises one — and does it from a counter that is **shared
+between tracks**:
+
+```c
+// gstkvssink.cpp, gst_kvs_sink_handle_buffer
+} else if (!GST_BUFFER_DTS_IS_VALID(buf)) {
+    buf->dts = data->last_dts + DEFAULT_FRAME_DURATION_MS * ...;   // 40ms
+}
+data->last_dts = buf->dts;      // <-- shared across video AND audio
+```
+
+So every audio frame's DTS is derived from the most recent **video** frame, plus 40 ms.
+If more than one audio frame falls between two video frames, the synthesised timestamps
+run past the next real video DTS, the sequence goes backwards, and the frames are
+rejected with `0x30000005` — `STATUS_CONTENT_VIEW_INVALID_TIMESTAMP`.
+
+`voaacenc` always emits **1024-sample** frames, so audio frame duration is `1024 / rate`.
+The rule that follows:
+
+> **Audio frame duration must exceed the video frame interval.**
+> At 15 fps that is 66.7 ms, so `1024/rate > 0.0667` → **rate below ~15.4 kHz**.
+
+Measured on `cam-02` (15 fps video), changing nothing but the sample rate:
+
+| Audio rate | Frame duration | Rejects | Audio delivered (of 32 kb/s sent) |
+|---|---|---|---|
+| 48 kHz | 21 ms | **1.65 /s** | 15 kb/s — over half lost |
+| 8 kHz (native) | 128 ms | **0** | 27.8 kb/s |
+
+The failure is nasty because it is partial and silent: fragments still persist, both
+tracks still appear in the HLS manifest, `ffprobe` is happy, and the only visible symptom
+is that the audio bitrate is about half what you asked for.
+
+`cam-01` runs 16 kHz (64 ms frames) and also measures zero rejects — marginally inside
+the limit rather than comfortably. **If you change a camera's video frame rate, recount
+the rejects:**
+
+```bash
+journalctl -u kvs-cam01.service --since "-60 s" | grep -c 0x30000005   # want 0
+```
+
+### 18.4 The two pipelines as built
+
+Both split the RTP pads by `application/x-rtp,media=...`. Linking the branches bare lets
+audio mislink into the video depayloader.
+
+Both feed `kvssink`'s audio pad `stream-format=raw`, **not** the `adts` that `aacparse`
+produces by default — the pad template accepts only raw, and this does not negotiate.
+
+**`cam-02` (`adapter/bin/stream-cam02.sh`)** — the camera's audio is **A-law**, which
+ONVIF cannot tell you (its enum is just `"G711"`). MediaMTX reports `muLaw: false` and
+`ffprobe` says `pcm_alaw`:
+
+```
+src. ! application/x-rtp,media=audio ! queue
+  ! rtppcmadepay ! alawdec ! audioconvert
+  ! audio/x-raw,rate=8000,channels=1
+  ! voaacenc bitrate=32000 ! aacparse
+  ! audio/mpeg,mpegversion=4,stream-format=raw ! queue ! kvs.audio_0
+```
+
+**`cam-01`** is split across two scripts, and *where* the AAC encode happens is not a
+matter of taste. The obvious design — encode AAC in `publish-cam01.sh`, pass it through
+in `stream-cam01.sh`, one encode instead of two — **does not work**. `rtspclientsink`
+payloads AAC as MPEG-4 **LATM**, and the LATM round-trip re-wraps the
+AudioSpecificConfig: it arrives as the 4-byte `14081fe0` (`channelConfiguration=0` plus
+trailing config bits) rather than the canonical 2-byte form. `kvssink` ingests it without
+complaint and KVS then refuses to serve it:
+
+```
+InvalidCodecPrivateDataException: AAC CPD must be of length 2 or 5, but was 4
+```
+
+`rtspclientsink`'s payloader is a **per-pad property**, so it cannot be forced to
+MPEG4-GENERIC from `gst-launch` syntax. The fix is to not send AAC over RTSP at all:
+
+- `publish-cam01.sh` sends **LPCM** into MediaMTX
+  (`audio/x-raw,rate=16000,channels=1,format=S16BE`) — 256 kbps over loopback, which
+  never leaves the Pi
+- `stream-cam01.sh` does `rtpL16depay ! audioconvert ! voaacenc ! aacparse`, so
+  `voaacenc`'s own `codec_data` reaches `kvssink` untouched
+
+This also keeps A/V sync honest. Capturing ALSA directly in the producer would be simpler
+and would make audio lead video by `rtspsrc`'s ~200 ms latency; routing both tracks
+through the one RTSP session gives them a single timeline.
+
+Note what is *not* here: guide §18.2 used to advise bypassing the RTSP hop entirely and
+going straight to `kvssink`. That was written before MediaMTX became the hub, and
+following it now would cost the local preview, the Start/Stop layer and the
+single-producer-per-camera model. MediaMTX carries two tracks fine.
+
+### 18.5 Check the gain — in both directions
+
+Measure the raw PCM before any encoding, so you are looking at the microphone and not at
+codec artefacts.
+
+`cam-02` was **clipping** on first measurement, and the giveaway is not the peak level:
+
+| | clipping | after reducing gain in the camera's web UI |
+|---|---|---|
+| Samples pinned at full scale | **723** | **2** |
+| Flat factor | 42.27 | 5.11 |
+| Peak | −0.14 dBFS | −5.24 dBFS |
+
+**ONVIF cannot fix this.** `AudioSourceConfiguration` carries only `Name`, `UseCount` and
+`SourceToken` — there is no gain field in the schema at all. It is the same shape as the
+`ActiveCells` finding (`Camera-Features.md` §4): the camera has the control, ONVIF simply
+does not expose it, so the vendor web UI is the only route.
+
+`cam-01` has the opposite problem — RMS −40 dB through the cloud path, against `cam-02`'s
+−15 dB. Genuine signal, just quiet.
+
+### 18.6 A firmware quirk that breaks capability detection
+
+Do not read the audio config from `GetAudioEncoderConfigurations()`. On `cam-02` that call
+returns a configuration the camera is not using:
+
+| Source | Token | UseCount |
+|---|---|---|
+| `GetAudioEncoderConfigurations()` | `G711A` | **0** |
+| Both profiles (MainStream, SubStream) | `G711` | 2 |
+
+Read it **from the profile**. The same object also reports its multicast `IPv4Address` as
+`http://192.168.178.67:80/onvif/services`, which is not an IPv4 address — treat this
+firmware's ONVIF fields as unreliable generally.
+
+### 18.7 Turning it on
+
+Audio is a **per-camera registry flag, off by default**, not a pipeline edit. `cameras`
+carries `audioCapable` (hardware fact, written at registration) and `audioEnabled` (the
+user's choice); both must be true. The control is in both GUIs, and both write the one
+registry row:
+
+- cloud client — "Record audio with video" per camera panel → `POST /cameras/audio`
+- local admin — "with audio" in the Recording cell → `POST /api/cameras/<id>/audio`
+
+**The change applies on the camera's next Start, and that is deliberate.** The producer
+reads the flag once at launch (`adapter/bin/camera-audio.py`) because KVS refuses a stream
+whose fragments change composition partway through:
+
+> Track changes aren't supported. […] An error is returned if the fragments in the stream
+> change from having only video to having both audio and video.
+
+Applying it to a running producer would break `GetClip` across the boundary — precisely
+the clips the setting exists to improve. For the same reason a `GetClip` window that
+straddles a toggle will fail; `LIVE` HLS self-heals within a few fragments.
+
+Both APIs refuse `audioEnabled` on a camera whose `audioCapable` is false, rather than
+relying on the UI to hide the control. That is not defensive padding: `kvssink` collects
+across its pads, so an audio pad that never delivers stalls the **video** too.
+
+**Listening live** is a separate control in the cloud client ("Play sound in this
+browser"), and separate on purpose. Whether audio *exists in the stream* is a shared,
+billable, applies-on-next-Start decision; whether *your speakers play it* is local,
+instant and free. The listen control stays disabled until hls.js reports an audio track
+in the manifest it is actually playing — not inferred from the registry flag, which may
+have been changed since this producer started. The player is created muted because
+browsers block unmuted autoplay; unmuting from the checkbox's own change handler is
+permitted, because the click is the user gesture.
+
+**The local admin preview never has audio, and that is correct.** It plays MediaMTX's own
+HLS, and neither track it receives can go into an HLS manifest — `cam-01` publishes LPCM,
+`cam-02` publishes G.711. MediaMTX drops them from the playlist (`CODECS="avc1.640028"`,
+video only) rather than producing something broken, so enabling audio does not disturb the
+preview. Verified by decoding a frame, not just by a 200. This is why there is no listen
+control in the admin GUI: there would be nothing to listen to.
+
+### 18.8 Cost, and a correction
+
+The earlier version of this appendix said audio "adds ~64 kbps — negligible against
+1.5 Mbps of video". Both halves of that were wrong against the numbers in `COSTS-1.4.md`:
+
+- 32 kbps is plenty for speech; 64 was twice what was needed
+- "negligible" depends entirely on which stream. Audio is **constant bitrate** — it does
+  not fall away when the scene is static, so it costs most, proportionally, exactly where
+  video is cheapest
+
+| Stream | Video (24/7 est.) | +32 kbps audio |
+|---|---|---|
+| `cam-02` sub 640×360 | 0.052 Mbps | **+62 %** |
+| `cam-01` 720p, daylight | 0.241 Mbps | +13 % |
+| `cam-01` 720p, 24/7 est. | 0.623 Mbps | +5 % |
+| `cam-02` main 2560×1440 | 1.211 Mbps | +3 % |
+
+In absolute terms it is ~10 GB/camera-month and ~$0.10/camera-month at 24/7 — small, and
+still dwarfed by the duty-cycle lever (`COSTS-1.4.md` §7.2). Audio only flows while the
+producer runs, so the usual rule covers it.
+
+CPU is not free either, and differs sharply by camera:
+
+| | before | after | delta |
+|---|---|---|---|
+| `cam-02` producer (was pure passthrough) | ~0 | 2.5–4 % | +3 pts |
+| `cam-01` publisher | ~10 % | ~15 % | +5 pts |
+| `cam-01` producer | — | ~7.5 % | +7 pts |
+
+`cam-02`'s producer stops being a pure passthrough the moment audio is enabled, which is
+the tradeoff §16.3(b) exists to protect.
+
+### 18.9 Before you enable this on a real space
+
+Recording the **non-public spoken word** in Germany is `§201 StGB` — a criminal offence,
+and a stricter regime than the GDPR questions the video already raises. This is why the
+default is off, per camera, and opt-in.
+
+Note also that `cam-02` exposes audio *outputs* (`AudioMainToken`). Two-way audio is a
+separate feature and deliberately out of scope here.
+
+### 18.10 Verifying a change
+
+Do not stop at "no pipeline errors". The failure modes in this appendix were all silent
+at that level.
+
+```bash
+# 1. tracks reach MediaMTX
+curl -s http://127.0.0.1:9997/v3/paths/get/cam01 | python3 -m json.tool | grep -A3 tracks2
+
+# 2. no frames are being rejected  (want 0)
+journalctl -u kvs-cam01.service --since "-60 s" | grep -c 0x30000005
+
+# 3. the cloud can actually SERVE it -- this is the step that catches CPD errors
+EP=$(aws kinesisvideo get-data-endpoint --stream-name cam-01 \
+       --api-name GET_HLS_STREAMING_SESSION_URL --query DataEndpoint --output text)
+URL=$(aws kinesis-video-archived-media get-hls-streaming-session-url \
+       --endpoint-url "$EP" --stream-name cam-01 --playback-mode LIVE \
+       --query HLSStreamingSessionURL --output text)
+ffprobe "$URL"                       # expect BOTH streams listed
+
+# 4. the audio is real, and none of it was dropped
+ffmpeg -i "$URL" -t 20 -c copy -y /tmp/s.mp4
+ffmpeg -i /tmp/s.mp4 -vn -af astats=metadata=1 -f null - 2>&1 | grep -E 'RMS|Flat'
+#    delivered kb/s should match the configured bitrate; about half means §18.3
+
+# 5. finally, a browser -- MSE is stricter than ffmpeg, and has caught
+#    two regressions in this project that ffmpeg passed
+```
 
 ---
+
 
 ## 19. Appendix B — observed architecture of the reference product
 

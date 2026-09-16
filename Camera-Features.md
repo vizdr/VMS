@@ -49,9 +49,35 @@ recording); Media streaming supports RTP multicast, RTP/TCP and RTP/RTSP/TCP.
 | `MainStream` | H.264 **2560×1440** @ 15 fps, 3000 kbps configured | G.711 64 kbps | no |
 | `SubStream` | H.264 **640×360** @ 15 fps, 500 kbps configured | G.711 64 kbps | **yes** (`cam-02` ingests this) |
 
-Both profiles carry a `VideoAnalyticsConfiguration` (`VideoAnalyticsName`). The KVS
-pipeline (`stream-cam02.sh`) depayloads video only — the G.711 audio track is present on
-the wire and currently discarded.
+Both profiles carry a `VideoAnalyticsConfiguration` (`VideoAnalyticsName`).
+
+**Audio is now optional and off by default** (guide §18). When enabled for a camera,
+`stream-cam02.sh` depayloads the G.711 track and transcodes it to AAC; when disabled, the
+pipeline is byte-for-byte the video-only one and the audio track stays discarded on the
+wire as before.
+
+Four facts about this camera's audio that cost real debugging time:
+
+- **It is A-law, not μ-law** — so `rtppcmadepay`/`alawdec`. ONVIF cannot tell you which:
+  its enum is just `"G711"`. MediaMTX reports `muLaw: false` and `ffprobe` says
+  `pcm_alaw`.
+- **G.711 cannot be passed through to the cloud.** `kvssink` accepts `audio/x-alaw` at
+  ingest, but `GetHLSStreamingSessionURL` and `GetClip` both require AAC, so it would
+  ingest silently and fail only at playback. Transcoding is mandatory, which means this
+  camera stops being a pure passthrough when audio is on.
+- **The microphone was clipping** at its factory gain — 723 samples pinned at full scale
+  in a 16 s sample, flat factor 42.3. Reduced via the vendor web UI to 2 samples and
+  flat factor 5.1. **ONVIF cannot fix this**: `AudioSourceConfiguration` carries only
+  `Name`, `UseCount` and `SourceToken` — the schema has no gain field at all. Same shape
+  as the `ActiveCells` finding in §4.1 — the camera has the control, ONVIF does not
+  expose it.
+- **`GetAudioEncoderConfigurations()` returns the wrong configuration.** It lists token
+  `G711A` with `UseCount 0`, while both profiles actually reference token `G711` with
+  `UseCount 2`. Capability detection must read the audio config **from the profile**. The
+  same object reports its multicast `IPv4Address` as
+  `http://192.168.178.67:80/onvif/services`, which is not an IPv4 address.
+
+The camera also exposes audio *outputs* (`AudioMainToken`); two-way audio is out of scope.
 
 **Measured bitrate.** `COSTS-1.4.md` §1.2 is the authoritative measurement set and §3 the
 analysis; this is a summary only. Video payload only, 60 s stream-copy, all at 15 fps:
@@ -112,8 +138,8 @@ median 5.0 s hold. Their firing rate, mutual discrimination and idle false-posit
 are measured in §9; the three `Device/Trigger` and vendor `AlarmIn` topics remain
 unexercised, as nothing is wired to the camera's physical inputs.
 
-**Readable over ONVIF, but not writable.** Analytics configuration `MOTION-DECTECT1` holds one module,
-`MyCellMD`, of type `tt:CellMotionEngine`:
+**Readable over ONVIF; writable only over the vendor protocol (see below).** Analytics
+configuration `MOTION-DECTECT1` holds one module, `MyCellMD`, of type `tt:CellMotionEngine`:
 
 | Parameter | Type | Current |
 |---|---|---|
@@ -124,19 +150,221 @@ The full tuning set is richer than the module alone — the rule `MyMDRule`
 (`tt:CellMotionDetector`) also carries `MinCount=5`, `AlarmOnDelay=100`,
 `AlarmOffDelay=100` and `ActiveCells` (a base64 cell mask, 32 cells on this camera).
 
-**None of it is writable, despite being present and typed.** An earlier revision of this
-document claimed "both are writable via `SetVideoAnalyticsConfiguration`" — that was
-inferred from the parameters being exposed, never tested, and it is **wrong**.
-`SetVideoAnalyticsConfiguration` is a **silent no-op** here: it returns success and
-changes nothing. Verified by sending `Sensitivity=55` (payload confirmed to carry 55) and
-reading back `80` immediately after, twice. The advertised ONVIF 2.0 analytics service
-(`ver20/analytics/wsdl`) exposes **no callable operations**, and the vendor ISAPI path
-404s (§8). These values can therefore only be changed in the camera's own web UI.
+**Not writable over standard ONVIF — but writable over the vendor's own protocol.** Two
+separate claims here, and an earlier revision got the boundary wrong.
 
-A note on the mask: `ActiveCells` decodes to 32 bits (`d0ff00f0`), but the camera returns
-an **empty `Layout` element**, so it never reports the grid's Columns/Rows. The geometry
-is unknown, which is why the admin GUI shows the bit pattern rather than drawing a grid
-that might not correspond to reality.
+- *ONVIF:* `SetVideoAnalyticsConfiguration` is a **silent no-op** on this camera — it
+  returns success and changes nothing. Verified by sending `Sensitivity=55` (payload
+  confirmed to carry 55) and reading back `80` immediately after, twice. The advertised
+  ONVIF 2.0 analytics service (`ver20/analytics/wsdl`) exposes **no callable operations**.
+  An earlier revision claimed "both are writable via `SetVideoAnalyticsConfiguration`" —
+  inferred from the parameters being exposed, never tested, and **wrong**.
+- *Vendor HTTP API:* the camera's **own web UI does set the cell grid and sensitivity**,
+  via `POST /setMotionDetectAlarm` — a SOAP envelope on a vendor URL path, authenticated
+  per-request by DES-encrypted credentials in the header. Confirmed against the live
+  device; see §4.1 for the full mechanism.
+
+So the honest statement is: **ONVIF is this camera's lowest-common-denominator control
+plane, not its ceiling.** The same pattern holds for IR (ONVIF `IrCutFilter` works; a
+richer ISAPI-style path returns the generic stub, which — per §4.1 — proves nothing
+either way, §8).
+
+The practical consequence for this project is unchanged: Phase 4's admin-GUI configuration
+was built read-only because it targeted ONVIF, and ONVIF can't write these.
+
+### 4.1 Configuration paths other than ONVIF
+
+Written up because the ONVIF dead-end above is *not* the whole story, and because an
+earlier revision of this document over-claimed the answer (see "what is not established").
+
+**What is established.**
+
+The camera exposes three network surfaces, only one of which is ONVIF:
+
+| Port | Service | Notes |
+|---|---|---|
+| 80 | gSOAP 2.8 | serves **both** the ONVIF endpoints and the static web-UI bundle |
+| 554 | RTSP | media only |
+| 8000 | *binary, non-HTTP* | accepts TCP, ignores an HTTP request entirely — a vendor SDK port (Hikvision's SDK convention), not a web API |
+
+The served web bundle contains a complete **JSON-RPC client** with unmistakable
+Dahua-family signatures, readable in `jsCore/rpcCore.js` and `jsCore/rpcLogin.js`:
+
+```text
+transport   sendRequest(payload, onSuccess, async, url = "/IPC", onFailure)   # POST
+read        {"method":"configManager.getConfig","params":{"name":"<Cfg>"},"session":<id>,"id":<n>}
+            -> response config object lives in  .params.table
+write       {"method":"configManager.setConfig",
+             "params":{"name":"<Cfg>","table":<object>,"options":""},"session":<id>,"id":<n>}
+batch       system.multicall  (the bundle's doMutiCall)
+motion      devVideoDetect.factory.instance {"channel":N}
+            devVideoDetect.attachMotionData {"proc":N}     # live motion stream
+            devVideoDetect.getCaps
+caps        ...getConfigCaps {"config": <name>}            # ranges/geometry for a config
+```
+
+Two different login flows are present in the same bundle:
+
+- `IPCLogin.login()` — posts a **SOAP envelope** to `/ipcLogin` carrying `<userid>` and
+  `<passwd>`, each `DES(key="WebLogin")`-encrypted then hex-encoded. ("WebLogin" is
+  exactly 8 bytes, i.e. a single DES key.)
+- `loginDVR()` — classic Dahua JSON digest against `/login`: `global.login` returns
+  `realm`+`random`, the client answers `md5(user:random:md5(user:realm:pass))`, session in
+  a `DhWebClientSessionID` cookie, errors in the `268632xxx` range.
+
+`getConfigCaps` is worth noting specifically: it would answer the question ONVIF cannot —
+the **grid geometry** (rows × columns) behind the 32-bit `ActiveCells` mask.
+
+**The web UI uses SOAP, not the JSON-RPC.** A DevTools capture of the live Motion Detect
+page (2026-09-15) shows its only XHR traffic is repeated `POST … /pullSubmanager`, typed
+**soap**, ~60 s each, initiated by `alarmInfo.html` — i.e. **ONVIF PullPoint long-polls**,
+the same endpoint `adapter/event_watcher.py` uses. Nothing in the capture touches `/IPC`
+or any JSON-RPC route. So the Dahua RPC bundle described above appears to be **dead code
+shipped in a generic OEM web package**, not the live control plane. An earlier revision of
+this document asserted the opposite ("the web UI speaks Dahua RPC2", "a script could drive
+that identically"); the first half is unsupported by observed traffic and the second was
+never tested. Both are withdrawn.
+
+**The actual mechanism — verified.** A DevTools capture of pressing **Save** on the Motion
+Detect page shows four requests, none of them ONVIF and none of them JSON-RPC:
+
+| Request | Status |
+|---|---|
+| `POST /setMotionDetectAlarm` | 202 |
+| `POST /setRecordConfig` | 202 |
+| `POST /getMotionDetectAlarm` | 200 |
+| `POST /getRecordConfig` | 200 |
+
+So the camera exposes a **vendor HTTP API with one URL path per operation**. The call
+stack names the page code (`js/videoDetectConfig.js` → `_onConfirmClick` →
+`_setAlarmReordSnap`) and the transport helper (`jsCore/rpcCore.js`'s
+`sendRequest(body, onSuccess, async, url, onFailure)` — the 4th argument overrides that
+file's `/IPC` default, which is why grepping for `/IPC` was a false trail).
+
+DevTools types these as "plain", but the body is **SOAP**. From `videoDetectConfig.js`:
+
+```javascript
+K = '<?xml version="1.0"?><soap:Envelope xmlns:soap="http://www.w3.org/2001/12/soap-envelope">'
+  + '<soap:Header>\t<userid>' + g_des_userid + '</userid>'
+  +                '\t<passwd>' + g_des_passwd + '</passwd></soap:Header>'
+  + '<soap:Body>' + xmlToString(configDoc) + '</soap:Body></soap:Envelope>';
+sendRequest(K, onOk, true, "/setMotionDetectAlarm", onFail);
+```
+
+Three properties matter for anyone scripting this:
+
+- **Auth is per-request and stateless** — no session, no cookie. Credentials travel in the
+  SOAP header of every call as `DES(key="WebLogin")`-encrypted, hex-encoded strings
+  (`"WebLogin"` is exactly 8 bytes, i.e. one DES key). That is also why the earlier
+  "everything needs a session" reading was wrong for *these* endpoints.
+- **The endpoints answer unauthenticated callers.** Posting the envelope above with
+  deliberately wrong credentials returns `HTTP 200` with the body `passwordError` — not
+  the 817-byte stub. The endpoint therefore exists, is reachable from a script, and parses
+  the envelope; only the credential encoding was rejected.
+- **The exact DES variant is not yet reproduced.** Zero-padding and PKCS7 both returned
+  `passwordError`. Iterating further was stopped deliberately: `jsCore/rpcLogin.js` handles
+  a `passwordLock` response, so brute-forcing padding variants risks locking the account
+  out of its own camera. The remaining work is to read `jsCore/des.js` (served, 
+  unauthenticated) and match its `des()`/`stringToHex()` byte-for-byte rather than guess.
+
+The UI's field set is itself evidence this is not ONVIF: **Sensitivity, Day Threshold,
+Night Time (enable), Night Sensitivity, Night Threshold** plus a drawable cell grid.
+Standard ONVIF's `tt:CellMotionEngine` carries only `Sensitivity`. Note the dialog reads
+**Sensitivity 80**, matching what ONVIF reports — both views read the same underlying
+value; only the ONVIF *write* is ignored.
+
+For completeness, `GetServices` also advertises a vendor ONVIF endpoint
+(`http://www.onvif.org/ver10/plus/wsdl` → `http://192.168.178.67:80/Plus`). It is *not*
+what the web UI uses and remains unexplored.
+
+**Why black-box probing could not settle it — and a second claim withdrawn.** Every
+unauthenticated request to this camera returns an identical 817-byte "Welcome" stub:
+
+| Request | Result |
+|---|---|
+| `/definitely-not-a-real-path-xyz` | 817-byte stub |
+| `/alarmInfo.html` (a page the browser loads fine) | 817-byte stub |
+| `/ISAPI/Image/channels/1/supplementLight` | 817-byte stub |
+| `/Plus?wsdl` | 817-byte stub |
+
+The server answers unknown paths and session-gated ones **the same way**. So a "404" from
+outside a browser session carries no information about whether a feature exists — which
+means §8's earlier conclusion that ISAPI is "disabled or moved by the OEM" was never
+supported by that evidence either, and the failed `/IPC` and `/ipcLogin` POSTs may simply
+have lacked a session rather than lacked a handler.
+
+**What remains open.** Only the credential encoding. Everything else — endpoints,
+transport, envelope shape, statelessness — is confirmed against the live device. A
+writable Phase 4 is therefore tractable: the config is already readable over ONVIF, and
+the write path is a known URL with a known body format, gated on reproducing one DES
+call. The honest caveat is that it is **camera-family-specific and non-portable** — none
+of `/setMotionDetectAlarm`, the DES header scheme, or the vendor XML body is standard, so
+it would not survive swapping the camera.
+
+**Lineage note.** The evidence is genuinely mixed: ONVIF *event* topics carry a Hikvision
+namespace (`tnshik`, §4), the dead web bundle is Dahua-flavoured, and :8000 follows the
+Hikvision SDK convention. This is a generic OEM board stitching together more than one
+vendor's firmware — which is exactly why capability has to be tested per protocol, against
+a live session, rather than inferred from any single artefact.
+
+**The detection zone works; ONVIF just cannot read it.** Two separate things, and an
+earlier revision blurred them with the word "decorative".
+
+*The zone is real and enforced* — confirmed behaviourally (2026-09-15): a zone was set in
+the camera's web UI, then an object was moved **inside** it and **outside** it. The
+camera's own alarm list recorded only the in-zone motion. Zone filtering therefore works
+end to end, and is a genuinely useful capability (see "why this matters" below).
+
+*ONVIF's `ActiveCells` field does not report that zone.* It is a fixed value, unconnected
+to the real configuration:
+Tested properly on 2026-09-15: a **single square in the top-left corner** was set in the
+camera's web UI and **saved**, then `ActiveCells` was re-read over ONVIF. It came back
+**byte-identical**:
+
+```
+before save : 0P8A8A==  hex=d0ff00f0  32 bits, 15 set
+after  save : 0P8A8A==  hex=d0ff00f0  32 bits, 15 set
+```
+
+A single corner square cannot plausibly be 15 scattered bits covering ~half the frame, and
+a genuine change could not leave every byte untouched.
+
+So this is a **reporting gap in the ONVIF layer, not a defect in the camera**: the zone is
+stored and applied by the vendor config path (`POST /setMotionDetectAlarm`, §4.1), while
+the ONVIF veneer returns a canned `ActiveCells` that was never wired to it. Do not read
+the mask as "the current detection area" — but equally, do not read this section as "zones
+don't work". They do.
+
+*Process note, because the first attempt at this was wrong.* An earlier revision reached
+the same conclusion from a comparison where the region had **never been saved** — which
+proves nothing, since an unchanged mask is the correct result for an uncommitted change.
+That claim was withdrawn and only re-established after the save was confirmed. The
+conclusion survived; the original reasoning did not, and the difference matters for
+anything else inferred the same way.
+
+*Why this matters for the project:* zone filtering is a real lever for detection-gated
+recording (§9). Phase 0 measured a zero overnight false-positive rate in a quiet hallway,
+but a camera pointed at a doorway, a road, or a swaying plant would not be so lucky — and
+restricting the zone is the camera-side way to cut those triggers before they ever reach
+the event watcher, costing nothing in Pi CPU or cloud spend. The catch is that it can only
+be configured in the camera's web UI (or over the vendor API, §4.1), and **this project
+cannot read back what is configured** — so the zone is invisible to `adapter/` and has to
+be documented by whoever sets it.
+
+*Consequence for grid geometry:* the question is **moot**. The camera returns an empty
+`Layout` element so it never reports Columns/Rows, and geometry cannot be derived from a
+value that does not track reality. Any grid UI drawn from this mask would show a confident
+picture of nothing. The admin GUI therefore renders the raw bit pattern with a warning
+rather than a grid.
+
+*Scope of the finding:* this is specifically `ActiveCells`. `Sensitivity` **does** track —
+ONVIF and the web UI both report 80 — so the ONVIF read is partly faithful and partly
+fixed, and each field has to be trusted or distrusted individually rather than as a block.
+
+The UI's interaction model is consistent with the two layers being disconnected: it does
+**not** present a rows×columns grid to toggle. Clicking the video places a
+**minimum-size square**, and an area is built from a set of them — a different abstraction
+from ONVIF's `tt:CellMotionEngine`.
 
 There is also a serialisation trap: the empty `Layout` ElementItem cannot be re-serialised
 by zeep (`ValidationError: Missing element for Any`), so any round-trip must strip it
@@ -188,9 +416,16 @@ So there is no SD-card recording to pull from. This matters because it rules the
 out as a solution to the durable-outage-buffering gap (guide §16.3c) — that still needs
 the local `splitmuxsink` ring buffer on the Pi.
 
-**Hikvision ISAPI.** Despite the firmware's Hikvision lineage, `/ISAPI/...` endpoints
-return the OEM's soft-404 page, so the richer vendor controls (e.g. independent IR-LED
-brightness via `supplementLight`) are unavailable. Standard ONVIF is the ceiling here.
+**Hikvision ISAPI — status genuinely unknown, not "unavailable".** `/ISAPI/...` endpoints
+return the OEM's 817-byte soft-404 page, and an earlier revision concluded from that they
+are disabled or moved, so "standard ONVIF is the ceiling here."
+
+**That conclusion does not follow.** This camera returns the *same* 817-byte stub for a
+made-up path, for `/alarmInfo.html` (a page the browser loads perfectly well), and for
+ISAPI alike — see §4.1. The stub means "no session", not "no such feature". ISAPI may be
+present and simply session-gated. Until someone probes it from an authenticated session,
+the honest status is **untested**, and the richer vendor controls (e.g. independent IR-LED
+brightness via `supplementLight`) should not be written off.
 
 ---
 
@@ -418,9 +653,14 @@ the identical publish path. No new code was required.
 **Configuration: not possible over ONVIF on this camera.** The plan called for a
 sensitivity slider and a grid mask written back through
 `SetVideoAnalyticsConfiguration`. That call is a **silent no-op** here (§4): it returns
-success and changes nothing. The ONVIF 2.0 analytics service exposes no callable
-operations, and vendor ISAPI 404s. There is no network path to change these values —
-only the camera's own web UI.
+success and changes nothing, and the ONVIF 2.0 analytics service exposes no callable
+operations.
+
+That rules out *ONVIF*, not the network. The camera's own web UI does set these values
+over SOAP, and a vendor `/Plus` service is advertised — see §4.1. An earlier revision
+said "there is no network path to change these values, only the camera's own web UI";
+that is withdrawn, since the web UI *is* a network client. What is genuinely unresolved
+is which SOAP call carries the write.
 
 Two traps worth recording, because both make the failure look like success:
 

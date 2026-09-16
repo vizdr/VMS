@@ -12,6 +12,14 @@
   table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
   th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; font-size: 0.9rem; }
   .status { color: #666; font-size: 0.85rem; margin-top: 0.4rem; }
+  /* inline-flex + align-items:center keeps the box on the text's own line. A bare
+     <label><input> ... </label> lets the box drift onto its own row in a table cell. */
+  .cb { display: inline-flex; align-items: center; gap: 0.35rem;
+        font-size: 0.78rem; margin-top: 3px; white-space: nowrap; }
+  /* the global `input, select` rule above adds padding meant for text fields; on a
+     checkbox it just distorts the box, so undo it here. */
+  .cb input[type="checkbox"] { margin: 0; padding: 0; width: auto; flex: none; }
+  .cb.disabled { color: #999; }
   .error { color: #c0392b; }
   .device-card {
     border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.5rem 0;
@@ -63,7 +71,12 @@
 <p class="status">
   Tuning lives on the camera. <strong>This camera ignores ONVIF writes</strong> —
   <code>SetVideoAnalyticsConfiguration</code> returns success and changes nothing
-  (verified: sent Sensitivity=55, read back 80). Change these in the camera's own web UI;
+  (verified: sent Sensitivity=55, read back 80). <strong>Detection zones work, but ONVIF cannot read them.</strong>
+  The camera enforces its configured zone correctly (verified: motion inside triggers,
+  motion outside does not), yet the <code>ActiveCells</code> mask below stays byte-identical
+  whatever the zone is — it was never wired to the real config. So it is shown as a raw bit
+  pattern and must not be read as the current detection area. <code>Sensitivity</code>, by
+  contrast, does track. Set zones in the camera's own web UI;
   shown here to explain why detection behaves as it does.
 </p>
 <p>
@@ -258,6 +271,16 @@ async function loadCameras() {
             <option value="human">Human</option>
           </select>
           <div id="recModeStatus-${c.cameraId}" class="status"></div>
+          <div>
+            <label class="cb ${c.audioCapable ? "" : "disabled"}"
+                   title="${c.audioCapable ? "Adds sound to the live view and to every clip. Applies on this camera's next Start." : "This camera has no usable audio source"}">
+              <input type="checkbox" id="audio-${c.cameraId}"
+                     onchange="setAudio('${c.cameraId}', this.checked)"
+                     ${c.audioCapable ? "" : "disabled"}>
+              record microphone
+            </label>
+            <div id="audioStatus-${c.cameraId}" class="status"></div>
+          </div>
         </td>
         <td>
           <div class="ctl-row">
@@ -277,6 +300,8 @@ async function loadCameras() {
       // in the template would need per-option conditionals
       const sel = tr.querySelector(`#recMode-${c.cameraId}`);
       if (sel) sel.value = c.recordingMode || "manual";
+      const aud = tr.querySelector(`#audio-${c.cameraId}`);
+      if (aud) aud.checked = !!c.audioEnabled;
     }
     const anSel = document.getElementById("anCam");
     if (anSel) {
@@ -312,8 +337,7 @@ function refreshAllStreamStatuses() {
 
 setInterval(refreshAllStreamStatuses, 4000);
 
-// Phase 1: writes the registry only. Nothing consumes recordingMode yet (the event
-// watcher is Phase 2), so say so rather than implying behaviour changed.
+// Writes the registry; kvs-event-watcher.service polls it and re-subscribes within ~60s.
 async function setRecordingMode(id, mode) {
   const el = document.getElementById(`recModeStatus-${id}`);
   el.textContent = "saving…";
@@ -324,6 +348,23 @@ async function setRecordingMode(id, mode) {
       ? "manual only"
       : `${mode} active — needs KVS push running`;
   } catch (e) {
+    el.textContent = e.message;
+  }
+}
+
+// Registry-only, and deliberately not applied to a running producer: kvssink cannot
+// switch a live stream between video-only and audio+video without breaking the clips
+// that span the change, so the pipeline reads this once at Start.
+async function setAudio(id, enabled) {
+  const el = document.getElementById(`audioStatus-${id}`);
+  const box = document.getElementById(`audio-${id}`);
+  el.textContent = "saving…";
+  try {
+    await api(`/api/cameras/${id}/audio`, { method: "POST",
+      body: JSON.stringify({ audioEnabled: enabled }) });
+    el.textContent = (enabled ? "sound recorded" : "video only") + " — from next Start";
+  } catch (e) {
+    if (box) box.checked = !enabled;   // never show a setting the server refused
     el.textContent = e.message;
   }
 }

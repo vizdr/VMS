@@ -282,6 +282,33 @@ def set_recording_mode(camera_id):
     return jsonify({"cameraId": camera_id, "recordingMode": mode})
 
 
+@app.post("/api/cameras/<camera_id>/audio")
+def set_audio(camera_id):
+    """Writes audioEnabled to the registry. Mirrors the cloud `set-camera-audio` Lambda.
+
+    Takes effect on the camera's next Start, not immediately: the producer reads the flag
+    once at launch (adapter/bin/camera-audio.py) because KVS refuses a stream whose
+    fragments change from video-only to audio+video partway through.
+    """
+    enabled = (request.get_json(force=True, silent=True) or {}).get("audioEnabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"error": "audioEnabled must be true or false"}), 400
+
+    table = cameras_table()
+    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if enabled and not item.get("audioCapable"):
+        return jsonify({"error": "camera has no usable audio source"}), 400
+
+    table.update_item(
+        Key={"cameraId": camera_id},
+        UpdateExpression="SET audioEnabled = :a",
+        ExpressionAttributeValues={":a": enabled},
+    )
+    return jsonify({"cameraId": camera_id, "audioEnabled": enabled, "appliesOn": "next start"})
+
+
 @app.post("/api/cameras/<camera_id>/ir")
 def set_ir(camera_id):
     mode = (request.get_json(force=True, silent=True) or {}).get("mode")

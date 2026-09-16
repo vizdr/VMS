@@ -24,6 +24,14 @@ def lambda_handler(event, context):
                     # no ONVIF at all and can therefore only ever be "manual" -- the GUIs
                     # gate the selector on this, the same way they gate IR control.
                     "supportsDetection": bool(i.get("onvifHost")),
+                    # Whether this camera records audio alongside video. Two separate
+                    # facts, both needed by the GUIs: audioCapable is a property of the
+                    # hardware (written at registration), audioEnabled is the user's
+                    # choice. Default is video-only -- audio is opt-in per camera, which
+                    # is both the safe default for a recording system and the one the
+                    # law tends to assume (see Camera-Features.md on audio).
+                    "audioCapable": bool(i.get("audioCapable", False)),
+                    "audioEnabled": bool(i.get("audioEnabled", False)),
                 }
                 for i in items
             ),

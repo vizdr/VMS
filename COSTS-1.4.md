@@ -43,6 +43,7 @@ our own cameras' bitrates.
 | 15 | A lens obstruction was found making both streams read **3.3–3.7× cheaper than reality**; those samples are struck out, and "inspect the frame, not just the number" added as a fourth measurement rule | §1.2, §1.3 rule 4 |
 | 16 | **Duty cycle measured, not assumed** — 0.28 % overnight, 2.0 % over 9.5 h, 12.8 % on a busy afternoon. The §7.2 "5 %" assumption is confirmed conservative, and duty cycle is now the largest *variance* source in the model (~45× diurnal, vs 2.5× for bitrate) | §7.2 |
 | 17 | Event-gating shown trustworthy: **zero false positives** across 9.01 h of heartbeat-backed silence, and the dawn day/night switch produced **no** spurious triggers | §7.2 |
+| 18 | **Audio moved out of "excluded" and into the model** (added after 1.4 shipped, when the feature was actually built). Measured at 0.032 Mbps, not the 0.064 previously estimated — and unlike every other term here it is **constant bitrate**, so its proportional cost is largest on the *cheapest* streams (+62 % on `cam-02` sub, +3 % on main) | §7.3a, §10 |
 
 ---
 
@@ -269,6 +270,10 @@ comparison against the reference product, which runs 10 fps (§3.6).
 | `cam-01` 720p transcode | 15 | 0.241 | 1.005 | **0.623** | 202 |
 | `cam-02` sub 640×360 (current) | 15 | 0.056 | 0.049 | **0.052** | 17 |
 | `cam-02` main 2560×1440 | 15 | 0.700 | 1.721 | **1.211** | 392 |
+
+All rows are **video only**, which is the default. Optional per-camera audio adds a flat
+0.032 Mbps (10.4 GB/month) that does not vary with light or motion — see §7.3a, and note
+that as a *proportion* it is largest on the cheapest row, not the most expensive one.
 
 Against v1.3's figures, the two errors run in **opposite directions**:
 
@@ -784,6 +789,39 @@ undermines KVS's continuous-timeline model further still.
 
 The architectures diverge as quality rises, and **converge — then cross — as it falls.**
 
+### 7.3a Audio — small in absolute terms, large where video is cheap
+
+Audio recording is opt-in per camera (guide §18) and adds **32 kbps of AAC**. The
+absolute number is unremarkable: 10.4 GB/camera-month, ~$0.10/camera-month on KVS at
+24/7. What makes it worth a row here is that **it does not behave like video**.
+
+Every other term in this document scales with scene content — §3.1's illumination, §3.3's
+motion, §3.4's saturation behaviour. Audio is effectively **constant bitrate**. It does
+not fall away when the scene is static and dark, which means it costs most, proportionally,
+in exactly the configurations §7.3 identifies as cheapest:
+
+| Stream | Video 24/7 est. | +32 kbps | Overhead |
+|---|---|---|---|
+| `cam-02` sub 640×360 | 0.052 | 0.084 | **+62 %** |
+| `cam-01` 720p, daylight only | 0.241 | 0.273 | +13 % |
+| `cam-01` 720p 24/7 | 0.623 | 0.655 | +5 % |
+| `cam-02` main 2560×1440 | 1.211 | 1.243 | +3 % |
+
+The `cam-02` sub row matters beyond its own cost: §6.2 puts the KVS/S3 crossover at
+**0.104 Mbps**, and that stream sits at 0.052 — comfortably on the side where KVS wins.
+Enabling audio moves it to 0.084, which is still below the crossover but has closed most
+of the margin. Audio on a sub-stream is not a rounding error in that argument.
+
+Two things it does *not* change. Duty cycle (§7.2, up to ~20×) still dominates, because
+audio only flows while the producer runs — the same rule already covers it. And the
+architecture comparison is unaffected in direction: audio adds the same 32 kbps to both
+the KVS and S3 columns.
+
+CPU is the other cost, and it is not symmetric. `cam-02`'s producer stops being a pure
+passthrough the moment audio is enabled (0 → 2.5–4 %), which is the property §16.3(b) of
+the guide exists to protect. `cam-01` pays about +10 points across its publisher and
+producer combined, on the camera that was already the expensive one.
+
 ### 7.4 Codec — H.265 on `cam-02`
 
 Viable only on `cam-02`; `cam-01` is hardware-locked to H.264 (the Pi's VideoCore VI has
@@ -904,9 +942,12 @@ failure mode is a `gst-launch` left running for a week, not a design error.
 - **KMS** — KVS rotates its data key ~every 45 minutes; dollars per account, not camera.
 - **Lambda, API Gateway, Cognito, IoT Core** — cents per camera at this scale.
 - **CloudFront request charges and minimum commitments.**
-- **Audio.** Both `cam-02` profiles carry G711 (~64 kbps, ~20.7 GB/camera-month). The
-  pipeline discards it. Enabling it would add ~$0.21/camera-month on KVS — negligible
-  against video, but not zero, and it would **more than double** the sub-stream's total.
+- ~~**Audio.**~~ **No longer excluded — audio is now built and modelled in §7.3a.** This
+  entry previously estimated it at G.711's ~64 kbps / ~$0.21 per camera-month. Both halves
+  were wrong: audio must be transcoded to AAC for KVS playback (G.711 ingests but will not
+  serve), and 32 kbps is sufficient — so the real figure is **0.032 Mbps,
+  10.4 GB/camera-month, ~$0.10**. The "more than double the sub-stream" warning was
+  directionally right and overstated: the true overhead there is **+62 %**.
 - **The packaging tier.** `x-vl-transcoded: false` shows container remuxing, not
   re-encoding — real, but far cheaper than transcode compute.
 - **CDN absence** on the reference product's side; our pre-generated playlists over static
