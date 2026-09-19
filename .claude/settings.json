@@ -105,7 +105,11 @@
       "Bash(chmod +x adapter/bin/awsblock.sh)",
       "Bash(bash -n adapter/bin/awsblock.sh)",
       "Bash(grep -E \"\\\\.md$\")",
-      "Bash(grep -vE \"\\\\.md$|__pycache__|auto.crt|\\\\.zip|\\\\.claude\")"
+      "Bash(grep -vE \"\\\\.md$|__pycache__|auto.crt|\\\\.zip|\\\\.claude\")",
+      "Bash(awk -F/ 'NF==1{print $0} NF>1{print $1\"/\"$2}')",
+      "Bash(venv-adapter/bin/pip list *)",
+      "Read(//home/vladimir/.config/systemd/user/**)",
+      "Bash(xargs -n1 basename)"
     ]
   }
 }

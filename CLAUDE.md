@@ -11,6 +11,9 @@ Gateway — with **zero inbound ports opened** on the home router. The architect
 (every arrow crosses the router outbound-initiated) is written up in
 `OUTBOUND-CLOUD.md`.
 
+`README.md` is the front door — project overview, feature list, and a Pi 4B install guide
+written for someone arriving cold. It summarises; it is never the source of truth.
+
 **`Demo-AWS-Video-revCosts4.md` is the canonical, actively-maintained build guide and the
 single source of truth for *why* things are built the way they are** — it's a narrative
 log of the real build, including bugs hit and how they were diagnosed, updated
