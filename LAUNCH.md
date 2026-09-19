@@ -195,6 +195,34 @@ stricter than `ffmpeg` and has caught two regressions here that `ffmpeg` passed.
 To toggle audio: tick "Record audio with video" in the cloud client, or "with audio" in
 the local admin table. It applies on the camera's **next Start**, by design (§18.7).
 
+### If outage buffering is enabled (OUTAGE.md)
+
+Off by default. When on, footage is buffered to the USB stick while AWS is unreachable and
+backfilled into **Evidence clips** on recovery. Two user units do this — both must be up:
+
+```bash
+systemctl --user is-active kvs-outage-buffer kvs-outage-uploader
+
+# armed only while that camera's producer runs; check what MediaMTX was actually told:
+curl -s http://127.0.0.1:9997/v3/config/paths/get/cam02 | python3 -m json.tool | grep record
+
+# the rolling window should stay BOUNDED (~4 segments = 120s / 30s). Growing without
+# limit means retention is broken and the stick will fill silently.
+ls /mnt/vms-buffer/live/cam02/*.mp4 | wc -l
+
+# captures waiting to upload (empty in steady state)
+ls -d /mnt/vms-buffer/outage/*/ 2>/dev/null
+```
+
+**The stick must be mounted or nothing is armed** — the supervisor checks `ismount` plus
+the `/mnt/vms-buffer/.vms-buffer-ok` sentinel every tick, because an unplugged stick with
+the mountpoint still present would send MediaMTX's writes to the SD card, and 25 GB free
+means a long outage *fits*, which is worse than failing.
+
+To test it, use `adapter/bin/awsblock.sh on|off` — **not** §10.2's `iptables` snippet,
+which is IPv4-only and silently ineffective here. Then
+`adapter/bin/gap-fill.py --stream cam-02 --last 600`.
+
 ---
 
 ## Part D — Access the browser client (§8, Checkpoint 7)

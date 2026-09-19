@@ -32,6 +32,13 @@ def lambda_handler(event, context):
                     # law tends to assume (see Camera-Features.md on audio).
                     "audioCapable": bool(i.get("audioCapable", False)),
                     "audioEnabled": bool(i.get("audioEnabled", False)),
+                    # Seconds of local recording kept after the connection to AWS drops;
+                    # 0 = off, the default. Separate from the fixed ~2 min pre-roll that
+                    # is always included (OUTAGE.md 2.2). Every camera can do this -- it
+                    # is MediaMTX-side, not camera-side -- so unlike audio there is no
+                    # capability flag to gate on, only the USB buffer being present,
+                    # which only the adapter can see.
+                    "outageBufferSec": int(i.get("outageBufferSec", 0) or 0),
                 }
                 for i in items
             ),

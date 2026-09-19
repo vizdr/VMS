@@ -16,7 +16,11 @@ single source of truth for *why* things are built the way they are** — it's a 
 log of the real build, including bugs hit and how they were diagnosed, updated
 continuously as the system evolves. `LAUNCH.md` is the short operational runbook (what to
 actually run, in order, assuming the guide has already been followed once) — check it
-first for "how do I start/stop/verify this." `Demo-AWS-Video-MCh-15.md`, `COSTS-1.3.md`,
+first for "how do I start/stop/verify this." `AUDIO.md` records how optional per-camera audio was designed and built (guide §18 is the
+canonical reference; `AUDIO.md` keeps the reasoning, the two silent bugs that shaped it,
+and the claims that were withdrawn). `OUTAGE.md` is the working record for durable outage
+buffering (guide §16.3c) — design, measurements and open questions — and folds into
+§16.3c when that work completes; it is authoritative for that feature in the meantime. `Demo-AWS-Video-MCh-15.md`, `COSTS-1.3.md`,
 and `NETWORK.md` are earlier/companion material and may be stale relative to the current
 guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
 demo is modeled on. **When in doubt about current architecture or "why is it done this
@@ -85,7 +89,8 @@ actual KVS producers that cost money while running.
 
 **User units** (`~/.config/systemd/user/`, `systemctl --user`, no sudo): `kvs-mediamtx`,
 `kvs-camera-init`, `kvs-camera-publish`, `kvs-agent`, `onvif-admin`,
-`kvs-event-watcher` (ONVIF detection → clips).
+`kvs-event-watcher` (ONVIF detection → clips), `kvs-outage-buffer` +
+`kvs-outage-uploader` (durable outage buffering, `OUTAGE.md`).
 
 A unit in one manager **cannot** `Requires=`/`After=` a unit in the other — they're
 independent systemd instances. (A templated system unit once declared
@@ -148,6 +153,17 @@ because `kvssink` synthesises the DTS that GStreamer audio buffers lack from a c
 shared with the video track. Guide §18.3 has the arithmetic; the short version is that
 audio frame duration must exceed the video frame interval, and getting it wrong silently
 loses half the audio.
+
+**Durable outage buffering** (`OUTAGE.md`, guide §16.3c) is also MediaMTX's job, not a
+pipeline change: it records a rolling 2-minute window to a USB stick
+(`/mnt/vms-buffer`) for any camera whose registry row asks for it *and* whose producer is
+running, keeps everything once AWS goes unreachable, and backfills merged clips into the
+existing evidence-clip list on recovery. Per-camera, **off by default**. Two things make
+it work and are easy to undo by accident: `recordDeleteAfter` is `0s` **permanently** (the
+supervisor owns retention — handing it to MediaMTX's cleaner would let one raced tick
+delete the captured outage), and **no MediaMTX API call happens at outage onset**, because
+patching any record field rebuilds the recorder and puts a keyframe seam exactly at T0.
+Measured effect on a 5-minute outage: gap-fill 27.4% → 99.8%.
 
 A separate KVS producer process per camera (`kvs-cam01.service` / `kvs-cam02.service` /
 future `kvs-cam@<id>.service` instances) pulls from MediaMTX's RTSP and pushes to its own

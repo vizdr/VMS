@@ -822,6 +822,35 @@ passthrough the moment audio is enabled (0 → 2.5–4 %), which is the property
 the guide exists to protect. `cam-01` pays about +10 points across its publisher and
 producer combined, on the camera that was already the expensive one.
 
+### 7.3b Outage buffering — a second copy, priced like the first
+
+Durable outage buffering (`OUTAGE.md`, guide §16.3c) is off by default and costs nothing
+until an outage happens. When one does, the buffered span is uploaded to S3 **in addition
+to** whatever KVS already holds, so that span is paid for twice — once as `PutMedia`
+ingest that partly failed, once as an S3 `PutObject` plus storage under the `clips/`
+lifecycle rule.
+
+The absolute numbers are small because outages are rare and bounded by the user's limit:
+
+| Limit | `cam-01` (1.26 Mbps, audio on) | `cam-02` sub (0.161 Mbps) |
+|---|---|---|
+| 1 h | 0.57 GB | 0.07 GB |
+| 5 h | 2.83 GB | 0.36 GB |
+| 24 h | 13.6 GB | 1.74 GB |
+
+At S3 Standard's $0.023/GB-month, a 24 h outage on `cam-01` adds ~$0.31/month until the
+lifecycle rule tiers it down at 30 days. Request cost is negligible at these chunk sizes —
+which is precisely the trap §17/M1 warned about and the reason chunks are 10 min–2 h
+rather than the 30 s segments on disk: at 30 s per object a 24 h outage would be 2,880
+PUTs per camera instead of 12.
+
+Two things this does **not** change: it adds no steady-state bitrate (nothing is written
+to S3 while the link is healthy), and it does not move the §6.2 KVS/S3 crossover, because
+it is not an alternative ingest path — it is a repair mechanism for the one in use.
+
+The real cost is the flash, not the cloud: see `OUTAGE.md` §3.5 for why the
+producer-active gate takes the rolling pre-roll from ~19 GB/day of writes to ~0.5.
+
 ### 7.4 Codec — H.265 on `cam-02`
 
 Viable only on `cam-02`; `cam-01` is hardware-locked to H.264 (the Pi's VideoCore VI has

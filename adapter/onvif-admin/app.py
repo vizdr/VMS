@@ -109,13 +109,30 @@ def register_camera():
         if existing.get("mode") != "passthrough" or not existing.get("onvifHost"):
             return jsonify({"error": f"'{camera_id}' exists but isn't a re-registerable ONVIF camera"}), 409
 
-        r = requests.patch(
-            f"{MEDIAMTX_API}/v3/config/paths/patch/{mediamtx_path}",
-            json={"source": stream_uri, "sourceProtocol": "tcp"},
-            timeout=5,
+        # Only patch when the source actually changed. MediaMTX decides whether a config
+        # update can be applied in place or needs the path closed and recreated
+        # (core.pathConfCanBeUpdated): `source` is NOT in its in-place whitelist, so
+        # patching it disconnects every reader -- including a running KVS producer, and
+        # any outage-buffer recording mid-segment. A re-registration that changes nothing
+        # (the common case: same camera, same IP, user just re-scanned) should cost
+        # nothing. When the URI really has moved, the restart is correct and unavoidable.
+        #
+        # `rtspTransport`, not `sourceProtocol`: the latter is a deprecated alias that
+        # MediaMTX still accepts but may drop. Both were verified live to apply in place
+        # when the value is unchanged.
+        current = requests.get(
+            f"{MEDIAMTX_API}/v3/config/paths/get/{mediamtx_path}", timeout=5
         )
-        if not r.ok:
-            return jsonify({"error": f"MediaMTX path update failed: {r.status_code} {r.text}"}), 502
+        unchanged = current.ok and current.json().get("source") == stream_uri
+
+        if not unchanged:
+            r = requests.patch(
+                f"{MEDIAMTX_API}/v3/config/paths/patch/{mediamtx_path}",
+                json={"source": stream_uri, "rtspTransport": "tcp"},
+                timeout=5,
+            )
+            if not r.ok:
+                return jsonify({"error": f"MediaMTX path update failed: {r.status_code} {r.text}"}), 502
 
         table.update_item(
             Key={"cameraId": camera_id},
@@ -134,7 +151,7 @@ def register_camera():
     #    other already-running cameras are undisturbed.
     r = requests.post(
         f"{MEDIAMTX_API}/v3/config/paths/add/{mediamtx_path}",
-        json={"source": stream_uri, "sourceProtocol": "tcp"},
+        json={"source": stream_uri, "rtspTransport": "tcp"},
         timeout=5,
     )
     if not r.ok:
@@ -307,6 +324,33 @@ def set_audio(camera_id):
         ExpressionAttributeValues={":a": enabled},
     )
     return jsonify({"cameraId": camera_id, "audioEnabled": enabled, "appliesOn": "next start"})
+
+
+@app.post("/api/cameras/<camera_id>/outage-buffer")
+def set_outage_buffer(camera_id):
+    """Writes outageBufferSec. Mirrors the cloud `set-camera-outage-buffer` Lambda.
+
+    Unlike the audio flag this needs no restart: kvs-outage-buffer.service re-reads the
+    registry every 60s and arms or disarms MediaMTX recording in place. It only has any
+    effect while the camera's KVS producer is running, though -- with no producer there is
+    no cloud stream to protect, and that gate is what keeps the rolling pre-roll off the
+    USB stick 24/7.
+    """
+    VALID = {0, 30, 120, 300, 600, 1800, 3600, 18000, 43200, 86400}
+    secs = (request.get_json(force=True, silent=True) or {}).get("outageBufferSec")
+    if not isinstance(secs, int) or isinstance(secs, bool) or secs not in VALID:
+        return jsonify({"error": f"outageBufferSec must be one of {sorted(VALID)}"}), 400
+
+    table = cameras_table()
+    if "Item" not in table.get_item(Key={"cameraId": camera_id}):
+        return jsonify({"error": "unknown camera"}), 404
+
+    table.update_item(
+        Key={"cameraId": camera_id},
+        UpdateExpression="SET outageBufferSec = :s",
+        ExpressionAttributeValues={":s": secs},
+    )
+    return jsonify({"cameraId": camera_id, "outageBufferSec": secs, "appliesOn": "within 60s"})
 
 
 @app.post("/api/cameras/<camera_id>/ir")

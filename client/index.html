@@ -13,11 +13,11 @@
   /* Audio gets its own small panel: the two settings in it mean different things (one
      changes the stream for everyone, one only changes this browser) and sitting them
      loose among the buttons made that unreadable. */
-  .audio-section {
+  .setting-section {
     margin: 1rem 0; padding: 0.55rem 0.85rem;
     border: 1px solid #e0e0e0; border-radius: 6px; background: #fafafa;
   }
-  .audio-section h3 { margin: 0 0 0.35rem; font-size: 0.95rem; }
+  .setting-section h3 { margin: 0 0 0.35rem; font-size: 0.95rem; }
   .audio-row {
     display: flex; align-items: baseline; gap: 0.45rem;
     margin: 0.25rem 0; cursor: pointer; line-height: 1.35; font-size: 0.9rem;
@@ -32,7 +32,13 @@
   }
   .audio-row small { color: #666; }
   .audio-row.disabled { opacity: 0.55; cursor: default; }
-  .audio-section > .status { margin: 0.4rem 0 0; }
+  .setting-section > .status { margin: 0.4rem 0 0; }
+  /* A <select> is not caught by the global `input` rule, but give it an explicit width
+     anyway so it cannot inherit a full-row width from anything added later. */
+  .setting-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+                 font-size: 0.9rem; margin: 0.15rem 0 0.35rem; }
+  .setting-row select { width: auto; padding: 0.2rem 0.35rem; font-size: 0.9rem; margin: 0; }
+  .setting-note { color: #666; font-size: 0.82rem; line-height: 1.4; }
   .video-wrap { position: relative; background: #000; aspect-ratio: 16 / 9; }
   video { display: block; width: 100%; height: 100%; }
   .overlay {
@@ -174,6 +180,43 @@ function recModeHint(mode, supportsDetection) {
 // change from video-only to audio+video mid-stream ("Track changes aren't supported" --
 // GetClip and GetHLSStreamingSessionURL both). Applying this live would break clips
 // across the boundary, so a restart is the correct behaviour, not a limitation.
+// Must stay in step with VALID_LIMITS in set_camera_outage_buffer.py and
+// adapter/outage_buffer.py. The disk figures are for cam-01 with audio (the expensive
+// case, ~1.26 Mbps measured) and are shown because 24 h is 13.6 GB of a 57 GB stick --
+// a number worth seeing before choosing it, not after.
+const OUTAGE_LIMITS = [
+  { sec: 0,     label: "Off" },
+  { sec: 30,    label: "30 seconds" },
+  { sec: 120,   label: "2 minutes" },
+  { sec: 300,   label: "5 minutes" },
+  { sec: 600,   label: "10 minutes" },
+  { sec: 1800,  label: "30 minutes" },
+  { sec: 3600,  label: "1 hour  (~570 MB)" },
+  { sec: 18000, label: "5 hours  (~2.8 GB)" },
+  { sec: 43200, label: "12 hours  (~6.8 GB)" },
+  { sec: 86400, label: "24 hours  (~13.6 GB)" },
+];
+
+// Evidence clips are 45s and read fine as "45 sec.". Outage-buffer chunks run to 2 hours,
+// which rendered as "7200 sec." -- technically correct and unreadable.
+function formatDuration(sec) {
+  sec = Number(sec);
+  if (sec < 90) return `${sec} sec.`;
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  if (!h) return `${m} min.`;
+  return m ? `${h} h ${m} min.` : `${h} h`;
+}
+
+function outageLabel(sec) {
+  const m = OUTAGE_LIMITS.find(o => o.sec === Number(sec));
+  return m ? m.label.replace(/\s*\(.*\)$/, "") : `${sec}s`;
+}
+
+function outageHint(sec) {
+  if (!Number(sec)) return "off — footage is lost if the connection drops for more than ~2 minutes";
+  return `on — up to ${outageLabel(sec)} after a drop, plus the 2 minutes before it`;
+}
+
 function audioHint(enabled, capable) {
   if (!capable) return "this camera has no microphone";
   return enabled
@@ -294,7 +337,7 @@ function renderCameraPanel(cam) {
       <span id="recModeStatus-${cam.id}" class="status">${recModeHint(cam.recordingMode, cam.supportsDetection)}</span>
     </p>
 
-    <div class="audio-section">
+    <div class="setting-section">
       <h3>Audio</h3>
 
       <label class="audio-row ${cam.audioCapable ? "" : "disabled"}" id="audioLabel-${cam.id}">
@@ -313,6 +356,23 @@ function renderCameraPanel(cam) {
       </label>
 
       <div id="audioStatus-${cam.id}" class="status">${audioHint(cam.audioEnabled, cam.audioCapable)}</div>
+    </div>
+
+    <div class="setting-section">
+      <h3>If the internet drops</h3>
+      <div class="setting-row">
+        <label for="outage-${cam.id}">Keep recording locally for</label>
+        <select id="outage-${cam.id}" onchange="setOutageBuffer('${cam.id}', this.value)">
+          ${OUTAGE_LIMITS.map(o => `<option value="${o.sec}">${o.label}</option>`).join("")}
+        </select>
+      </div>
+      <div class="setting-note">
+        Footage is buffered to the USB drive while AWS is unreachable, then uploaded to
+        <em>Evidence clips</em> when the connection returns. The <strong>2 minutes before
+        the drop</strong> are always included on top of the time you choose. Only runs
+        while this camera is streaming.
+      </div>
+      <div id="outageStatus-${cam.id}" class="status">${outageHint(cam.outageBufferSec)}</div>
     </div>
 
     <p>
@@ -379,7 +439,8 @@ async function login() {
     for (const cam of CAMERAS) {
       state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null,
                         recordingTimer: null, refreshTimer: null, netRetries: 0,
-                        clipsTimer: null, renderedLatest: null, listen: false };
+                        clipsTimer: null, renderedLatest: null, listen: false,
+                        outageBufferSec: cam.outageBufferSec || 0 };
       camerasDiv.appendChild(renderCameraPanel(cam));
       // The <select> is built via innerHTML, so the stored value has to be applied after
       // the node is in the DOM rather than as a `selected` attribute in the template.
@@ -387,6 +448,8 @@ async function login() {
       if (sel) sel.value = cam.recordingMode || "manual";
       const aud = document.getElementById(`audio-${cam.id}`);
       if (aud) aud.checked = !!cam.audioEnabled;
+      const ob = document.getElementById(`outage-${cam.id}`);
+      if (ob) ob.value = String(cam.outageBufferSec || 0);
       syncClipPolling(cam.id, cam.recordingMode);
       loadClips(cam.id);
     }
@@ -563,6 +626,35 @@ async function setAudio(camera, enabled) {
   }
 }
 
+// Unlike the audio flag, this one needs no restart: the supervisor on the Pi re-reads the
+// registry every 60s and arms or disarms MediaMTX recording in place. What it cannot do
+// is buffer a camera whose producer is stopped -- with no producer there is no cloud
+// stream to protect -- which is why the note says "only while this camera is streaming".
+async function setOutageBuffer(camera, secs) {
+  const el = document.getElementById(`outageStatus-${camera}`);
+  const sel = document.getElementById(`outage-${camera}`);
+  const previous = state[camera] ? state[camera].outageBufferSec : 0;
+  el.textContent = "saving…";
+  try {
+    const r = await fetch(`${API}/cameras/outage-buffer`, {
+      method: "POST",
+      headers: { Authorization: idToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ cameraId: camera, outageBufferSec: Number(secs) }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      if (sel) sel.value = String(previous);   // never show a setting the server refused
+      el.textContent = "error: " + (data.error || r.status);
+      return;
+    }
+    if (state[camera]) state[camera].outageBufferSec = Number(secs);
+    el.textContent = `Saved — ${outageHint(secs)}. Takes effect within a minute.`;
+  } catch (e) {
+    if (sel) sel.value = String(previous);
+    el.textContent = "error: " + e.message;
+  }
+}
+
 async function setIrMode(camera, mode) {
   const statusEl = document.getElementById(`irStatus-${camera}`);
   statusEl.textContent = `setting ${mode}...`;
@@ -655,7 +747,7 @@ async function loadClips(camera) {
       const tierClass = "tier-" + clip.tier;
       const tierText = TIER_LABEL[clip.tier] || clip.tier;
       const restoreNote = clip.restoring ? " (restoring…)" : "";
-      const duration = clip.durationSec != null ? `${clip.durationSec} sec.` : "duration unknown";
+      const duration = clip.durationSec != null ? formatDuration(clip.durationSec) : "duration unknown";
       li.innerHTML = `
         <span class="tier-badge ${tierClass}">${tierText}${restoreNote}</span>
         <span class="clip-meta">${when}

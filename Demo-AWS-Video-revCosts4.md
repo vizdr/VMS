@@ -1881,6 +1881,18 @@ The IDR-period row is the one that gives you a real graph.
 
 ### 10.2 Reconnect behaviour
 
+> **This section's test does not work as written, and fails silently.** It was executed
+> for the first time while building §16.3c, and three things were wrong:
+> **(1)** the `iptables` snippet is IPv4-only — on this dual-stack LAN every "blocked"
+> connection went over IPv6 and returned HTTP 200, with the rules apparently applied;
+> **(2)** 120 s is exactly kvssink's own `DEFAULT_BUFFER_DURATION_SECONDS`, so KVS loses
+> nothing and the test can demonstrate nothing; **(3)** the suggested grep matches none of
+> the lines that actually show a buffer filling (`droppedFrame`, `storage overflow`,
+> `Overall storage byte size` from `KinesisVideoStream.cpp:45-68`).
+> Use `adapter/bin/awsblock.sh`, run outages well past 120 s, and confirm the block landed
+> before believing any result. Results and the corrected method:
+> `measurements/reconnect_timeline.md`.
+
 Simulate the WAN failure of §14 without unplugging anything:
 
 ```bash
@@ -2111,7 +2123,7 @@ software.
 | Video handling | pass-through H.264/H.265 | transcode MJPG → H.264 | **S** — use an RTSP camera |
 | Frame rate to cloud | capped at 10 fps | 15 fps, configurable (§2.7) | **done** |
 | Recording policy | motion-triggered by default | continuous | **M** — motion detect + event upload |
-| Outage buffering | 32 GB USB, auto-backfill | RAM only (`storage-size`) | **M** — disk-backed queue |
+| Outage buffering | 32 GB USB, auto-backfill | **57 GB USB, auto-backfill — closed** (§16.3c) | ~~M~~ **done**, 27.4 % → 99.8 % gap-fill |
 | Fleet updates | weekly remote push | none | **M** — IoT Jobs + A/B partitions |
 | Camera discovery | hundreds of brands, auto-onboarded | ONVIF WS-Discovery + a local admin GUI (§16.2.1) do discover → register → control end-to-end | **done** (a camera's IP changing after onboarding still needs a manual re-scan — **S** if self-healing matters) |
 | Local HDMI display | up to 4K live wall | none | **S** — a second GStreamer sink |
@@ -2287,20 +2299,63 @@ ONVIF/IR hardware at all. Two findings worth keeping:
   extensions are opportunistic, not guaranteed, so the standards-based fallback is worth
   building and shipping first, with the richer vendor path as a strict bonus if reachable.
 
-**(c) Durable outage buffering.** This is the feature the product markets hardest and the
-one your prototype most conspicuously lacks. Minimum viable version: `splitmuxsink`
-writing 10-second MP4 segments to a USB stick continuously, a small uploader that walks
-the directory and pushes segments to S3 when connectivity returns, and a retention sweep
-that deletes on success. Then re-run the §10.2 outage test and report the gap-fill
-percentage before and after. That is a real engineering result.
+**(c) Durable outage buffering — done, and measured.** This was the feature the product
+markets hardest and the one this prototype most conspicuously lacked. **`OUTAGE.md` is the
+full record**; the numbers that matter:
 
-```bash
-# rough shape of the local recorder leg
-... ! h264parse ! tee name=t \
-  t. ! queue ! kvssink ... \
-  t. ! queue ! splitmuxsink location=/mnt/usb/cam01_%05d.mp4 \
-                max-size-time=10000000000
-```
+| 5-minute WAN outage | gap-fill | lost |
+|---|---|---|
+| before | **27.4 %** | 72.6 % |
+| after | **99.8 %** | 0.2 % |
+
+Measured per §10.4 on `cam-02`, both runs identical apart from the setting
+(`measurements/reconnect_timeline.md`).
+
+**What was actually wrong was worse than §16.2's "RAM only" suggested.** From the vendored
+SDK rather than from the docs:
+
+- `gstkvssink.cpp:99` — `DEFAULT_BUFFER_DURATION_SECONDS 120`. The 128 MB content store
+  never binds; the **120-second buffer duration** does. At `cam-01`'s 1 Mbps that is 15 MB
+  of a 128 MB store.
+- `StreamDefinition.h:74-75` — eviction is `DROP_TAIL_ITEM` / `DROP_UNTIL_FRAGMENT_START`:
+  **drop oldest, keep newest**, exactly backwards for outage buffering. The start of the
+  outage is discarded first.
+- `KvsSinkStreamCallbackProvider.cpp:8-11` — the buffer-overflow callback is
+  `UNUSED_PARAM(custom_data); return STATUS_SUCCESS;`. A silent no-op.
+
+**The design is not the one sketched below, and not §17/M1's either.** Both bolt a
+`tee`+`splitmuxsink` leg onto the producer pipelines. MediaMTX already runs, already holds
+every camera feed, survives producer start/stop, and its per-path record fields are
+live-patchable through the control API `onvif-admin/app.py` already uses — so it does the
+recording and **no GStreamer pipeline changes were needed at all**.
+
+Three non-obvious constraints, each found by measurement:
+
+1. **No API call may happen at T0.** Patching any record field makes MediaMTX rebuild the
+   recorder, and the next fMP4 segment can only start at a keyframe — placing a ~2 s seam
+   precisely at the moment the outage begins. Arming happens once, with
+   `recordDeleteAfter: 0s`; the supervisor owns retention and the outage transition is
+   pure local bookkeeping.
+2. **`recordFormat: fmp4` is mandatory.** Disassembling the two recorder back-ends,
+   MPEG-TS supports no G711 and no LPCM — so §17/M1's 60 s MPEG-TS spec would have
+   recorded **video-only, silently**, with one WARN line. fMP4 carries both.
+3. **The merge must transcode audio to AAC.** MediaMTX stores LPCM as `ipcm` and G.711 as
+   `alaw`, and no browser decodes either inside MP4 — `-c copy` yields a clip that plays
+   in `ffplay` and is silent in the client.
+
+**§10.2's own test cannot detect any of this.** Its 120 s outage is exactly the SDK's
+buffer duration, so KVS loses nothing and the test proves nothing. Its `iptables` snippet
+is IPv4-only, and on a dual-stack LAN every "blocked" connection simply goes over IPv6 and
+succeeds — the rules appear applied and nothing is blocked. Its suggested grep
+(`retry|reconnect|error`) matches none of the lines that would show a buffer filling
+(`droppedFrame`, `storage overflow`, `Overall storage byte size`). Use
+`adapter/bin/awsblock.sh`, run outages well past 120 s, and confirm the block landed
+before believing a result. Full account in `measurements/reconnect_timeline.md` §4.
+
+Shipped as a per-camera setting, **off by default**, in both GUIs: a rolling 2-minute
+pre-roll while streaming, full retention once AWS goes unreachable, up to a user-chosen
+limit (30 s … 24 h), then merged into ≤2 h chunks and backfilled into the existing
+evidence-clip list on recovery. Delete only after a confirmed 200, per §17/M3.
 
 **(d) Fleet OTA via IoT Jobs.** Weekly remote updates across devices in customers'
 buildings is the hardest unglamorous problem in this product category. A credible

@@ -281,6 +281,26 @@ async function loadCameras() {
             </label>
             <div id="audioStatus-${c.cameraId}" class="status"></div>
           </div>
+          <div style="margin-top:4px">
+            <label class="cb" title="Buffer footage to the USB drive while AWS is unreachable. Applies within 60s; only runs while this camera's KVS push is active.">
+              outage buffer
+              <select id="outage-${c.cameraId}"
+                      onchange="setOutageBuffer('${c.cameraId}', this.value)"
+                      style="font-size:0.75rem">
+                <option value="0">off</option>
+                <option value="30">30s</option>
+                <option value="120">2m</option>
+                <option value="300">5m</option>
+                <option value="600">10m</option>
+                <option value="1800">30m</option>
+                <option value="3600">1h</option>
+                <option value="18000">5h</option>
+                <option value="43200">12h</option>
+                <option value="86400">24h</option>
+              </select>
+            </label>
+            <div id="outageStatus-${c.cameraId}" class="status"></div>
+          </div>
         </td>
         <td>
           <div class="ctl-row">
@@ -302,6 +322,8 @@ async function loadCameras() {
       if (sel) sel.value = c.recordingMode || "manual";
       const aud = tr.querySelector(`#audio-${c.cameraId}`);
       if (aud) aud.checked = !!c.audioEnabled;
+      const ob = tr.querySelector(`#outage-${c.cameraId}`);
+      if (ob) ob.value = String(c.outageBufferSec || 0);
     }
     const anSel = document.getElementById("anCam");
     if (anSel) {
@@ -365,6 +387,22 @@ async function setAudio(id, enabled) {
     el.textContent = (enabled ? "sound recorded" : "video only") + " — from next Start";
   } catch (e) {
     if (box) box.checked = !enabled;   // never show a setting the server refused
+    el.textContent = e.message;
+  }
+}
+
+// Registry-only; kvs-outage-buffer.service picks it up within 60s and arms/disarms
+// MediaMTX recording in place. No restart, unlike the audio flag.
+async function setOutageBuffer(id, secs) {
+  const el = document.getElementById(`outageStatus-${id}`);
+  el.textContent = "saving…";
+  try {
+    await api(`/api/cameras/${id}/outage-buffer`, { method: "POST",
+      body: JSON.stringify({ outageBufferSec: Number(secs) }) });
+    el.textContent = Number(secs)
+      ? "buffering on — needs KVS push running"
+      : "off";
+  } catch (e) {
     el.textContent = e.message;
   }
 }

@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UploadBufferedFootage",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::vms-demo-evidence-596633517506/clips/*"
+    },
+    {
+      "Sid": "ConfirmUploadBeforeDeletingLocally",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::vms-demo-evidence-596633517506/clips/*"
+    },
+    {
+      "Sid": "RegisterBufferedClips",
+      "Effect": "Allow",
+      "Action": "dynamodb:PutItem",
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/clips"
+    }
+  ]
+}
