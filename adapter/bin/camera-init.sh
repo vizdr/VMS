@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -e
-CAM=/dev/v4l/by-id/usb-Generic_AVerMedia_PW310_Webcam_200901010001-video-index0
+# $VMS_HOME if exported; otherwise the repo root this script lives in.
+VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
+# Discovered, not hardcoded -- the old by-id path embedded this camera's USB serial.
+eval "$(${VMS_HOME}/adapter/bin/resolve-usb-camera.sh)"
+CAM="${CAM_DEVICE:?no capture-capable video device found}"
 
 v4l2-ctl -d "$CAM" \
   --set-ctrl=auto_exposure=1 \

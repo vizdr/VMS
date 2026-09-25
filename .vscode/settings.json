@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/home/vladimir/MyProjects/VMS/vendor/amazon-kinesis-video-streams-producer-sdk-cpp"
+    "cmake.sourceDirectory": "${workspaceFolder}/vendor/amazon-kinesis-video-streams-producer-sdk-cpp",
+    "cmake.configureOnOpen": false
 }

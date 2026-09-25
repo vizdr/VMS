@@ -34,7 +34,7 @@ Live state: `set-camera-audio` Lambda **Active**, `POST /cameras/audio` deployed
 
 | | `cam-01` | `cam-02` |
 |---|---|---|
-| Source | PW310 mic, ALSA `hw:CARD=Webcam,DEV=0` | camera's own G.711 A-law in RTSP |
+| Source | PW310 mic, ALSA `hw:CARD=Webcam,DEV=0` — discovered at startup, not hardcoded (`LAUNCH.md` A9) | camera's own G.711 A-law in RTSP |
 | Over RTSP to MediaMTX | **LPCM** 16 kHz mono | G.711 A-law (untouched) |
 | AAC encode happens | at the producer | at the producer |
 | Delivered | 16 kHz AAC-LC, 32 kb/s | 8 kHz AAC-LC, ~28 kb/s |

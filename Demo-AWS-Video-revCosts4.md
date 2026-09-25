@@ -93,21 +93,28 @@ to be able to make in an interview.
 export AWS_REGION=eu-central-1
 export KVS_STREAM=cam-01
 export THING_NAME=adapter-01
-export VMS_HOME=$HOME/MyProjects/VMS
+export VMS_HOME=$HOME/Projects/VideoSafeZone   # wherever you cloned the repo
 ```
 
 You already have the AWS CLI, an IoT Core endpoint and a working certificate/policy
-model from the earlier telemetry pipeline. Reuse the account; create *new* Thing and
+model from the earlier telemetry pipeline. (On a freshly imaged Pi the CLI is *not*
+installed — Raspberry Pi OS doesn't ship it; `LAUNCH.md` A6 installs AWS's arm64 build and
+covers credentialing it without leaving a static key on the device.) Reuse the account; create *new* Thing and
 certificate for the adapter so the policies stay cleanly scoped.
 
 **Repository root, not scattered `$HOME` clutter.** Every build artifact below — MediaMTX,
 the KVS Producer SDK checkout, certificates, the Python venv, scripts — lives under
-`$VMS_HOME` (`~/MyProjects/VMS`), not directly in `$HOME`. This keeps the whole prototype
+`$VMS_HOME` (`~/Projects/VideoSafeZone`, the git clone), not directly in `$HOME`. This keeps the whole prototype
 in one git-tracked directory that matches §12's repository layout, makes teardown and
 portfolio packaging exact, and means `certs/` and the venv can be gitignored in one place.
 Where a command below still shows `~/something`, read it as `$VMS_HOME/something` unless
 noted otherwise — the few exceptions (systemd `Environment=` lines) are called out
-explicitly, since systemd doesn't expand `$VMS_HOME`.
+explicitly, since systemd doesn't expand `$VMS_HOME`. The adapter's own code does not
+depend on the export: every `adapter/bin/*.sh` script and `adapter/*.py` module uses
+`$VMS_HOME` if set and otherwise derives the repo root from its own location, so a fresh
+clone into any directory — or a unit that never sourced `.bashrc` — finds `certs/` and
+`venv-adapter/` without edits. (It used to hardcode the absolute path, which broke on the
+first move to a new folder.)
 
 ### 1.4 System stability hardening (do this before §4's SDK build)
 
@@ -258,6 +265,19 @@ with `ls -l /dev/v4l/by-id/` rather than copying a literal example). Two entries
 `-video-index0` and `-video-index1`; **use `index0`**, the capture node — `index1` is the
 UVC metadata/still-image node, not a second video stream.
 
+> **Superseded for the running system, and worth understanding why.** The pipelines no
+> longer hardcode this path: `adapter/bin/resolve-usb-camera.sh` discovers it at startup
+> (`LAUNCH.md` A9). The literal above embeds the camera's **USB serial number**, so it
+> breaks on a *different unit of the same model*, which is exactly what happens when the
+> project is set up on new hardware. `by-path` is serial-free but encodes the physical USB
+> port instead, so it breaks when the plug moves — neither form is portable on its own.
+>
+> The resolver does not guess by index either; it asks which node advertises a capture
+> format. On this camera `index0` lists `'MJPG' 'YUYV'` and `index1` lists nothing at all,
+> which is a stronger signal than the naming convention and holds on cameras that number
+> their nodes differently. Keep the `ls -l /dev/v4l/by-id/` habit for diagnosis — just do
+> not paste the result into a script.
+
 ### 2.3 Lock exposure — this matters more than it sounds
 
 UVC auto-exposure lengthens integration time in dim light, and the camera silently drops
@@ -348,10 +368,16 @@ matches `OUTBOUND-CLOUD.md` §19. The camera-facing side is the only thing that 
 
 ```bash
 mkdir -p "$VMS_HOME/mediamtx" && cd "$VMS_HOME/mediamtx"
-curl -L -o mediamtx.tar.gz \
+curl -fL -o mediamtx.tar.gz \
   https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1_linux_arm64.tar.gz
-tar xzf mediamtx.tar.gz && ./mediamtx &
+tar xzf mediamtx.tar.gz mediamtx && ./mediamtx &
 ```
+
+> **Extract the binary by name.** The release tarball also ships a default
+> `mediamtx.yml`, and this repo tracks its own customised one in `mediamtx/`. A bare
+> `tar xzf mediamtx.tar.gz` silently overwrites it with the upstream default. Nothing
+> fails loudly: MediaMTX starts fine, but it has lost this project's paths and API
+> settings. If that has already happened, `git checkout mediamtx/mediamtx.yml` restores it.
 
 > **Known trap:** the asset naming above is what MediaMTX currently ships (verified
 > 2026-08-20). An earlier draft of this guide referenced
@@ -530,7 +556,7 @@ Before=kvs-mediamtx.service
 
 [Service]
 Type=oneshot
-ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/camera-init.sh
+ExecStart=/home/vladimir/Projects/VideoSafeZone/adapter/bin/camera-init.sh
 RemainAfterExit=yes
 
 [Install]
@@ -544,8 +570,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/vladimir/MyProjects/VMS/mediamtx
-ExecStart=/home/vladimir/MyProjects/VMS/mediamtx/mediamtx
+WorkingDirectory=/home/vladimir/Projects/VideoSafeZone/mediamtx
+ExecStart=/home/vladimir/Projects/VideoSafeZone/mediamtx/mediamtx
 Restart=on-failure
 RestartSec=5
 
@@ -561,8 +587,8 @@ Requires=kvs-camera-init.service kvs-mediamtx.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/vladimir/MyProjects/VMS/adapter/bin
-ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/publish-cam01.sh
+WorkingDirectory=/home/vladimir/Projects/VideoSafeZone/adapter/bin
+ExecStart=/home/vladimir/Projects/VideoSafeZone/adapter/bin/publish-cam01.sh
 Restart=on-failure
 RestartSec=5
 
@@ -731,6 +757,18 @@ if(UNIX AND NOT APPLE)
 endif()
 ```
 
+**Patch 3 can't be applied up front — its file doesn't exist yet.** `kvspic-src/` is
+downloaded by the *configure* step (`fetch_repo(kvspic)` in `kvscproducer-src`'s
+`CMakeLists.txt`), while `Thread.c` is only compiled later by `make`. The single
+`cmake … && make` command below therefore works only if you let it fail once at
+`Thread.c`, patch, and re-run. `LAUNCH.md` A3 avoids that with two stages instead:
+patches 1–2 → `cmake` alone → patch 3 → `make -j1`. Patches 1–2, by contrast, **must**
+be in place before the first configure: that is when OpenSSL is compiled. (Rebuild on
+the new Pi, 2026-09-24: both were skipped, OpenSSL compiled one job per core, and
+earlyoom — told by §1.4 to prefer compilers — SIGTERMed every `cc1` at once, leaving a
+burst of `cc: fatal error: Terminated signal terminated program cc1` and
+`EXIT_CODE=1` in `build.log`. There was nothing wrong with the code.)
+
 **Run it detached, not in a plain background shell.** This step easily runs past any
 single terminal/IDE session. A bare `&`/`nohup`/`disown` background job is not enough — it
 is still tied to the login session's cgroup and gets killed the moment that session ends
@@ -770,7 +808,7 @@ above, not the compile time itself.
 
 ```bash
 cat >> ~/.bashrc <<'EOF'
-export VMS_HOME=$HOME/MyProjects/VMS
+export VMS_HOME=$HOME/Projects/VideoSafeZone   # wherever you cloned the repo
 export KVS_SDK=$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp
 export GST_PLUGIN_PATH=$KVS_SDK/build
 export LD_LIBRARY_PATH=$KVS_SDK/open-source/local/lib:$LD_LIBRARY_PATH
@@ -968,9 +1006,11 @@ aws iot describe-endpoint --endpoint-type iot:CredentialProvider
 # → c2xxxxxxxxxxxx.credentials.iot.eu-central-1.amazonaws.com
 
 curl -o cacert.pem https://www.amazontrust.com/repository/SFSRootCAG2.pem
+curl -o AmazonRootCA1.pem https://www.amazontrust.com/repository/AmazonRootCA1.pem   # MQTT, §7.2
 ```
 
-Note this is a **different CA** from the one used for MQTT data-plane connections. Using
+Note this is a **different CA** from the one used for MQTT data-plane connections
+(`AmazonRootCA1.pem`, used by `agent.py`). Using
 the wrong root certificate here produces a TLS error that looks like a permissions
 problem and wastes an hour.
 
@@ -1025,9 +1065,9 @@ After=network-online.target
 [Service]
 Type=simple
 User=vladimir
-Environment=GST_PLUGIN_PATH=/home/vladimir/MyProjects/VMS/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/build
-Environment=LD_LIBRARY_PATH=/home/vladimir/MyProjects/VMS/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/open-source/local/lib
-ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/stream-cam01.sh
+Environment=GST_PLUGIN_PATH=/home/vladimir/Projects/VideoSafeZone/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/build
+Environment=LD_LIBRARY_PATH=/home/vladimir/Projects/VideoSafeZone/vendor/amazon-kinesis-video-streams-producer-sdk-cpp/open-source/local/lib
+ExecStart=/home/vladimir/Projects/VideoSafeZone/adapter/bin/stream-cam01.sh
 Restart=on-failure
 RestartSec=5
 
@@ -1036,7 +1076,10 @@ WantedBy=multi-user.target
 ```
 
 `User=` and `Environment=` don't shell-expand `$VMS_HOME` — systemd unit files need the
-literal absolute path, unlike the bash snippets elsewhere in this doc.
+literal absolute path, unlike the bash snippets elsewhere in this doc. (No
+`Environment=VMS_HOME=` line is needed: `stream-cam01.sh` falls back to the repo root it
+lives in, §1.3.) If your clone isn't at `~/Projects/VideoSafeZone`, change these paths
+and the ones in every other unit in this guide to match.
 
 Put the `gst-launch-1.0` command from §6.5 into `$VMS_HOME/adapter/bin/stream-cam01.sh`.
 
@@ -1054,13 +1097,20 @@ python3 -m venv "$VMS_HOME/venv-adapter" && source "$VMS_HOME/venv-adapter/bin/a
 pip install awsiotsdk
 ```
 
+(`awsiotsdk` is all this phase needs. The adapter as it stands — registry, ONVIF,
+discovery, admin GUI — needs the full set: `boto3 awsiotsdk onvif-zeep-async WSDiscovery
+flask requests lxml`, `LAUNCH.md` A4.)
+
 `agent.py` — subscribe to a command topic, drive systemd, report state, and publish a
 Last Will so the cloud sees ungraceful disconnects:
 
 ```python
-import json, subprocess, threading
+import json, os, subprocess, threading
 from awscrt import mqtt
 from awsiot import mqtt_connection_builder
+
+# $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
+VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 THING   = "adapter-01"
 CMD_T   = f"adapter/{THING}/cmd"
@@ -1081,9 +1131,9 @@ def on_message(topic, payload, **kwargs):
 conn = mqtt_connection_builder.mtls_from_path(
     endpoint="xxxxx-ats.iot.eu-central-1.amazonaws.com",  # aws iot describe-endpoint --endpoint-type iot:Data-ATS
     port=443,                       # ALPN x-amzn-mqtt-ca — traverses HTTPS-only firewalls
-    cert_filepath="/home/vladimir/MyProjects/VMS/certs/adapter.cert.pem",
-    pri_key_filepath="/home/vladimir/MyProjects/VMS/certs/adapter.private.key",
-    ca_filepath="/home/vladimir/MyProjects/VMS/certs/AmazonRootCA1.pem",
+    cert_filepath=os.path.join(VMS_HOME, "certs", "adapter.cert.pem"),
+    pri_key_filepath=os.path.join(VMS_HOME, "certs", "adapter.private.key"),
+    ca_filepath=os.path.join(VMS_HOME, "certs", "AmazonRootCA1.pem"),
     client_id=THING,
     keep_alive_secs=30,
     clean_session=False,
@@ -1985,7 +2035,7 @@ Run it every evening. Recreating the stream in §3 takes ten seconds.
 ## 12. Suggested repository layout
 
 ```text
-VMS/                            # $VMS_HOME — everything lives here, not scattered in $HOME
+VideoSafeZone/                  # $VMS_HOME — everything lives here, not scattered in $HOME
 ├── README.md                  # architecture diagram + the numbers from §10
 ├── .gitignore                 # excludes certs/, venv-adapter/, built binaries
 ├── adapter/
@@ -2091,7 +2141,7 @@ yours, and the part nobody else's tutorial-follower will have.
 | Latency doubled after an fps change | `h264_i_frame_period` is in frames — rescale it (§2.7) |
 | `videorate` duplicating frames | missing `drop-only=true` |
 | `No such element "kvssink"` | `GST_PLUGIN_PATH` not pointing at the SDK `build/` dir |
-| Build dies around OpenSSL/curl | `make -j4` on 4 GB — OOM killer; use `-j2` |
+| Build dies around OpenSSL/curl (`Terminated signal … cc1` burst) | nested `--parallel` in `kvscproducer-src/CMake/Utilities.cmake` — `-j`/`PARALLEL_BUILD` don't reach it; apply patch 1 (§4.2) |
 | Fragments rejected, console empty | missing `h264parse config-interval=-1` |
 | TLS error on credentials endpoint | wrong root CA — needs SFSRootCAG2, not AmazonRootCA1 |
 | MQTT connects, publish silently fails | policy resource missing the topic wildcard |
@@ -2416,7 +2466,7 @@ After=network-online.target
 
 [Service]
 EnvironmentFile=/etc/adapter/channels/%i.env
-ExecStart=/home/vladimir/MyProjects/VMS/adapter/bin/stream-channel.sh
+ExecStart=/home/vladimir/Projects/VideoSafeZone/adapter/bin/stream-channel.sh
 Restart=on-failure
 RestartSec=5
 CPUAccounting=true
@@ -2430,6 +2480,12 @@ WantedBy=multi-user.target
 systemctl enable --now kvs-cam@cam-01 kvs-cam@cam-02 kvs-cam@cam-03
 systemd-cgtop -1        # per-channel CPU and memory, via cgroups, for free
 ```
+
+The unit above is the methodology sketch. The installed version (`LAUNCH.md` A8) also
+carries `User=` and the `GST_PLUGIN_PATH`/`LD_LIBRARY_PATH` `Environment=` lines that
+`kvs-cam01.service` has (§7.1) — without them the producer runs as root and can't find
+`kvssink`. `EnvironmentFile=` only supplies `CAMERA_ID`/`MEDIAMTX_PATH`
+(`provision-camera.sh`).
 
 **One process per channel, not one process with N pipelines.** The cost is ~30–50 MB RSS
 each. The return: a hung RTSP source or wedged encoder on one camera cannot take down the
@@ -3072,6 +3128,13 @@ Two corollaries worth internalising:
 ### 18.2 Find the ALSA card by name, not by number
 
 Card numbers shift on reboot — `hw:3,0` is not stable.
+
+> The card *name* is not portable either: `hw:CARD=Webcam` is this device's id, not a
+> constant. `adapter/bin/resolve-usb-camera.sh` now derives it at startup by looking for a
+> card that has a capture PCM and is not the Pi's onboard audio, so a different microphone
+> works with no edit (`LAUNCH.md` A9). A camera's registry row may still name an exact
+> `audioDevice`, which wins over discovery. The commands below remain the right way to
+> *check* what you have.
 
 ```bash
 arecord -l

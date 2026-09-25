@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -e
+# $VMS_HOME if exported (interactive shells, via ~/.bashrc); otherwise the repo root
+# this script lives in (systemd units do not read ~/.bashrc).
+VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
 CRED_ENDPOINT=c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com
-CERTS=/home/vladimir/MyProjects/VMS/certs
+CERTS="${VMS_HOME}/certs"
 
 # Video is genuine passthrough -- no jpegdec/videoconvert/v4l2h264enc chain like
 # stream-cam01.sh needs for the PW310. The camera already outputs real H.264 (§16.3(a));
@@ -48,8 +51,8 @@ KVSSINK="kvssink name=kvs stream-name=cam-02 aws-region=eu-central-1 \
 # actively wrong rather than merely pointless.
 # `|| true` because `set -e` is on and this must never be the reason a camera has no
 # producer at all -- an unreadable registry degrades to video-only, it does not fail.
-AUDIO_ENV="$(/home/vladimir/MyProjects/VMS/venv-adapter/bin/python3 \
-             /home/vladimir/MyProjects/VMS/adapter/bin/camera-audio.py cam-02 || true)"
+AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
+             ${VMS_HOME}/adapter/bin/camera-audio.py cam-02 || true)"
 eval "${AUDIO_ENV}"
 
 if [ "${AUDIO:-off}" = "on" ]; then

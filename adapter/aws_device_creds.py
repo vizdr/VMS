@@ -9,6 +9,7 @@ Keeping this as one shared helper, rather than a second role/mechanism, is delib
 sitting on an unattended embedded device is the actual liability -- adding a second
 static credential for the admin tooling would reopen exactly that.
 """
+import os
 import json
 import ssl
 import urllib.request
@@ -16,7 +17,9 @@ import urllib.request
 import boto3
 
 CRED_ENDPOINT = "c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com"
-CERTS = "/home/vladimir/MyProjects/VMS/certs"
+# $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
+VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CERTS = os.path.join(VMS_HOME, "certs")
 ROLE_ALIAS = "KVSAdapterRoleAlias"
 THING_NAME = "adapter-01"
 

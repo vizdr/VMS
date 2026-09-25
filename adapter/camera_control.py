@@ -6,11 +6,16 @@ than a hardcoded dict, so a camera registered through the admin GUI gets working
 control over the cloud/MQTT path too, with no manual edit anywhere.
 """
 import asyncio
+import os
 import subprocess
+import sys
 
 from onvif import ONVIFCamera
 
-WSDL_DIR = "/home/vladimir/MyProjects/VMS/venv-adapter/lib/python3.13/site-packages/onvif/wsdl"
+# $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
+VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WSDL_DIR = os.path.join(VMS_HOME, "venv-adapter", "lib",
+    f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages", "onvif", "wsdl")
 ALLOWED_IR_MODES = {"AUTO", "ON", "OFF"}
 
 

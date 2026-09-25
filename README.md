@@ -127,12 +127,19 @@ open a browser; "no errors" proves nothing.
 |---|---|
 | Raspberry Pi 4B | **4 GB** (what this was built on; 8 GB makes the SDK build easier) |
 | Storage | SD card for the OS, plus a **USB stick** if you want outage buffering (57 GB here) |
-| `cam-01` | AVerMedia PW310 USB webcam — MJPG only, so it must be transcoded |
+| `cam-01` | Any UVC USB webcam (built on an AVerMedia PW310 — MJPG only, so it must be transcoded) |
 | `cam-02` | Any ONVIF/RTSP camera that emits H.264 (tested: a Hikvision-derived rebrand) |
 | Network | Wired or Wi-Fi; **no router configuration at all** |
 | OS | Raspberry Pi OS (Debian trixie), 64-bit |
 
 An AWS account is required. The demo runs well under $5/month; see [Cost](#cost).
+
+**Nothing is pinned to a specific unit.** The camera's video node and microphone are
+discovered at startup (`adapter/bin/resolve-usb-camera.sh`), because the old `by-id` path
+embedded the camera's USB *serial number* and so broke on a different unit of the same
+model. The ONVIF camera lives in the registry, not in code. Paths derive from
+`$VMS_HOME`, falling back to the repo root the scripts live in. What genuinely does not
+move is the AWS account — see [Rebuilding elsewhere](#rebuilding-on-a-different-aws-account).
 
 ---
 
@@ -161,7 +168,7 @@ Exact `earlyoom` arguments: `LAUNCH.md` A1.
 ### 2. Environment
 
 ```bash
-export VMS_HOME=$HOME/MyProjects/VMS
+export VMS_HOME=$HOME/Projects/VideoSafeZone   # wherever you cloned the repo
 export KVS_SDK=$VMS_HOME/vendor/amazon-kinesis-video-streams-producer-sdk-cpp
 export GST_PLUGIN_PATH=$KVS_SDK/build
 export LD_LIBRARY_PATH=$KVS_SDK/open-source/local/lib:$LD_LIBRARY_PATH
@@ -169,7 +176,9 @@ export AWS_REGION=eu-central-1
 ```
 
 Persist to `~/.bashrc`. **Note that systemd units do not source `.bashrc`** — every unit
-sets these explicitly for that reason.
+sets the paths it needs explicitly, as literal absolute paths (`LAUNCH.md` A8). The
+adapter's own scripts and Python modules don't need `VMS_HOME` exported: they fall back
+to the repo root they live in.
 
 ### 3. Build the KVS Producer SDK — budget 1.5–2.5 hours
 
@@ -184,23 +193,21 @@ sudo apt install -y cmake m4 git build-essential pkg-config \
 > `gstreamer1.0-omx-generic`, which the upstream instructions ask for, **does not exist on
 > Debian trixie**.
 
-**Three upstream source patches are required** before it will compile with GCC 14 — each
-is listed with its reason in `LAUNCH.md` A3.
+**Three upstream source patches are required**, and they go in at two different moments,
+so the build runs in two stages. The exact commands, with a proof for each stage, are in
+`LAUNCH.md` A3:
 
-On 4 GB, build **single-threaded and pinned**, under systemd so it survives a dropped SSH
-session:
+1. **Before anything is built — patches 1 and 2.** They stop the nested OpenSSL build from
+   running one compiler per core, which `-j1` and `-DPARALLEL_BUILD=OFF` don't reach, and
+   from cloning OpenSSL's huge test submodules. Skip them and earlyoom kills the build
+   mid-OpenSSL: `build.log` shows a burst of `Terminated signal terminated program cc1`.
+2. **Stage 1: `cmake` configure.** With `-DBUILD_DEPENDENCIES=ON` this compiles the
+   dependencies and downloads the kvspic source.
+3. **Patch 3** (GCC 14 compatibility). Its file only exists after stage 1.
+4. **Stage 2: `make -j1`.**
 
-```bash
-loginctl enable-linger "$USER"
-cd "$KVS_SDK/build"
-systemd-run --user --unit=kvs-build --collect --working-directory="$PWD" \
-  taskset -c 1,2 bash -c 'cmake .. -DBUILD_GSTREAMER_PLUGIN=ON -DBUILD_DEPENDENCIES=ON \
-    -DPARALLEL_BUILD=OFF -DCMAKE_BUILD_TYPE=Release > build.log 2>&1 && \
-    make -j1 >> build.log 2>&1; echo "EXIT_CODE=$?" >> build.log'
-```
-
-> `-j1` and `taskset` are deliberate. Parallel builds exhaust 4 GB and the OOM killer
-> takes the machine down.
+On 4 GB, build **single-threaded and pinned** (`taskset -c 1,2`), as a `systemd-run
+--user` unit with lingering enabled, so it survives a dropped SSH or VS Code session.
 
 **Checkpoint:** `gst-inspect-1.0 kvssink` prints element details, not "No such element."
 
@@ -208,8 +215,14 @@ systemd-run --user --unit=kvs-build --collect --working-directory="$PWD" \
 
 ```bash
 python3 -m venv "$VMS_HOME/venv-adapter"
-"$VMS_HOME/venv-adapter/bin/pip" install boto3 awsiotsdk onvif-zeep-async flask requests
+"$VMS_HOME/venv-adapter/bin/pip" install boto3 awsiotsdk onvif-zeep-async WSDiscovery flask requests lxml
 ```
+
+Proof that the venv works, and what each package is for: `LAUNCH.md` A4.
+
+**MediaMTX** — download the pinned release binary into `$VMS_HOME/mediamtx/`, extracting
+*only* the binary: the tarball's default `mediamtx.yml` would overwrite this repo's own
+config (`LAUNCH.md` A5).
 
 ### 5. AWS resources
 
@@ -222,6 +235,10 @@ API Gateway → S3 + CloudFront for the client.
 
 The certificate lands in `$VMS_HOME/certs/` and is **gitignored**. It is the only
 credential on the device; everything else is vended short-lived through the role alias.
+A fresh clone therefore has no `certs/`: copy it from the previous Pi or create a new
+certificate for the existing Thing, then prove it against both AWS endpoints —
+`LAUNCH.md` A7. The AWS CLI (the operator's tool, used for that and for deploys) isn't
+in Raspberry Pi OS; install and credential it per `LAUNCH.md` A6.
 
 ### 6. Optional — USB buffer for outage recording
 
@@ -241,6 +258,9 @@ exists, recording would land on the SD card — and with tens of GB free it *fit
 worse than failing.
 
 ### 7. Start it
+
+The unit files aren't in git — create them first with `LAUNCH.md` A8 (it writes the
+literal paths of *this* clone into each unit, since systemd doesn't expand `$VMS_HOME`).
 
 ```bash
 systemctl --user enable --now kvs-camera-init kvs-mediamtx kvs-camera-publish \

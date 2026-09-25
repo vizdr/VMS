@@ -1,4 +1,4 @@
-import json, threading, time
+import json, os, threading, time
 from datetime import datetime, timezone
 
 from awscrt import mqtt
@@ -7,6 +7,9 @@ from awsiot import mqtt_connection_builder
 import aws_state
 import camera_control
 from aws_device_creds import get_session
+
+# $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
+VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 THING   = "adapter-01"
 CMD_T   = f"adapter/{THING}/cmd"
@@ -108,9 +111,9 @@ def _heartbeat_loop():
 conn = mqtt_connection_builder.mtls_from_path(
     endpoint="a3dp4umq4qv6ul-ats.iot.eu-central-1.amazonaws.com",
     port=443,                       # ALPN x-amzn-mqtt-ca -- traverses HTTPS-only firewalls
-    cert_filepath="/home/vladimir/MyProjects/VMS/certs/adapter.cert.pem",
-    pri_key_filepath="/home/vladimir/MyProjects/VMS/certs/adapter.private.key",
-    ca_filepath="/home/vladimir/MyProjects/VMS/certs/AmazonRootCA1.pem",
+    cert_filepath=os.path.join(VMS_HOME, "certs", "adapter.cert.pem"),
+    pri_key_filepath=os.path.join(VMS_HOME, "certs", "adapter.private.key"),
+    ca_filepath=os.path.join(VMS_HOME, "certs", "AmazonRootCA1.pem"),
     client_id=THING,
     keep_alive_secs=30,
     clean_session=False,

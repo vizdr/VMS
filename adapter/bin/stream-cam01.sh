@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -e
+# $VMS_HOME if exported (interactive shells, via ~/.bashrc); otherwise the repo root
+# this script lives in (systemd units do not read ~/.bashrc).
+VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
 CRED_ENDPOINT=c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com
-CERTS=/home/vladimir/MyProjects/VMS/certs
+CERTS="${VMS_HOME}/certs"
 
 # The AAC encode happens HERE, not in publish-cam01.sh, and the reason is not taste.
 # Publishing AAC into MediaMTX works and looks correct -- but rtspclientsink payloads it
@@ -21,8 +24,8 @@ CERTS=/home/vladimir/MyProjects/VMS/certs
 KVSSINK="kvssink name=kvs stream-name=cam-01 aws-region=eu-central-1 \
   iot-certificate=iot-certificate,endpoint=${CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=KVSAdapterRoleAlias,iot-thing-name=adapter-01"
 
-AUDIO_ENV="$(/home/vladimir/MyProjects/VMS/venv-adapter/bin/python3 \
-             /home/vladimir/MyProjects/VMS/adapter/bin/camera-audio.py cam-01 || true)"
+AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
+             ${VMS_HOME}/adapter/bin/camera-audio.py cam-01 || true)"
 eval "${AUDIO_ENV}"
 
 if [ "${AUDIO:-off}" = "on" ]; then

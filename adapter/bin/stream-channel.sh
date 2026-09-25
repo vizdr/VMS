@@ -8,9 +8,12 @@
 set -e
 : "${CAMERA_ID:?CAMERA_ID must be set}"
 : "${MEDIAMTX_PATH:?MEDIAMTX_PATH must be set}"
+# $VMS_HOME if exported (interactive shells, via ~/.bashrc); otherwise the repo root
+# this script lives in (systemd units do not read ~/.bashrc).
+VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
 CRED_ENDPOINT=c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com
-CERTS=/home/vladimir/MyProjects/VMS/certs
+CERTS="${VMS_HOME}/certs"
 
 exec gst-launch-1.0 -v \
   rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 \

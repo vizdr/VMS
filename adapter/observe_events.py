@@ -19,6 +19,7 @@ Usage:
   observe_events.py --host 192.168.178.67 --user admin --password ***
   observe_events.py --analyse events.jsonl                    # summarise a finished run
 """
+import os
 import argparse
 import asyncio
 import json
@@ -30,7 +31,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-WSDL = "/home/vladimir/MyProjects/VMS/venv-adapter/lib/python3.13/site-packages/onvif/wsdl"
+# $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
+VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WSDL = os.path.join(VMS_HOME, "venv-adapter", "lib",
+    f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages", "onvif", "wsdl")
 PULL_NS = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
 HEARTBEAT_SEC = 300
 

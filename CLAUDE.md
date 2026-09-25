@@ -19,7 +19,9 @@ single source of truth for *why* things are built the way they are** — it's a 
 log of the real build, including bugs hit and how they were diagnosed, updated
 continuously as the system evolves. `LAUNCH.md` is the short operational runbook (what to
 actually run, in order, assuming the guide has already been followed once) — check it
-first for "how do I start/stop/verify this." `AUDIO.md` records how optional per-camera audio was designed and built (guide §18 is the
+first for "how do I start/stop/verify this." Its Part A is also the fresh-Pi setup
+checklist (SDK build with its patches, venv, MediaMTX binary, AWS CLI, device
+certificate, systemd unit files), each step with a command that proves it worked. `AUDIO.md` records how optional per-camera audio was designed and built (guide §18 is the
 canonical reference; `AUDIO.md` keeps the reasoning, the two silent bugs that shaped it,
 and the claims that were withdrawn). `OUTAGE.md` is the working record for durable outage
 buffering (guide §16.3c) — design, measurements and open questions — and folds into
@@ -100,7 +102,24 @@ independent systemd instances. (A templated system unit once declared
 `Requires=kvs-mediamtx.service`, a user unit, and failed with "Unit not found" — see
 guide §16 for the fix, which was simply to drop the cross-manager dependency.)
 
+Unit files are **not in git**. `LAUNCH.md` A8 generates all of them, writing this clone's
+literal absolute paths into `ExecStart=`/`WorkingDirectory=`/`Environment=`. systemd
+never reads `.bashrc` and doesn't expand `$VMS_HOME` or `~`. When the clone moves, re-run A8.
+
 Full launch sequence, order, and startup gotchas: `LAUNCH.md` Part B.
+
+### Paths: never hardcode the clone location
+
+The repo has lived at more than one path (`~/MyProjects/VMS`, now
+`~/Projects/VideoSafeZone`), and hardcoded `/home/...` paths broke on the move. Code in
+`adapter/` resolves the root as `$VMS_HOME` if set, else from its own location. Python
+modules in `adapter/` use
+`os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`.
+Scripts in `adapter/bin/` use
+`VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"`.
+Derive the venv's `pythonX.Y` directory from `sys.version_info` rather than spelling it
+out. Follow the same pattern in new code; don't rely on `VMS_HOME` being exported, since
+systemd units don't have it.
 
 ### Verifying changes
 

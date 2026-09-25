@@ -4,12 +4,17 @@ for how the protocol itself works -- this module is just the two stages factored
 they're not duplicated between the CLI tool and the web app.
 """
 import asyncio
+import os
+import sys
 
 from onvif import ONVIFCamera
 from wsdiscovery.discovery import ThreadedWSDiscovery as WSDiscovery
 from wsdiscovery import QName
 
-WSDL_DIR = "/home/vladimir/MyProjects/VMS/venv-adapter/lib/python3.13/site-packages/onvif/wsdl"
+# $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
+VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WSDL_DIR = os.path.join(VMS_HOME, "venv-adapter", "lib",
+    f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages", "onvif", "wsdl")
 NVT_TYPE = QName("http://www.onvif.org/ver10/network/wsdl", "NetworkVideoTransmitter")
 
 
