@@ -17,8 +17,8 @@ the running system; where something does not work, it says so.
 ## Contents
 
 - [Architecture](#architecture) · [Features](#features) · [Measured results](#measured-results)
-- [Hardware](#hardware) · [Install](#install-on-a-raspberry-pi-4b-4-gb) · [Daily use](#daily-use)
-- [Cost](#cost) · [Repository map](#repository-map) · [Documentation](#documentation)
+- [Defect inventory](#defect-inventory) · [Hardware](#hardware) · [Install](#install-on-a-raspberry-pi-4b-4-gb)
+- [Daily use](#daily-use) · [Cost](#cost) · [Repository map](#repository-map) · [Documentation](#documentation)
 - [Non-goals](#deliberate-non-goals) · [Rebuilding elsewhere](#rebuilding-on-a-different-aws-account)
 
 ---
@@ -118,6 +118,35 @@ Three bugs worth knowing about, because they were all silent and none was caught
 The pattern behind all three: **KVS's ingest path is more permissive than its playback
 path**, and `ffmpeg` is more permissive than a browser's MSE decoder. Decode a frame and
 open a browser; "no errors" proves nothing.
+
+---
+
+## Defect inventory
+
+Those three are not a highlight reel. **[`FoundAndFixed.md`](FoundAndFixed.md) is the
+complete list** — every defect this project has hit, numbered permanently, each with what
+broke, how it was noticed, why it happened and what fixed it. Forty entries so far,
+from the first build to bringing the system up on a second Pi.
+
+It exists so the reasoning lives in one place. Other documents keep only the *rule* a bug
+produced plus a reference — `FoundAndFixed.md #N` — instead of retelling the same story in
+three files and letting the three copies drift.
+
+**What counts as a defect here:** anything in this project's own code, configuration,
+build or setup — **and its documentation**. An instruction that fails when you follow it
+literally is a defect, and a third of the entries are exactly that, found only by setting
+the project up from scratch on a second machine.
+
+**What is deliberately not here:** third-party behaviour this project works around but
+cannot fix (the camera's firmware quirks, `kvssink`'s buffering), predictions that turned
+out wrong but broke nothing, and generic advice. Those belong to the component or the
+decision that produced them, not to a bug list — a bug list that absorbs everything
+surprising stops being useful.
+
+The entries also share causes worth knowing before you touch this codebase, and the
+inventory names them: most defects were **silent**, passing "it ran without errors"
+because some tool reported success on the wrong question; **ingest is more permissive
+than playback** throughout the media path; and **two copies of one fact always drift**.
 
 ---
 
@@ -345,6 +374,7 @@ produced a nonexistent unit that `systemctl` silently no-op'd against.
 
 | File | What it is |
 |---|---|
+| [`FoundAndFixed.md`](FoundAndFixed.md) | **The defect inventory.** Every bug, numbered permanently; other docs reference `#N` rather than repeating the story |
 | [`Demo-AWS-Video-revCosts4.md`](Demo-AWS-Video-revCosts4.md) | **The canonical build guide.** A narrative log of the real build, including bugs and how they were diagnosed. When in doubt about *why* something is built a certain way, read this |
 | [`LAUNCH.md`](LAUNCH.md) | Operational runbook — what to run, in order, and how to verify |
 | [`COSTS-1.4.md`](COSTS-1.4.md) | The cost model. Authoritative for any bitrate or dollar figure |
