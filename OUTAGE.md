@@ -5,7 +5,8 @@ USB, auto-backfill | RAM only (`storage-size`) | **M** — disk-backed queue"*. 
 feature the reference product markets hardest and the one this prototype most
 conspicuously lacked.
 
-Compiled 2026-09-19. **`Demo-AWS-Video-revCosts4.md` remains the canonical build guide**;
+Compiled 2026-09-19; cross-references refreshed 2026-09-26.
+**`Demo-AWS-Video-revCosts4.md` remains the canonical build guide**;
 this document is the working record for one feature and will be folded into §16.3c when
 the work completes. `COSTS-1.4.md` stays authoritative for bitrate and cost.
 
@@ -16,6 +17,9 @@ retract one confident assertion (§3.1), which is exactly why the distinction is
 |---|---|
 | **measured** | observed on the live system, with the number recorded |
 | *predicted* | derived from source, disassembly or arithmetic; not yet exercised |
+
+The defects this work produced are catalogued in **`FoundAndFixed.md` #18–#23 and #39**;
+that file is the defect record, this one is the design reasoning and the measurements.
 
 ---
 
@@ -558,7 +562,22 @@ its MPEG-TS choice identified as a latent silent-mute bug), §16.2's gap-analysi
 §10.2 (warning that its own test cannot work as written), `CLAUDE.md`, `LAUNCH.md` Part C,
 `COSTS-1.4.md` §7.3b.
 
-### 5.6 Not done
+### 5.6 After delivery — one defect found on a second Pi
+
+**`FoundAndFixed.md` #39**, found 2026-09-25 while verifying `LAUNCH.md` Part B on a Pi
+that had no USB stick set up, and fixed here 2026-09-26. The supervisor crash-looped
+before its loop ever ran: `main()` created `OUTAGE_DIR` to scan for orphan captures, and
+with `/mnt/vms-buffer` absent that `mkdir` needs root. `PermissionError`, exit,
+`Restart=on-failure`, 80 times.
+
+It is worth recording rather than just fixing, because the design was already right and
+one line ignored it: the sentinel check (§4.7) exists precisely so a missing stick means
+*idle and disarmed*, and this document promises the outage units idle unless enabled. The
+unguarded line simply ran first. Verified on this Pi both ways — with the stick absent
+(active, zero restarts, `buffer unavailable (not mounted) -- idle, disarmed` in the
+journal) and present (`buffer ready`, orphan scan once).
+
+### 5.7 Not done
 
 - **`collect_tail()` under a frozen capture** is exercised (B2) but the *gap* it is meant
   to narrow has never been observed, because no test outage ran long enough to exceed
@@ -585,6 +604,7 @@ Every ~5 s it compares desired against actual and patches the difference.
 | **No RTC on a Pi 4** | A power-cut outage means the clock may be wrong with no NTP (network still down). Segment filenames feed `startTs`, the DynamoDB **sort key**. Store `(wall, monotonic)` pairs, correct after resync, label `clock-uncertain` otherwise. |
 | **`agent.py` dies** | "No signal" must **not** read as an outage. Stale heartbeat ⇒ *unknown*: hold the pre-roll, refuse to switch to retain-all, and say so. |
 | **Producer stopped mid-outage** | **An in-flight capture is never cancelled** — its only termination conditions are limit, disk guard, recovery. Arm/disarm uses hysteresis and reads `ActiveState`/`SubState`, not `is-active`'s single word, or a crash-looping producer disarms buffering exactly when it is needed. |
+| **USB stick never set up** | Distinct from unplugging, and it bit: `main()` created `OUTAGE_DIR` at startup *before* the first `buffer_ready()` check, so on a Pi with no stick the `mkdir` needed root, raised `PermissionError`, and the unit sat at `activating` through 80 restarts. `is-active` would not have shown it — the state word was `activating`, not `failed`. Nothing now touches the buffer until `buffer_ready()` passes; the orphan scan runs on the first ready tick, and readiness transitions are logged (`FoundAndFixed.md` #39). |
 | **USB unplugged** | Sentinel vanishes ⇒ disarm immediately. Worn flash usually fails by going silently read-only — caught by the liveness check. |
 | **Corrupt segment** | Partition into good, track-equal runs; one clip per run. A gap between runs is information, not an error. |
 | **WAN flaps during backfill** | Delete only after a confirmed 200; retry oldest-first. |
@@ -613,7 +633,8 @@ hole". It does not, and the arithmetic matters:
 
 **measured** from source: rollback is capped at `replayDuration`, and
 `gstkvssink.cpp:100` sets `DEFAULT_REPLAY_DURATION_SECONDS 40`. The SDK's own
-`docs/buffering.md` confirms the rollback goes back to the last ACK's next fragment *or*
+the SDK's own `vendor/…/docs/buffering.md` confirms the rollback goes back to the last
+ACK's next fragment *or*
 `replayDuration`, **whichever is less** — so after a long outage with no ACKs landing,
 kvssink re-sends ~40 s, not its full 120 s buffer.
 

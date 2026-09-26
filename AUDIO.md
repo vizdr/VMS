@@ -4,7 +4,8 @@ Per-camera, user-selectable audio alongside video, **off by default**, for both 
 (AVerMedia PW310 USB webcam) and `cam-02` (ONVIF IPC). Delivered in five phases A0–A4,
 all complete and live.
 
-Compiled 2026-09-19. **`Demo-AWS-Video-revCosts4.md` §18 is the canonical reference** —
+Compiled 2026-09-19; cross-references refreshed 2026-09-26.
+**`Demo-AWS-Video-revCosts4.md` §18 is the canonical reference** —
 it was rewritten from this work and carries the operational detail. This document is the
 record of *how the design was arrived at*, including the two bugs that shaped it and the
 claims that had to be withdrawn. `COSTS-1.4.md` §7.3a is authoritative for cost.
@@ -103,7 +104,8 @@ peak −8.7 dBFS, RMS −27.9 dB, noise floor −36.5 dB, flat factor 0.00.
 ### 3.3 Both AAC encoders were already installed
 
 **measured.** `voaacenc` (gst-plugins-bad 1.26.2) and `avenc_aac` (gst-libav 1.26.2) are
-both present. Guide §18.2's `sudo apt install -y gstreamer1.0-libav` was unnecessary —
+both present. The guide's *original* §18.2 told you to `sudo apt install -y
+gstreamer1.0-libav`; that was unnecessary —
 see §7.
 
 `voaacenc` is used: lighter on ARM, and its 1024-sample frame size is the fact the whole
@@ -171,6 +173,9 @@ Both were silent. Both passed every check short of the specific one that caught 
 
 ### 4.1 The shared-DTS trap — sample rate is not a quality decision
 
+> Catalogued as **`FoundAndFixed.md` #15**. That entry is the defect record; this
+> section is why the design looks the way it does. The measurements agree.
+
 **Symptom:** `cam-02` audio enabled at 48 kHz. Fragments persisted, both tracks appeared
 in the HLS manifest, `ffprobe` was happy — and **over half the audio was missing**:
 15 kb/s delivered of 32 kb/s sent, with `kvssink` logging `0x30000005` at 1.65/s.
@@ -216,6 +221,8 @@ journalctl -u kvs-cam01.service --since "-60 s" | grep -c 0x30000005   # want 0
 ```
 
 ### 4.2 The LATM codec-private-data trap — where the AAC encode must happen
+
+> Catalogued as **`FoundAndFixed.md` #16**.
 
 **Symptom:** `cam-01` with AAC encoded in the publisher and passed through at the
 producer — the obvious design, one encode instead of two. `kvssink` ingested it without
@@ -271,7 +278,7 @@ src. ! application/x-rtp,media=audio ! queue
 setting off is a true revert, not a second code path that resembles one — which matters,
 because `cam-01`'s video chain took the `profile=high` bug to get right.
 
-Guide §18.2 previously advised bypassing the RTSP hop entirely and going straight to
+The guide's *original* §18.2 advised bypassing the RTSP hop entirely and going straight to
 `kvssink`. That predates MediaMTX becoming the hub; following it now would cost the local
 preview, the Start/Stop layer and the single-producer-per-camera model.
 
@@ -286,7 +293,7 @@ single source of truth, both GUIs write the same row.
 |---|---|
 | `audioCapable` | hardware fact, written at registration |
 | `audioEnabled` | the user's choice, **default false** |
-| `audioDevice` | `cam-01`: `hw:CARD=Webcam,DEV=0` |
+| `audioDevice` | `cam-01`: `hw:CARD=Webcam,DEV=0`. **Optional since device discovery** — `adapter/bin/resolve-usb-camera.sh` finds the capture card at startup, and this field only overrides it when a specific device must be pinned (`LAUNCH.md` A9) |
 | `audioCodec` | `PCM` / `PCMA` — picks the depayloader |
 
 `adapter/bin/camera-audio.py` prints shell-sourceable env; the pipeline scripts `eval` it
@@ -330,6 +337,9 @@ permitted, because the click is the user gesture.
 
 ### 6.4 A CSS bug worth recording
 
+> Catalogued as **`FoundAndFixed.md` #17** — including that the global rule itself is
+> still unscoped, so the next checkbox added to this client will hit it too.
+
 The audio checkboxes rendered detached from their labels and overflowing the panel. Cause
 was not the new markup but `client/index.html`'s **pre-existing global rule**:
 
@@ -355,11 +365,15 @@ substituting the three states, and looking at the result — rather than reasone
 
 Five claims in this work were wrong. Recording them is the point.
 
+**On the §-numbers below:** guide §18 was rewritten from this work (A4), so it is now
+§18.1–§18.10 and the old numbering no longer lines up. Each row cites the section the
+claim appeared in *at the time*, with the current location in brackets.
+
 | Claim | Status | Correction |
 |---|---|---|
-| Guide §18.3: *"AAC is required; KVS will not accept raw PCM or Opus"* | **refined** | Conclusion right, reasoning incomplete. `kvssink` *does* accept A-law/μ-law **at ingest**; it is the reader APIs that require AAC. Ingest and playback are separate questions. |
-| Guide §18.3: *"Audio adds ~64 kbps — negligible against 1.5 Mbps of video"* | **withdrawn** | Both halves wrong. 32 kbps suffices, and "negligible" depends entirely on the stream — see §8. |
-| Guide §18.2: `apt install -y gstreamer1.0-libav` | **withdrawn** | Both encoders were already present (§3.3). |
+| Guide, original §18.3 *(now §18.1)*: *"AAC is required; KVS will not accept raw PCM or Opus"* | **refined** | Conclusion right, reasoning incomplete. `kvssink` *does* accept A-law/μ-law **at ingest**; it is the reader APIs that require AAC. Ingest and playback are separate questions. |
+| Guide, original §18.3 *(now §18.8)*: *"Audio adds ~64 kbps — negligible against 1.5 Mbps of video"* | **withdrawn** | Both halves wrong. 32 kbps suffices, and "negligible" depends entirely on the stream — see §8. |
+| Guide, original §18.2 *(line removed)*: `apt install -y gstreamer1.0-libav` | **withdrawn** | Both encoders were already present (§3.3). |
 | Draft pipeline: `rtppcmudepay ! mulawdec` for `cam-02` | **withdrawn** | It is A-law (§3.1). Would not have negotiated. |
 | Prediction: 16 kHz would be marginal for `cam-01`, ~0.6 rejects/s | **withdrawn** | **measured zero.** The prediction was wrong in the safe direction; 64 ms against a 66.7 ms interval still holds, but the margin is thin — see §4.1. |
 

@@ -4,6 +4,11 @@ What the real ONVIF camera on this LAN can actually do, enumerated over ONVIF ra
 read off a spec sheet. Compiled 2026-09-06 by probing the live device
 (`adapter/onvif_discovery.py` + ad-hoc ONVIF service calls).
 
+Cross-references refreshed 2026-09-26. Defects are catalogued in `FoundAndFixed.md`;
+this file records what the *camera* does, which is a different thing — a firmware quirk
+this project works around but cannot fix is not a defect of this project, and §8 is
+deliberately not part of that inventory.
+
 **For anything about bitrate or cost, `COSTS-1.4.md` is authoritative** — it holds the
 full measurement set (§1.2), the day/night analysis (§3) and the sensitivity ranking (§7).
 The figures repeated here are a summary for convenience and defer to it on conflict.
@@ -413,8 +418,10 @@ Fault: The [action] cannot be processed at the receiver.
 ```
 
 So there is no SD-card recording to pull from. This matters because it rules the camera
-out as a solution to the durable-outage-buffering gap (guide §16.3c) — that still needs
-the local `splitmuxsink` ring buffer on the Pi.
+out as a solution to the durable-outage-buffering gap (guide §16.3c) — that needs a local
+ring buffer on the Pi. **Since built** (`OUTAGE.md`): MediaMTX records to a USB stick
+rather than the `splitmuxsink` leg this originally assumed, so no GStreamer pipeline
+changed. The conclusion here was right; only the mechanism differs.
 
 **Hikvision ISAPI — status genuinely unknown, not "unavailable".** `/ISAPI/...` endpoints
 return the OEM's 817-byte soft-404 page, and an earlier revision concluded from that they
@@ -695,7 +702,7 @@ That collides with §1.2's rule ("never leave `kvs-cam0N.service` running unatte
 |---|---|---|---|
 | Producer runs while a detection mode is active | yes | unchanged — 24/7 | evidence trail, no saving |
 | Event starts the producer, stops after N s idle | **lost** | only during events | KVS also needs seconds to spin up |
-| Local ring buffer (`splitmuxsink`, guide §16.3c) feeds the clip | yes | only during events | most work; converges with the outage-buffering gap |
+| Local ring buffer feeds the clip | yes | only during events | **the mechanism now exists** — see below |
 
 `COSTS-1.4.md` §7.2 puts numbers on why this decision matters more than anything else in
 this plan: duty cycle is worth **up to ~20×**, the largest lever in that document. At a 5 %
@@ -712,3 +719,20 @@ suits object storage and undermines KVS's continuous-timeline model further stil
 
 So option 1 is the safe default only in the sense that it changes nothing; it is also the
 option that forfeits the entire benefit. Worth deciding deliberately.
+
+**Option 3 is now half-built, and the remaining half is the interesting part.** Durable
+outage buffering (`OUTAGE.md`, guide §16.3c) shipped since this plan was written, and it
+is exactly the rolling on-disk pre-roll option 3 describes — 30 s segments on a USB stick
+with a rolling ~2 minute window. Not `splitmuxsink`, as sketched here: MediaMTX does the
+recording, so no GStreamer pipeline changed.
+
+But it does **not** solve the pre-roll problem yet, for a reason worth being precise
+about. Recording is armed only for a camera whose **KVS producer is already running**
+(`outage_buffer.py`, `latch.active(cam)`) — which is the very condition option 3 exists to
+escape. With the producer stopped there is no rolling window to draw a pre-roll from.
+
+That gate is deliberate, not an oversight: it keeps the rolling window off the flash
+24/7, worth roughly 19 GB/day against 0.5 (`OUTAGE.md` §3.5). Wiring option 3 up therefore
+means choosing to pay that, per camera — the always-on override `OUTAGE.md` sketches —
+and then pointing `clip_to_s3`'s pre-roll at the stick instead of at KVS. The work left is
+that choice plus the clip-assembly path, not the recorder.
