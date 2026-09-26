@@ -12,12 +12,12 @@ set -e
 # this script lives in (systemd units do not read ~/.bashrc).
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
-CRED_ENDPOINT=c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com
+source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
 CERTS="${VMS_HOME}/certs"
 
 exec gst-launch-1.0 -v \
   rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 \
   ! rtph264depay ! h264parse config-interval=-1 \
   ! video/x-h264,stream-format=avc,alignment=au \
-  ! kvssink stream-name="${CAMERA_ID}" aws-region="eu-central-1" \
-      iot-certificate="iot-certificate,endpoint=${CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=KVSAdapterRoleAlias,iot-thing-name=adapter-01"
+  ! kvssink stream-name="${CAMERA_ID}" aws-region="${AWS_REGION}" \
+      iot-certificate="iot-certificate,endpoint=${IOT_CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=${IOT_ROLE_ALIAS},iot-thing-name=${THING_NAME}"

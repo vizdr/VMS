@@ -8,12 +8,14 @@ import aws_state
 import camera_control
 from aws_device_creds import get_session
 
+import config
+
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
 VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-THING   = "adapter-01"
-CMD_T   = f"adapter/{THING}/cmd"
-STATE_T = f"adapter/{THING}/state"
+THING   = config.THING_NAME
+CMD_T   = f"{config.TOPIC_PREFIX}/cmd"
+STATE_T = f"{config.TOPIC_PREFIX}/state"
 
 # Camera existence/capabilities come from the "cameras" DynamoDB registry, not a
 # hardcoded set/dict -- the same registry the local ONVIF admin GUI (adapter/onvif-admin)
@@ -109,7 +111,7 @@ def _heartbeat_loop():
 
 
 conn = mqtt_connection_builder.mtls_from_path(
-    endpoint="a3dp4umq4qv6ul-ats.iot.eu-central-1.amazonaws.com",
+    endpoint=config.IOT_DATA_ENDPOINT,
     port=443,                       # ALPN x-amzn-mqtt-ca -- traverses HTTPS-only firewalls
     cert_filepath=os.path.join(VMS_HOME, "certs", "adapter.cert.pem"),
     pri_key_filepath=os.path.join(VMS_HOME, "certs", "adapter.private.key"),

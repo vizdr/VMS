@@ -16,15 +16,17 @@ import urllib.request
 
 import boto3
 
-CRED_ENDPOINT = "c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com"
+import config
+
+CRED_ENDPOINT = config.IOT_CRED_ENDPOINT
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
 VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CERTS = os.path.join(VMS_HOME, "certs")
-ROLE_ALIAS = "KVSAdapterRoleAlias"
-THING_NAME = "adapter-01"
+ROLE_ALIAS = config.IOT_ROLE_ALIAS
+THING_NAME = config.THING_NAME
 
 
-def get_session(region: str = "eu-central-1") -> boto3.Session:
+def get_session(region: str = config.AWS_REGION) -> boto3.Session:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.load_cert_chain(certfile=f"{CERTS}/adapter.cert.pem", keyfile=f"{CERTS}/adapter.private.key")
     ctx.load_verify_locations(cafile=f"{CERTS}/cacert.pem")

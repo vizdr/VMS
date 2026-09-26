@@ -4,7 +4,7 @@ set -e
 # this script lives in (systemd units do not read ~/.bashrc).
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
-CRED_ENDPOINT=c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com
+source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
 CERTS="${VMS_HOME}/certs"
 
 # Video is genuine passthrough -- no jpegdec/videoconvert/v4l2h264enc chain like
@@ -44,8 +44,8 @@ CERTS="${VMS_HOME}/certs"
 # That margin is 40ms against a 66.7ms video frame interval. If cam-02's video is ever
 # raised to 30fps (33ms), the inversions come back -- recheck the reject count.
 
-KVSSINK="kvssink name=kvs stream-name=cam-02 aws-region=eu-central-1 \
-  iot-certificate=iot-certificate,endpoint=${CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=KVSAdapterRoleAlias,iot-thing-name=adapter-01"
+KVSSINK="kvssink name=kvs stream-name=cam-02 aws-region=${AWS_REGION} \
+  iot-certificate=iot-certificate,endpoint=${IOT_CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=${IOT_ROLE_ALIAS},iot-thing-name=${THING_NAME}"
 
 # Read once at startup; never polled. See camera-audio.py for why re-reading would be
 # actively wrong rather than merely pointless.

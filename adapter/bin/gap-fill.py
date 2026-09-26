@@ -25,7 +25,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import boto3
 
-REGION = "eu-central-1"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import config
+
+REGION = config.AWS_REGION
 
 # Ambient operator credentials, NOT the adapter's device identity. This is a measurement
 # tool an operator runs, not something the device does -- and ListFragments / Query on

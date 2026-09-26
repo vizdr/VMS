@@ -25,6 +25,8 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import config
 import camera_control
 import onvif_discovery
 from aws_device_creds import get_session
@@ -33,7 +35,7 @@ app = Flask(__name__, static_folder="static")
 
 CAMERA_ID_RE = re.compile(r"^cam-\d{2}$")
 MEDIAMTX_API = "http://127.0.0.1:9997"
-REGION = "eu-central-1"
+REGION = config.AWS_REGION
 
 
 def cameras_table():
@@ -167,7 +169,10 @@ def register_camera():
         capture_output=True, text=True,
     )
     if provision.returncode != 0:
-        requests.post(f"{MEDIAMTX_API}/v3/config/paths/delete/{mediamtx_path}", timeout=5)
+        # DELETE, not POST: MediaMTX answers POST on this route with "404 page not
+        # found", and the response was never checked -- so a failed registration
+        # always left an orphan path behind (FoundAndFixed.md #36).
+        requests.delete(f"{MEDIAMTX_API}/v3/config/paths/delete/{mediamtx_path}", timeout=5)
         return jsonify({"error": f"provisioning failed: {provision.stderr.strip()}"}), 500
 
     # 3. The KVS stream itself.

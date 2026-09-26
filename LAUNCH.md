@@ -52,6 +52,44 @@ sudo sysctl -p /etc/sysctl.d/99-low-swappiness.conf
 sudo rpi-eeprom-update -a && sudo reboot   # only if an update is actually staged
 ```
 
+#### A1b. Two things a *current* Pi OS image gets wrong for this project
+
+Neither bites on the Pi this project was built on, because its older image happens to
+satisfy both. A fresh install will not. Check, don't assume.
+
+**Persistent journal.** A current image ships
+`/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf` with `Storage=volatile`
+to spare the SD card. Every reboot then loses all logs — a failed build leaves no trace —
+and `journalctl --user -u <unit>` prints *"No journal files were found"* for **every**
+user unit, which most checks in this file depend on. Creating `/var/log/journal` alone
+does **not** work; journald ignores it while that drop-in is in force
+(FoundAndFixed.md #33).
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=200M\nSystemMaxFileSize=20M\n' \
+  | sudo tee /etc/systemd/journald.conf.d/90-vms-persistent.conf
+sudo systemctl restart systemd-journald && sudo journalctl --flush
+```
+
+**Proof:** `ls /var/log/journal/*/system.journal` exists, and
+`journalctl --user -u kvs-agent -n1` returns a line rather than "No journal files".
+
+**Passwordless sudo.** `agent.py` and the admin GUI run `sudo systemctl start|stop` with
+no terminal attached. A current image grants `(ALL : ALL) ALL` **with** a password, so
+Start/Stop fails silently from the GUI. The obvious check is also misleading: the image
+sets `Defaults timestamp_type=global`, so a password typed anywhere in the last ~15
+minutes makes a bare `sudo -n true` succeed in every session — including services. Use
+`sudo -k -n true`, which ignores the cache (FoundAndFixed.md #34).
+
+Grant only what the adapter needs, rather than blanket NOPASSWD, and validate before
+installing:
+
+```bash
+sudo visudo -c -f /etc/sudoers.d/020_vms-adapter    # check BEFORE it takes effect
+sudo -k -n true && echo "passwordless sudo OK" || echo "Start/Stop will fail"
+```
+
 ### A2. Environment — persisted to `~/.bashrc`
 
 ```bash
@@ -85,7 +123,12 @@ sudo apt install -y cmake m4 git build-essential pkg-config \
   libssl-dev libcurl4-openssl-dev liblog4cplus-dev \
   gstreamer1.0-plugins-base-apps gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly \
-  gstreamer1.0-tools libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+  gstreamer1.0-tools gstreamer1.0-rtsp \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+# gstreamer1.0-rtsp is a SEPARATE package and is not pulled in by plugins-good/bad.
+# Without it `rtspclientsink` does not exist, publish-cam01.sh fails with
+# "no element rtspclientsink", and cam-01 never reaches MediaMTX -- while every
+# other unit still reports active (FoundAndFixed.md #40).
 # NOTE: gstreamer1.0-omx-generic from the original guide text does not exist on
 # current Debian trixie — already dropped from this list.
 
@@ -621,14 +664,41 @@ exception is `mediamtx/mediamtx.yml`, which carries `cam02`'s source URL as a st
 entry — re-registering rewrites it live through the control API, so edit the file only
 when setting up a camera that has never been registered.
 
-**The AWS account — constants in code, by design.** Account number, IoT endpoint, API
-Gateway ID, Cognito pool and CloudFront distribution appear as literals in
-`adapter/agent.py`, `adapter/bin/*.sh`, `client/index.html` and the `cloud/` policy
-documents. Moving to a different AWS account means creating the resources (guide §3, §6,
-§8) and replacing those literals; there is no config file that makes this a one-line
-change, and pretending otherwise would hide the work. `grep -rn 596633517506 .` finds
-every account reference.
+**The AWS account — one file, `/etc/adapter/adapter.env`.** Account-specific identity
+(region, IoT Thing, role alias, both IoT endpoints, the evidence bucket) is **not** in the
+code. `adapter/config.py` reads that file for Python; `adapter/bin/adapter-config.sh`
+reads the same file for the shell scripts. Moving to another AWS account is an edit to one
+file plus creating the resources (guide §3, §6, §8).
 
+Install it from the tracked template and check the endpoints against the account you are
+actually pointing at, rather than trusting the template's values:
+
+```bash
+sudo install -D -m 644 config/adapter.env.example /etc/adapter/adapter.env
+sudoedit /etc/adapter/adapter.env
+
+aws iot describe-endpoint --endpoint-type iot:CredentialProvider   # -> IOT_CRED_ENDPOINT
+aws iot describe-endpoint --endpoint-type iot:Data-ATS             # -> IOT_DATA_ENDPOINT
+```
+
+**Proof — both readers agree, and a missing key fails loudly rather than defaulting:**
+
+```bash
+venv-adapter/bin/python3 -c \
+  "import sys;sys.path.insert(0,'adapter');import config;print(config.IOT_DATA_ENDPOINT)"
+( source adapter/bin/adapter-config.sh && echo "$IOT_DATA_ENDPOINT" )
+
+ADAPTER_CONFIG=/nonexistent bash -c 'source adapter/bin/adapter-config.sh'
+#   adapter-config: AWS_REGION is not set: add it to /nonexistent (...)
+```
+
+There are deliberately **no built-in defaults**. A missing key raises rather than silently
+talking to whichever account a stale default happened to name — the failure that would be
+hardest to notice and most expensive to get wrong.
+
+Not covered by this file: the browser client (`client/index.html` carries the API Gateway
+and Cognito IDs it is built against) and the `cloud/` IAM documents, which name the
+account in ARNs. `grep -rn 596633517506 .` finds those.
 ---
 
 ## Part B — Launch (every session / after a reboot)

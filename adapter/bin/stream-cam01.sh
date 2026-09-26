@@ -4,7 +4,7 @@ set -e
 # this script lives in (systemd units do not read ~/.bashrc).
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
-CRED_ENDPOINT=c38gt2us7mrsmf.credentials.iot.eu-central-1.amazonaws.com
+source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
 CERTS="${VMS_HOME}/certs"
 
 # The AAC encode happens HERE, not in publish-cam01.sh, and the reason is not taste.
@@ -21,8 +21,8 @@ CERTS="${VMS_HOME}/certs"
 # The audio therefore rides the same RTSP session as the video rather than being captured
 # separately here, which is what keeps A/V sync honest: both tracks inherit one timeline
 # from rtspsrc instead of racing an independent ALSA clock against rtspsrc's latency.
-KVSSINK="kvssink name=kvs stream-name=cam-01 aws-region=eu-central-1 \
-  iot-certificate=iot-certificate,endpoint=${CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=KVSAdapterRoleAlias,iot-thing-name=adapter-01"
+KVSSINK="kvssink name=kvs stream-name=cam-01 aws-region=${AWS_REGION} \
+  iot-certificate=iot-certificate,endpoint=${IOT_CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=${IOT_ROLE_ALIAS},iot-thing-name=${THING_NAME}"
 
 AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/camera-audio.py cam-01 || true)"

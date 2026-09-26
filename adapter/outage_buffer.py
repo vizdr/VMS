@@ -33,6 +33,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import config
+
 import aws_state
 import camera_control
 import mediamtx_api
@@ -44,7 +46,7 @@ PREROLL_SEC = 120                # must exceed worst-case detection latency; see
 SEGMENT_DURATION = "30s"
 MIN_OUTAGE_SEC = 120             # below this KVS loses nothing; a clip would duplicate it
 PRODUCER_DISARM_GRACE_SEC = 60   # hysteresis, so a crash-looping producer doesn't disarm us
-PROBE_HOST = "a3dp4umq4qv6ul-ats.iot.eu-central-1.amazonaws.com"
+PROBE_HOST = config.IOT_DATA_ENDPOINT
 PROBE_PORT = 443
 PROBE_TIMEOUT = 2          # per address
 PROBE_BUDGET_SEC = 4       # for the whole probe, however many addresses DNS returns
@@ -130,7 +132,7 @@ def _fetch_registry() -> dict:
     from botocore.config import Config
     from aws_device_creds import get_session
     cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
-    ddb = get_session("eu-central-1").resource("dynamodb", config=cfg)
+    ddb = get_session(config.AWS_REGION).resource("dynamodb", config=cfg)
     items = ddb.Table("cameras").scan()["Items"]
     return {i["cameraId"]: int(i.get("outageBufferSec", 0) or 0) for i in items}
 
@@ -453,20 +455,40 @@ def main():
     if shared["cameras"]:
         log(f"registry (from cache): {shared['cameras']}")
 
-    OUTAGE_DIR.mkdir(parents=True, exist_ok=True)
-    for orphan in sorted(OUTAGE_DIR.glob("*/state.json")):
-        try:
-            j = json.loads(orphan.read_text())
-            if j.get("status") not in ("uploaded", "done"):
-                log(f"orphan capture from a previous run: {j['outageId']} ({j.get('status')})")
-        except Exception:
-            pass
+    # NOTHING touches the buffer before buffer_ready() passes. This block used to run
+    # unconditionally at startup, and on a Pi where the USB stick has not been set up
+    # /mnt/vms-buffer does not exist -- creating it needs root, so mkdir raised
+    # PermissionError, the process exited, Restart=on-failure fired, and the unit sat at
+    # `activating` through 80 restarts. The design says a missing stick means *idle and
+    # disarmed*, which is exactly what the sentinel check already implements; one
+    # unguarded line ran ahead of it. `is-active` would not have shown it either: the
+    # state word was `activating`, not `failed` (FoundAndFixed.md #39).
+    scanned_orphans = False
 
+    def scan_orphans():
+        for orphan in sorted(OUTAGE_DIR.glob("*/state.json")):
+            try:
+                j = json.loads(orphan.read_text())
+                if j.get("status") not in ("uploaded", "done"):
+                    log(f"orphan capture from a previous run: {j['outageId']} ({j.get('status')})")
+            except Exception:
+                pass
+
+    was_ready = None
     while True:
         try:
             registry = shared.get("cameras", {})
 
             ok, why = buffer_ready()
+            # Log readiness transitions, so "idle because there is no stick" is visible
+            # in the journal rather than being indistinguishable from "nothing to do".
+            if ok != was_ready:
+                log("buffer ready" if ok else f"buffer unavailable ({why}) -- idle, disarmed")
+                was_ready = ok
+            if ok and not scanned_orphans:
+                OUTAGE_DIR.mkdir(parents=True, exist_ok=True)
+                scan_orphans()
+                scanned_orphans = True
             space_ok, space_why = (disk_ok() if ok else (False, "buffer unavailable"))
 
             online, reason = conn.poll()

@@ -23,7 +23,9 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-REGION = "eu-central-1"
+import config
+
+REGION = config.AWS_REGION
 
 
 def main() -> int:

@@ -38,6 +38,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import config
+
 from aws_device_creds import get_session
 
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
@@ -45,8 +47,8 @@ VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path
 WSDL = os.path.join(VMS_HOME, "venv-adapter", "lib",
     f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages", "onvif", "wsdl")
 PULL_NS = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
-EVENT_TOPIC = "adapter/adapter-01/event"
-REGION = "eu-central-1"
+EVENT_TOPIC = f"{config.TOPIC_PREFIX}/event"
+REGION = config.AWS_REGION
 
 # recordingMode -> the ONVIF topic that drives it. All three were confirmed firing and
 # latching in Phase 0; they differ only in what they classify, so one mapping covers

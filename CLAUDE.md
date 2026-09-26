@@ -11,6 +11,12 @@ Gateway — with **zero inbound ports opened** on the home router. The architect
 (every arrow crosses the router outbound-initiated) is written up in
 `OUTBOUND-CLOUD.md`.
 
+**`FoundAndFixed.md` is the defect inventory** — every bug this project has hit, what it
+looked like, why it happened and what fixed it, numbered permanently. Other docs keep only
+the rule a bug produced plus a reference (`FoundAndFixed.md #N`); when you fix something
+non-obvious, append an entry there and reference it rather than retelling the story in
+three files.
+
 `README.md` is the front door — project overview, feature list, and a Pi 4B install guide
 written for someone arriving cold. It summarises; it is never the source of truth.
 
@@ -107,6 +113,18 @@ literal absolute paths into `ExecStart=`/`WorkingDirectory=`/`Environment=`. sys
 never reads `.bashrc` and doesn't expand `$VMS_HOME` or `~`. When the clone moves, re-run A8.
 
 Full launch sequence, order, and startup gotchas: `LAUNCH.md` Part B.
+
+### Configuration: paths from the repo, identity from one file
+
+Two separate things, two mechanisms — don't hardcode either.
+
+**Deployment identity** (AWS region, IoT Thing, role alias, both IoT endpoints, evidence
+bucket) lives in `/etc/adapter/adapter.env`, read by `adapter/config.py` in Python and
+`adapter/bin/adapter-config.sh` in shell. Both take an already-set environment variable
+over the file, and **neither has defaults** — a missing key raises `ConfigError` naming
+the key and the file, rather than quietly talking to whichever account a stale default
+points at. New code that needs one of these values imports `config`; it does not add a
+literal. Template: `config/adapter.env.example` (`LAUNCH.md` A9, `FoundAndFixed.md` #25).
 
 ### Paths: never hardcode the clone location
 

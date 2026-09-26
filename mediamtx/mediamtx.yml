@@ -881,15 +881,16 @@ paths:
   # my_camera:
   #   source: rtsp://my_camera
 
-  # Real ONVIF IPC (IPC-Y4TR28A-C / YMA42P_C2_WM701_AF) at 192.168.178.67, §16.3(a).
-  # Genuine passthrough -- MediaMTX pulls the camera's own H.264 sub-stream and re-serves
-  # it at rtsp://127.0.0.1:8554/cam02, no GStreamer capture/encode pipeline needed at all
-  # (unlike cam-01's PW310 transcode chain in §2.5). Using the 640x360/500kbps sub-stream,
-  # not the 2560x1440/3000kbps main stream -- matches §2.7's bitrate-consciousness; the
-  # main stream's URL differs only by /stream0 instead of /stream1 if higher res is wanted.
-  cam02:
-    source: rtsp://192.168.178.67:554/stream1?username=admin&password=E10ADC3949BA59ABBE56E057F20F883E
-    sourceProtocol: tcp
+  # NO CAMERA PATHS HERE, DELIBERATELY. cam-02 used to be hardcoded in this file --
+  # address, username and password in the `source:` URL -- because MediaMTX does not
+  # persist API-added paths and every restart dropped it (FoundAndFixed.md #32). This
+  # file is tracked in git, so those credentials were pushed to GitHub (#31).
+  #
+  # Network cameras now live only in the DynamoDB `cameras` registry (`rtspUrl`), and
+  # adapter/sync_mediamtx_paths.py recreates their paths after every MediaMTX start as
+  # kvs-mediamtx.service's ExecStartPost= -- including automatic crash restarts, which a
+  # separate unit ordered After= MediaMTX would miss. Add a camera through the admin GUI
+  # (LAUNCH.md Part E), not by editing this file.
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.

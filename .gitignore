@@ -11,3 +11,8 @@ mediamtx/mediamtx.tar.gz
 
 # Measurement raw data (keep processed CSVs if you want them tracked; adjust as needed)
 measurements/*.raw
+
+# MediaMTX generates these on first start for its HTTPS/WebRTC listeners.
+# Regenerated automatically; never belongs in git (FoundAndFixed.md #35).
+mediamtx/auto.crt
+mediamtx/auto.key
