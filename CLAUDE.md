@@ -31,9 +31,12 @@ certificate, systemd unit files), each step with a command that proves it worked
 canonical reference; `AUDIO.md` keeps the reasoning, the two silent bugs that shaped it,
 and the claims that were withdrawn). `OUTAGE.md` is the working record for durable outage
 buffering (guide §16.3c) — design, measurements and open questions — and folds into
-§16.3c when that work completes; it is authoritative for that feature in the meantime. `Demo-AWS-Video-MCh-15.md`, `COSTS-1.3.md`,
-and `NETWORK.md` are earlier/companion material and may be stale relative to the current
-guide; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
+§16.3c when that work completes; it is authoritative for that feature in the meantime. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are superseded earlier revisions of the
+guide and the cost model. `NETWORK.md` is companion reference material — MediaMTX's role,
+how WS-Discovery works, VLAN options, H.264-vs-H.265 — written while *planning* the MVP;
+its analysis stands and its §-numbers still resolve, but it carries a banner marking the
+three places the world moved on (MediaMTX is a unit now, discovery shipped, VLAN still
+open). Reference it for the reasoning, not for what to run; `SafeZone_Group-cloud_EN-rev_1.md` is the original product-requirements sketch this
 demo is modeled on. **When in doubt about current architecture or "why is it done this
 way," read `Demo-AWS-Video-revCosts4.md` (or grep it for the relevant §-number) before
 guessing from code alone** — most non-obvious decisions are explained there with the

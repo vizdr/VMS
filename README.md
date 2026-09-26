@@ -382,7 +382,7 @@ produced a nonexistent unit that `systemctl` silently no-op'd against.
 | [`AUDIO.md`](AUDIO.md) | Optional audio: design, the two silent bugs, withdrawn claims |
 | [`OUTAGE.md`](OUTAGE.md) | Durable outage buffering: design, measurements, open questions |
 | [`OUTBOUND-CLOUD.md`](OUTBOUND-CLOUD.md) | The outbound-only architectural thesis |
-| [`NETWORK.md`](NETWORK.md) | Network topology and the Wi-Fi/uplink trade-off |
+| [`NETWORK.md`](NETWORK.md) | Planning notes: MediaMTX's role, how WS-Discovery works, VLAN options, H.264 vs H.265. Reasoning, not a runbook — banner marks what has moved on |
 | [`measurements/`](measurements/) | Raw recorded results |
 
 `COSTS-1.3.md` and `Demo-AWS-Video-MCh-15.md` are superseded earlier revisions, kept for

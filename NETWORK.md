@@ -1,9 +1,25 @@
 # Networking notes: MediaMTX, ONVIF discovery, VLANs
 
-Companion notes to `Demo-AWS-Video-MCh-15.md`, covering the local media-relay layer,
-camera discovery, and network isolation for the camera segment. Written up from
-discussion while planning the MVP build — kept separate from the main runbook because
-it's reference material, not a build sequence.
+Companion notes to the build guide, covering the local media-relay layer, camera
+discovery, and network isolation for the camera segment. Written up from discussion while
+*planning* the MVP build — kept separate from the runbook because it is reference
+material, not a build sequence.
+
+> **Read this as a planning document, and check anything operational against the current
+> docs.** It was written against `Demo-AWS-Video-MCh-15.md`, which
+> `Demo-AWS-Video-revCosts4.md` has since superseded; the §-numbers below still resolve,
+> because the two guides share their numbering, but the *state of the world* has moved on
+> in three places, each flagged in the text:
+>
+> | Section | Then | Now |
+> |---|---|---|
+> | §1 MediaMTX | run by hand with `&`, a unit "to add later" | `kvs-mediamtx.service`, `LAUNCH.md` Part B |
+> | §2 WS-Discovery | "not implemented", a roadmap item | built and shipped — `adapter/onvif_discovery.py` + the local admin GUI |
+> | §3 VLANs | no VLAN, one flat network | **unchanged** — still the open item it describes |
+>
+> The analysis in each section is what it was for, and still stands. `LAUNCH.md` is
+> authoritative for anything you actually run, `COSTS-1.4.md` for any figure, and
+> `FoundAndFixed.md` for defects.
 
 ---
 
@@ -19,7 +35,7 @@ re-serves that same stream to anyone who connects and asks for it.
 
 ### Why it's in this architecture
 
-From `Demo-AWS-Video-MCh-15.md` §2.5: keeping MediaMTX in the design (even though the
+From the build guide §2.5: keeping MediaMTX in the design (even though the
 PW310 USB webcam replaced the original synthetic source) is deliberate. It preserves the
 **RTSP boundary** that a real IP camera (Hikvision, etc.) would present natively, so
 Phases 3–9 of the build stay untouched regardless of what's actually behind the camera
@@ -64,14 +80,18 @@ tar xzf mediamtx.tar.gz && ./mediamtx &
 
 Notes not in the main runbook:
 
-- The archive ships a single static binary plus a default `mediamtx.yml`. Defaults are
-  fine for this MVP: RTSP on `0.0.0.0:8554`, plus unused RTMP/HLS/API ports. Consider
-  binding RTSP to `127.0.0.1` only in `mediamtx.yml`, since nothing outside the Pi needs
-  it.
+- The archive ships a single static binary plus a default `mediamtx.yml`. **Extract only
+  the binary** — a plain `tar xzf` over the repo overwrites this project's own
+  `mediamtx.yml` (`FoundAndFixed.md` #26, `LAUNCH.md` A5). RTSP still binds `:8554`; the
+  HLS port (8888) is deliberately LAN-reachable now, since the admin GUI's browser-side
+  preview uses it, and the control API (9997) is localhost-only.
 - Running it with a trailing `&` doesn't survive a reboot or crash, and isn't managed by
   the `kvs-cam01.service` systemd unit (§7.1), which only supervises the KVS producer.
-  Before Phase 6, add a `mediamtx.service` unit so `teardown.sh`'s `pkill -f mediamtx` has
-  something well-defined to stop, and the chain survives a reboot.
+  **Done since:** MediaMTX runs as the user unit `kvs-mediamtx.service` (`LAUNCH.md` A8
+  generates it, Part B starts it). The `teardown.sh` mentioned here was never written;
+  Part F is the stop sequence. The unit also carries an `ExecStartPost=` that recreates
+  registry-backed camera paths, because MediaMTX does not persist API-added paths
+  (`FoundAndFixed.md` #32).
 - Startup ordering matters once this is under systemd: MediaMTX must be listening before
   the publisher (`rtspclientsink`) tries to connect, and before the KVS producer's
   `rtspsrc` tries to pull. Use `After=`/`Requires=` or `Restart=on-failure` with retry
@@ -102,18 +122,31 @@ it's a legitimate "evaluated and chose X because Y" talking point.
 
 ## 2. ONVIF WS-Discovery
 
-**Status: not implemented.** This appears only once in the main doc, as a roadmap item in
-the gap-analysis table (§16.2):
+> **Status: built.** This section was written when discovery was a roadmap item; it
+> shipped in §16.2.1 — `adapter/onvif_discovery.py` (shared by the `discover-onvif.py`
+> CLI and the local admin GUI) does discover → register → control end-to-end. The
+> gap-analysis row now reads **done**, with one caveat: a camera whose IP changes after
+> onboarding still needs a manual re-scan. The protocol explanation below is why it works
+> the way it does, and is unchanged.
+
+As originally written, this appeared once in the guide as a roadmap item in the
+gap-analysis table (§16.2):
 
 | Capability | Cloud Adapter Mini | This prototype | Effort to close |
 |---|---|---|---|
 | Camera discovery | hundreds of brands | hardcoded URL | **M** — ONVIF WS-Discovery |
 
-Today every RTSP source is a literal string in the channel config (§16.6):
+and every RTSP source was a literal string in a per-channel config file:
 
 ```json
 {"id":"cam-01","url":"rtsp://192.168.178.90:554/Streaming/Channels/102","mode":"passthrough"}
 ```
+
+That `channels.json` shape was never built. A camera's address and credentials live in
+the DynamoDB `cameras` registry (`rtspUrl`), which is the single source of truth; the
+per-camera file under `/etc/adapter/channels/` holds only the systemd template's
+parameters. Keeping the URL out of any tracked file is deliberate — it used to sit in
+`mediamtx.yml`, credentials included, and reached GitHub (`FoundAndFixed.md` #31).
 
 ### How WS-Discovery works
 
@@ -148,12 +181,20 @@ manual pairing step).
 
 ### Where it would sit in this architecture
 
+> **What was actually built:** a separate LAN-only Flask app, `adapter/onvif-admin/`,
+> rather than `agent.py`. The reasoning below pointed the right way — discovery has to
+> run from a process on the camera's own segment — and that is precisely why it could
+> *not* live in the cloud path: WS-Discovery is UDP multicast, so the browser client
+> and Lambda structurally cannot reach it. The agent still owns Start/Stop and IR over
+> MQTT; discovery and registration are the admin GUI's job.
+
 - Natural owner: the **agent** (`agent.py`) or a companion daemon it starts — a discovery
   pass on boot and on-demand (e.g. an MQTT command `{"action":"discover"}` on the existing
   command topic).
-- Discovered cameras populate the same `channels.json` shape already defined in §16.6, so
-  nothing downstream (the `kvs-cam@.service` template, per-channel producer) changes —
-  discovery only fills in the `url` field.
+- Discovered cameras populate the same per-channel shape, so nothing downstream (the
+  `kvs-cam@.service` template, per-channel producer) changes — discovery only fills in
+  the source URL. *(As built, that shape is a `cameras` registry row, not the
+  `channels.json` imagined here.)*
 - Fits the shadow-reporting idea from §16.6: a "discovered but unconfigured" camera could
   appear as a candidate before an operator assigns it a channel slot.
 
@@ -271,6 +312,10 @@ FritzBox 7583 ──(WLAN, trusted)── Pi wlan0   (AWS: MQTT, KVS — outboun
   inheriting its jitter/dropout characteristics. The outbound-MQTT design (doc §7)
   already tolerates reconnects, and this incidentally gives more realistic data for the
   §10.2 reconnect-behavior measurements than the synthetic `iptables DROP` test alone.
+  (Since measured: `measurements/reconnect_timeline.md`. Note §10.2's own snippet does
+  **not** work as written — it is IPv4-only, so on this dual-stack LAN every "blocked"
+  connection went over IPv6 and succeeded. Use `adapter/bin/awsblock.sh`;
+  `FoundAndFixed.md` #18.)
 - **WS-Discovery interaction:** once this segment exists, bind the discovery probe to
   `eth0` explicitly (not the default route interface) — that's the interface actually
   attached to the camera's broadcast domain.
@@ -284,13 +329,15 @@ FritzBox 7583 ──(WLAN, trusted)── Pi wlan0   (AWS: MQTT, KVS — outboun
 Both channels are pinned to H.264 today, confirmed in the actual code, not just the
 runbook:
 
-- `cloud/onvif-admin/app.py:158` creates every KVS stream with `MediaType="video/h264"`.
+- `adapter/onvif-admin/app.py` creates every KVS stream with `MediaType="video/h264"`
+  (the path was `cloud/onvif-admin/` when this was written).
 - `adapter/bin/stream-cam01.sh` (PW310, transcoded) and `adapter/bin/stream-cam02.sh`
   (real ONVIF camera, genuine passthrough) both use the identical H.264-specific
   GStreamer chain: `rtph264depay ! h264parse ! video/x-h264,... ! kvssink`.
 
-`cam-02`'s camera supports H.265 as an alternate profile, but the RTSP URL wired into
-MediaMTX deliberately points at its H.264 profile — most ONVIF cameras expose both so an
+`cam-02`'s camera supports H.265 as an alternate profile, but its registered `rtspUrl`
+deliberately points at the H.264 profile (that URL lived in `mediamtx.yml` when this was
+written; it is now registry-only — `FoundAndFixed.md` #31) — most ONVIF cameras expose both so an
 integrator can pick whichever the downstream system supports. That's a choice, not a
 camera limitation.
 
@@ -310,7 +357,7 @@ measurements" argument — on reconsideration, that argument doesn't hold once t
 is scoped to `cam-02` only:
 
 - The two channels were never actually coupled. `kvs-cam@.service` is a per-channel
-  template and `channels.json` (§16.6 of the main doc) already treats each camera
+  template and the per-camera registry row already treat each camera
   independently — codec is just another per-channel field, not something that needs to
   match across cameras.
 - **Passthrough makes the codec free on the adapter.** `stream-cam02.sh` never decodes
@@ -359,9 +406,12 @@ rather than assuming — in keeping with the main doc's "measure, don't assert" 
 
 ### Cost implication
 
-`COSTS-1.3.md` §6.4 works the dollar side of this: switching `cam-02` to H.265 cuts KVS
-ingest and viewing egress by roughly the same 40–50 % as the bitrate reduction, since KVS
-recording cost is linear in bitrate. It also shows the saving is larger on KVS than on S3
+`COSTS-1.4.md` §7.4 works the dollar side of this (it was `COSTS-1.3.md` §6.4 when this
+was written; v1.4 re-based `cam-02`'s main stream from 0.937 to **1.211 Mbps**, so the
+absolute figures there are larger — the H.264 → H.265 @ 50 % delta is $3.94 → $1.97 of
+KVS recording per camera-month). Switching `cam-02` to H.265 cuts KVS ingest and viewing
+egress by roughly the same 40–50 % as the bitrate reduction, since KVS recording cost is
+linear in bitrate. It also shows the saving is larger on KVS than on S3
 (S3's PUT/index costs don't scale with bitrate at all), and prices out — qualitatively,
 pending measurement — the two ways to close the browser-HEVC gap above: on-demand
 transcode at playback time, or a dual H.265-archive/H.264-live stream pair using the Pi's
@@ -371,9 +421,12 @@ hardware HEVC decode block feeding the already-proven `v4l2h264enc` encode path.
 
 ## Open items
 
-- [ ] Write `mediamtx.service` systemd unit (referenced above, not yet created).
+- [x] ~~Write `mediamtx.service` systemd unit~~ — done, `kvs-mediamtx.service`.
 - [ ] Decide: keep MediaMTX, or prototype `gst-rtsp-server` as a one-process replacement.
-- [ ] Implement WS-Discovery in `agent.py` once multi-camera config (§16.6) exists.
+      (Weaker now than when written: MediaMTX also does the outage-buffer recording,
+      `OUTAGE.md`, so replacing it costs more than the RTSP relay.)
+- [x] ~~Implement WS-Discovery~~ — done, but in `adapter/onvif-admin/` rather than
+      `agent.py`, for the multicast reason in §2.
 - [ ] Wire up the Pi's built-in `eth0` for the isolated camera segment; retire the
       camera's current path through the FritzBox's flat LAN.
 - [ ] Decide whether to run `cam-02` on H.265 (see §4) — test the ONVIF HEVC profile URI
