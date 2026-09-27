@@ -27660,3 +27660,10 @@
 {"t": "2026-09-27T12:20:11.783312+00:00", "kind": "event", "topic": "tns1:RuleEngine/CellMotionDetector/Motion", "data": {"Data.IsMotion": "false", "Source.VideoSourceConfigurationToken": "VideoSourceToken", "Source.VideoAnalyticsConfigurationToken": "VideoAnalyticsToken", "Source.Rule": "MyMotionDetectorRule"}}
 {"t": "2026-09-27T12:20:11.828275+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "false", "Source.Source": "VideoSourceMain"}}
 {"t": "2026-09-27T12:23:11.837542+00:00", "kind": "heartbeat", "elapsed_sec": 17093, "events_so_far": 1885}
+{"t": "2026-09-27T12:28:12.854465+00:00", "kind": "heartbeat", "elapsed_sec": 17394, "events_so_far": 1885}
+{"t": "2026-09-27T12:28:36.716160+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-27T12:28:36.819835+00:00", "kind": "event", "topic": "tns1:VideoSource/MotionAlarm", "data": {"Data.State": "true", "Source.Source": "VideoSourceMain"}}
+{"t": "2026-09-27T12:28:41.698213+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-27T12:28:46.710785+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-27T12:28:46.871545+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "true", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
+{"t": "2026-09-27T12:28:52.222676+00:00", "kind": "event", "topic": "tns1:UserAlarm/IVA/HumanShapeDetect", "data": {"Data.State": "false", "Source.VideoSourceConfigurationToken": "VideoSourceMain"}}
