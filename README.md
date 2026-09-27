@@ -99,7 +99,7 @@ with a backup, and rolls back automatically if video does not return.
 </p>
 
 <p align="center">
-  <img src="USB-Cam-01.png" width="900">
+  <img src="USB-cam-01.png" width="900">
 </p>
 
 <p align="center">
