@@ -70,6 +70,7 @@
   .clip-meta { flex: 1; font-size: 0.9rem; min-width: 10rem; }
   .clip-labels { color: #888; font-size: 0.8rem; }
   .clip-duration { color: #888; font-size: 0.85rem; }
+  .clip-codec-warn { color: #8a5a00; font-weight: 600; cursor: help; }
   .tier-apply-status { font-size: 0.8rem; color: #888; }
   .clips-alert {
     display: none;                 /* only present when there is something to say */
@@ -83,6 +84,22 @@
     font-size: 0.9rem;
     font-weight: 600;
   }
+  /* This browser can't decode H.265. Amber, not the red of .clips-alert: nothing is wrong
+     with the camera or the cloud -- the fix is on the viewer's machine. */
+  .browser-note {
+    display: none;                 /* shown by showHevcHelp() only when it applies */
+    margin: 0 0 1.5rem;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid #d4a017;
+    border-left: 5px solid #d4a017;
+    border-radius: 4px;
+    background: #fff8e1;
+    color: #5c4400;
+    font-size: 0.9rem;
+    line-height: 1.45;
+  }
+  .browser-note strong { display: block; margin-bottom: 0.2rem; }
+  .codec-warn { color: #8a5a00; font-size: 0.85rem; margin: -0.6rem 0 0.9rem; }
 </style>
 </head>
 <body>
@@ -100,6 +117,7 @@
        kept as a JS template rather than duplicated static HTML, since every function
        (load/cmd/record/clips) is parameterized by camera and would otherwise need a
        hand-maintained duplicate set of element IDs per camera. -->
+  <div id="hevcNote" class="browser-note"></div>
   <div id="cameras"></div>
 
   <div id="clipPlayerSection" style="display:none">
@@ -137,6 +155,63 @@ function showOverlay(camera, msg) {
   o.classList.remove("hidden");
 }
 function hideOverlay(camera) { el(camera, "overlay").classList.add("hidden"); }
+
+// Whether this browser can decode H.265 is asked of the browser at runtime, never guessed
+// from the user agent: it depends on the browser AND the machine. On one Windows PC only
+// Chrome played H.265 while Firefox and Edge could not until Microsoft's "HEVC Video
+// Extensions" were installed; on another PC that had them, all three did
+// (measurements/codec-phase0.md §7). The probe string is the CODECS value KVS advertises.
+const HEVC_TYPE = 'video/mp4; codecs="hvc1.1.6.L90.0"';
+const HEVC_STORE_URL = "https://apps.microsoft.com/detail/9nmzlz57r3t7";
+
+function hevcSupport() {
+  const MS = window.ManagedMediaSource || window.MediaSource;
+  const mse = !!(MS && MS.isTypeSupported(HEVC_TYPE));
+  const file = document.createElement("video").canPlayType(HEVC_TYPE) !== "";
+  // Live view goes through hls.js (MSE) wherever that is available, as load() does;
+  // clips are plain MP4 in a <video> element.
+  return { live: (window.Hls && Hls.isSupported()) ? mse : file, clips: file };
+}
+
+function hevcHelpHtml() {
+  if (/Windows/.test(navigator.userAgent)) {
+    return `On Windows, install Microsoft's <a href="${HEVC_STORE_URL}" target="_blank" ` +
+      `rel="noopener">HEVC Video Extensions</a> (German Windows: „HEVC-Videoerweiterungen“) ` +
+      `from the Microsoft Store, then restart the browser — Firefox and Edge need it to ` +
+      `decode H.265. Cameras recording in H.264 are not affected.`;
+  }
+  return `Open this page in a browser or on a device that can decode H.265 (HEVC). ` +
+    `Cameras recording in H.264 are not affected.`;
+}
+
+// The camera's video codec as the registry reports it (GET /cameras). Display only: the
+// codec is set on the camera itself, from the local admin GUI -- there is no cloud control.
+const CODEC_NAMES = { h264: "H.264", h265: "H.265" };
+
+// " · H.265" for a clip line (after the duration). The codec is read from the clip file
+// itself when the clip is made, so both halves of a clip split at a codec switch are
+// labelled correctly. An H.265 clip this browser can't decode is flagged right here,
+// before anyone presses Play.
+function clipCodecHtml(clip) {
+  const name = CODEC_NAMES[clip.videoCodec];
+  if (!name) return "";
+  if (clip.videoCodec === "h265" && !hevcSupport().clips) {
+    return ` · <span class="clip-codec-warn" title="This browser can't decode H.265 — see the note at the top of the page">${name}</span>`;
+  }
+  return ` · ${name}`;
+}
+
+function codecLabel(cam) {
+  const name = CODEC_NAMES[cam.videoCodec] || "H.264";
+  const where = { camera: "camera encoder", "pi-hw": "adapter hardware encoder" }[cam.videoEncode];
+  return `video ${name}${where ? ` (${where})` : ""}`;
+}
+
+function showHevcHelp() {
+  const n = document.getElementById("hevcNote");
+  n.innerHTML = `<strong>This browser can't play H.265 video.</strong>${hevcHelpHtml()}`;
+  n.style.display = "block";
+}
 
 function teardownPlayer(camera) {
   const s = state[camera];
@@ -304,7 +379,10 @@ function renderCameraPanel(cam) {
   const modeLabel = cam.mode === "passthrough" ? "ONVIF, passthrough" : "USB, transcoded";
   div.innerHTML = `
     <h2>${cam.id}</h2>
-    <p class="camera-subtitle">${modeLabel}${cam.hasIrControl ? " · IR control" : ""}</p>
+    <p class="camera-subtitle">${modeLabel} · <span title="Set on the camera, in the local admin GUI">${codecLabel(cam)}</span>${cam.hasIrControl ? " · IR control" : ""}</p>
+    ${cam.videoCodec === "h265" && !hevcSupport().live
+      ? `<p class="codec-warn">This browser can't play H.265 video — live view and clips of this camera won't show here. See the note at the top of the page.</p>`
+      : ""}
     <div class="video-wrap">
       <video id="video-${cam.id}" controls autoplay muted playsinline></video>
       <div id="overlay-${cam.id}" class="overlay">Press Start to begin watching</div>
@@ -453,6 +531,9 @@ async function login() {
       syncClipPolling(cam.id, cam.recordingMode);
       loadClips(cam.id);
     }
+    // Warn up front, before the viewer meets a black player, once the registry reports a
+    // camera recording in H.265 (videoCodec, from the codec-selection work).
+    if (CAMERAS.some(c => c.videoCodec === "h265") && !hevcSupport().live) showHevcHelp();
   } catch (e) {
     errorEl.textContent = "Network error: " + e.message;
   }
@@ -464,6 +545,20 @@ async function load(camera) {
   try {
     const r = await fetch(`${API}/hls?stream=${camera}`, { headers: { Authorization: idToken } });
     const data = await r.json();
+    const s0 = state[camera];
+    // Right after Start, "not live" (503) is expected, not an error: the producer needs a
+    // few seconds to connect, and KVS has nothing until the camera's first keyframe
+    // *closes* a fragment. cam-02 sends one every 3 s, so its first fragment lands ~10 s
+    // after Start -- a single look at 8 s missed it every time (FoundAndFixed.md #43).
+    // Keep asking until the Start window runs out; Stop clears the window.
+    if (r.status === 503 && Date.now() < (s0.liveWaitUntil || 0)) {
+      setStatus(camera, "waiting for first video...");
+      showOverlay(camera, "Starting stream…\nWaiting for the first video from the camera.");
+      clearTimeout(s0.refreshTimer);
+      s0.refreshTimer = setTimeout(() => load(camera), 3000);
+      return;
+    }
+    s0.liveWaitUntil = 0;
     if (!r.ok) {
       setStatus(camera, "error: " + (data.error || r.status));
       showOverlay(camera, (data.error || "Could not load stream") + "\n\nPress Start to begin.");
@@ -495,6 +590,18 @@ async function load(camera) {
       s.hls.on(Hls.Events.ERROR, (evt, data) => {
         if (!data.fatal) return;
         if (s.userStopped) return;
+        // The browser refuses the stream's codec outright -- what Firefox and Edge report
+        // for H.265 without the HEVC extension. recoverMediaError() cannot supply a
+        // missing decoder, so explain it instead of retrying.
+        if (data.details === Hls.ErrorDetails.MANIFEST_INCOMPATIBLE_CODECS_ERROR) {
+          const hevc = /hvc1|hev1/.test(String(data.reason || "")) || !hevcSupport().live;
+          setStatus(camera, "this browser can't decode the stream's video codec");
+          showOverlay(camera, hevc
+            ? "This browser can't play this camera's H.265 video.\n\nSee the note at the top of the page."
+            : "This browser can't decode this camera's video format.");
+          if (hevc) showHevcHelp();
+          return;
+        }
         setStatus(camera, "player error: " + data.details);
         switch (data.type) {
           case Hls.ErrorTypes.NETWORK_ERROR:
@@ -550,6 +657,7 @@ async function cmd(camera, action) {
   const s = state[camera];
   if (action === "stop") {
     s.userStopped = true;
+    s.liveWaitUntil = 0;
     teardownPlayer(camera);
     showOverlay(camera, "Stream stopped.\n\nPress Start to watch again.");
   } else {
@@ -564,7 +672,13 @@ async function cmd(camera, action) {
     const data = await r.json();
     setStatus(camera, r.ok ? `${action} sent` : "error: " + (data.error || r.status));
     if (!r.ok) { showOverlay(camera, "Could not send " + action + ": " + (data.error || r.status)); return; }
-    if (action === "start") setTimeout(() => load(camera), 8000);
+    if (action === "start") {
+      // 45 s covers a producer that dies on its first try and is restarted by systemd
+      // (RestartSec=5) plus a 3 s GOP, with room to spare.
+      s.liveWaitUntil = Date.now() + 45000;
+      clearTimeout(s.refreshTimer);
+      s.refreshTimer = setTimeout(() => load(camera), 5000);
+    }
   } catch (e) {
     setStatus(camera, "error: " + e.message);
     showOverlay(camera, "Network error sending " + action + ".\n\nPress Start to try again.");
@@ -718,7 +832,11 @@ async function stopRecording(camera) {
       statusEl.textContent = "Error saving recording: " + (data.error || r.status);
       return;
     }
-    statusEl.textContent = "Recording saved.";
+    // A recording that spans a codec switch comes back as one clip per codec: KVS cannot
+    // make a single clip across the switch (record_clip.py, codec_windows).
+    statusEl.textContent = (data.keys && data.keys.length > 1)
+      ? `Recording saved as ${data.keys.length} clips — the camera's video codec changed during it.`
+      : "Recording saved.";
     loadClips(camera);
   } catch (e) {
     statusEl.textContent = "Network error saving recording: " + e.message;
@@ -751,7 +869,7 @@ async function loadClips(camera) {
       li.innerHTML = `
         <span class="tier-badge ${tierClass}">${tierText}${restoreNote}</span>
         <span class="clip-meta">${when}
-          <span class="clip-duration">· ${duration}</span>
+          <span class="clip-duration">· ${duration}${clipCodecHtml(clip)}</span>
           <span class="clip-labels">${(clip.labels || []).join(", ")}</span>
         </span>
         <select class="tier-select">
@@ -831,6 +949,7 @@ async function playClip(s3Key) {
   const player = document.getElementById("clipPlayer");
   const statusEl = document.getElementById("clipStatus");
   section.style.display = "block";
+  player.onerror = null;
   player.pause(); player.removeAttribute("src"); player.load();
   statusEl.textContent = "Loading clip…";
   section.scrollIntoView({ behavior: "smooth" });
@@ -847,10 +966,29 @@ async function playClip(s3Key) {
       return;
     }
     if (data.status === "ready") {
+      // A browser without an H.265 decoder fails an H.265 clip with an unreadable error
+      // (Firefox: NS_ERROR_DOM_MEDIA_METADATA_ERR; Edge: "no supported source"). The clip
+      // list does not record the codec, so the hint is conditional on this browser
+      // lacking H.265, not on knowing that this clip is H.265.
+      player.onerror = () => {
+        if (!hevcSupport().clips) {
+          statusEl.innerHTML = "This clip could not be played. If this camera records in " +
+            "H.265, this browser can't decode it. " + hevcHelpHtml();
+          showHevcHelp();
+        } else {
+          statusEl.textContent = "This clip could not be played (media error " +
+            (player.error ? player.error.code : "?") + ").";
+        }
+      };
       player.src = data.url;
       statusEl.textContent = "";
-      player.play().catch(() => {
-        statusEl.textContent = "Loaded -- press the player's play button to watch.";
+      player.play().catch((e) => {
+        // Only an autoplay refusal means "fine, just press play". Anything else (e.g.
+        // NotSupportedError) is reported by onerror above -- saying "Loaded" there was
+        // simply wrong for a clip the browser cannot decode.
+        if (e.name === "NotAllowedError") {
+          statusEl.textContent = "Loaded -- press the player's play button to watch.";
+        }
       });
     } else if (data.status === "restore_requested") {
       statusEl.textContent = `This clip is in Deep Archive and wasn't readable directly. ` +
@@ -867,6 +1005,7 @@ async function playClip(s3Key) {
 
 function closeClipPlayer() {
   const player = document.getElementById("clipPlayer");
+  player.onerror = null;
   player.pause();
   player.removeAttribute("src");
   player.load();

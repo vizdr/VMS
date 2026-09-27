@@ -5,6 +5,7 @@ set -e
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
 source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
+source "${VMS_HOME}/adapter/bin/producer-lib.sh"     # producer_run
 CERTS="${VMS_HOME}/certs"
 
 # The AAC encode happens HERE, not in publish-cam01.sh, and the reason is not taste.
@@ -38,7 +39,7 @@ if [ "${AUDIO:-off}" = "on" ]; then
   # 1024-sample frames, so 16 kHz gives 64ms frames against cam-01's 66.7ms (15fps) video
   # -- see stream-cam02.sh for why that ratio decides whether KVS accepts the frames at
   # all. Measured 0 rejects; if the video framerate changes, recount them.
-  exec gst-launch-1.0 -v \
+  producer_run stream-cam01 -v \
     rtspsrc location="rtsp://127.0.0.1:8554/cam01" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
     ! rtph264depay ! h264parse config-interval=-1 \
@@ -50,10 +51,16 @@ if [ "${AUDIO:-off}" = "on" ]; then
     ${KVSSINK}
 fi
 
-# Video-only: byte-for-byte the pipeline that ran before audio existed.
+# Video-only. The audio pad is sunk into a fakesink rather than left unlinked -- an
+# unlinked rtspsrc pad can abort the whole pipeline with "not-linked (-1)" depending on pad
+# ordering (FoundAndFixed.md #43). cam-01 has no audio track when audio is off, so this
+# branch is inert here; it is kept identical to stream-cam02.sh's on purpose, because the
+# same script shape is what publish-cam01.sh's LPCM leg can start feeding at any time.
 echo "stream-cam01: audio disabled (video only)"
-exec gst-launch-1.0 -v \
-  rtspsrc location="rtsp://127.0.0.1:8554/cam01" protocols=tcp latency=200 \
+producer_run stream-cam01 -v \
+  rtspsrc location="rtsp://127.0.0.1:8554/cam01" protocols=tcp latency=200 name=src \
+  src. ! application/x-rtp,media=video ! queue \
   ! rtph264depay ! h264parse config-interval=-1 \
   ! video/x-h264,stream-format=avc,alignment=au \
-  ! ${KVSSINK}
+  ! ${KVSSINK} \
+  src. ! application/x-rtp,media=audio ! queue ! fakesink sync=false async=false

@@ -74,6 +74,8 @@ either GUI controls exactly that process.
 | **Evidence clips** | Manual recording, plus detection-triggered clips; browse, play, re-tier (Standard / IA / Deep Archive) and delete from the browser |
 | **ONVIF detection** | Motion, cell-grid motion and human-shape detection drive automatic clip capture |
 | **ONVIF device control** | IR-cut filter (day/night) from either GUI; WS-Discovery + one-click camera registration from a local admin app |
+| **Swappable USB camera** | The webcam is detected, not hardcoded. The admin GUI scans it, shows what it can actually do, and applies a new configuration — with a backup, and an automatic rollback if video does not come back — guide §22 |
+| **H.264 or H.265** | Passthrough cameras stream whichever their encoder is set to; producers read the codec off the wire, and clips spanning a switch are split rather than lost — guide §21 |
 | **Optional audio** | Per-camera, off by default, for both cameras — [`AUDIO.md`](AUDIO.md) |
 | **Durable outage buffering** | Records to a USB stick while AWS is unreachable and backfills on recovery — [`OUTAGE.md`](OUTAGE.md) |
 | **Remote control** | Outbound MQTT over 443 (ALPN), so it traverses HTTPS-only firewalls |
@@ -87,7 +89,10 @@ settings.
 
 **Local admin** (`adapter/onvif-admin/`) — a small Flask app on the Pi, LAN-only. It
 exists because **WS-Discovery is UDP multicast and only works from the camera's own LAN
-segment** — the cloud client and Lambda structurally cannot reach it.
+segment** — the cloud client and Lambda structurally cannot reach it. The same applies to
+the Pi's own USB bus, so this is also where the webcam is scanned, configured and
+adjusted (guide §22): it reads what the camera can actually do, writes the configuration
+with a backup, and rolls back automatically if video does not return.
 
 ---
 
@@ -125,8 +130,9 @@ open a browser; "no errors" proves nothing.
 
 Those three are not a highlight reel. **[`FoundAndFixed.md`](FoundAndFixed.md) is the
 complete list** — every defect this project has hit, numbered permanently, each with what
-broke, how it was noticed, why it happened and what fixed it. Forty entries so far,
-from the first build to bringing the system up on a second Pi.
+broke, how it was noticed, why it happened and what fixed it. Fifty entries so far,
+from the first build to bringing the system up on a second Pi and the defects that came
+back from the successor repository.
 
 It exists so the reasoning lives in one place. Other documents keep only the *rule* a bug
 produced plus a reference — `FoundAndFixed.md #N` — instead of retelling the same story in
@@ -164,7 +170,7 @@ than playback** throughout the media path; and **two copies of one fact always d
 An AWS account is required. The demo runs well under $5/month; see [Cost](#cost).
 
 **Nothing is pinned to a specific unit.** The camera's video node and microphone are
-discovered at startup (`adapter/bin/resolve-usb-camera.sh`), because the old `by-id` path
+discovered at startup (`adapter/bin/detect-hw.sh`), because the old `by-id` path
 embedded the camera's USB *serial number* and so broke on a different unit of the same
 model. The ONVIF camera lives in the registry, not in code. Paths derive from
 `$VMS_HOME`, falling back to the repo root the scripts live in. What genuinely does not
@@ -352,12 +358,17 @@ adapter/            on-device Python and pipelines
   outage_buffer.py    outage supervisor (arming, capture, retention)
   outage_uploader.py  merge + backfill to S3
   mediamtx_api.py     MediaMTX control-API helper
+  usb_camera.py       USB camera scan: formats, controls, microphone (guide §22.3)
   onvif-admin/        local Flask GUI
   bin/                GStreamer pipelines + operator tools
+    detect-hw.sh        finds the camera, its microphone, the buffer stick, the encoders
+    configure-camera.sh writes/backs up /etc/adapter/cameras/*.env (via sudo)
+    stream-codec.py     which codec MediaMTX is actually receiving (guide §21)
 client/index.html   the cloud browser client (single file)
 cloud/lambda/       one file per Lambda
-cloud/iam/          one policy document per role
+cloud/iam/          one policy document per role, plus check-drift.sh
 cloud/iot/          IoT rules and thing policy
+config/             templates for /etc/adapter (adapter.env, cameras/cam01.env)
 mediamtx/           MediaMTX binary and config
 measurements/       recorded results, not prose
 ```
@@ -382,8 +393,8 @@ produced a nonexistent unit that `systemctl` silently no-op'd against.
 | [`AUDIO.md`](AUDIO.md) | Optional audio: design, the two silent bugs, withdrawn claims |
 | [`OUTAGE.md`](OUTAGE.md) | Durable outage buffering: design, measurements, open questions |
 | [`OUTBOUND-CLOUD.md`](OUTBOUND-CLOUD.md) | The outbound-only architectural thesis |
-| [`NETWORK.md`](NETWORK.md) | Planning notes: MediaMTX's role, how WS-Discovery works, VLAN options, H.264 vs H.265. Reasoning, not a runbook — banner marks what has moved on |
-| [`measurements/`](measurements/) | Raw recorded results |
+| [`NETWORK.md`](NETWORK.md) | Planning notes: MediaMTX's role, how WS-Discovery works, VLAN options, H.264 vs H.265. Reasoning, not a runbook — its banner marks what has moved on, and its codec section is superseded by guide §21 |
+| [`measurements/`](measurements/) | Raw recorded results, including [`codec-phase0.md`](measurements/codec-phase0.md) — the H.264/H.265 evidence (encode capability, KVS behaviour, browser matrix) |
 
 `COSTS-1.3.md` and `Demo-AWS-Video-MCh-15.md` are superseded earlier revisions, kept for
 the history of what changed and why.

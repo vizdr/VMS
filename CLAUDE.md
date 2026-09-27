@@ -30,7 +30,10 @@ checklist (SDK build with its patches, venv, MediaMTX binary, AWS CLI, device
 certificate, systemd unit files), each step with a command that proves it worked. `AUDIO.md` records how optional per-camera audio was designed and built — guide §18 is
 the canonical operational reference, `FoundAndFixed.md` #15/#16/#17 are the defect
 records, and `AUDIO.md` keeps what neither holds: why the design ended up this shape, and
-the five claims that were withdrawn along the way. `OUTAGE.md` is the working record for durable outage
+the five claims that were withdrawn along the way. Guide **§21 (Appendix D)** is the reference for per-camera H.264/H.265, with the raw
+evidence — encode capability, KVS behaviour, the browser matrix — in
+`measurements/codec-phase0.md`, which carries a banner marking which parts describe the
+successor's feature rather than this one. `OUTAGE.md` is the working record for durable outage
 buffering (guide §16.3c) — design, measurements and open questions — and folds into
 §16.3c when that work completes; it is authoritative for that feature in the meantime. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are superseded earlier revisions of the
 guide and the cost model. `NETWORK.md` is companion reference material — MediaMTX's role,
@@ -65,6 +68,13 @@ Run WS-Discovery from the CLI:
 python3 adapter/bin/discover-onvif.py --user admin --password *** --timeout 5
 ```
 
+Scan the USB cameras attached to this Pi — formats, resolutions, frame rates, v4l2
+controls and the microphone on the same USB device (read-only; safe while streaming).
+The admin GUI's "Scan USB cameras" button calls the same code via `GET /api/usb-cameras`:
+```bash
+python3 adapter/usb_camera.py            # JSON, same shape as the GUI endpoint
+```
+
 Watch the MQTT control-plane state topic live (debug aid):
 ```bash
 python3 adapter/observe_state.py
@@ -72,15 +82,31 @@ python3 adapter/observe_state.py
 
 ### Deploying a Lambda
 
+> **This AWS account is shared with the successor repo (`VideoSafeZone`).** Both deploy the
+> same function names, and a deploy from here silently replaces whatever that repo last
+> pushed — it did, on 2026-09-26, reverting `record-clip` and the client to their pre-H.265
+> versions (`FoundAndFixed.md` #48). Check who touched it last before pushing:
+> `aws lambda get-function-configuration --function-name <fn> --query LastModified`.
+
 Every function in `cloud/lambda/` is deployed the same way — zip the single file, push it:
 ```bash
 cd cloud/lambda && zip -q <name>.zip <name>.py && \
   aws lambda update-function-code --function-name <name> --zip-file fileb://<name>.zip
 ```
 Function names use hyphens (`get-hls-url`), files use underscores (`get_hls_url.py`).
-IAM policy documents for each function's role live in `cloud/iam/`.
+IAM policy documents for each function's role live in `cloud/iam/` — **as documentation
+only; nothing applies them.** Widening a permission means `aws iam put-role-policy` against
+the live role, so the file and the deployment drift apart silently. After any such change,
+run `cloud/iam/check-drift.sh` (semantic diff of every file against the attached policy;
+`--pull` rewrites the files from what is deployed). `FoundAndFixed.md` #41.
 
 ### Deploying the browser client
+
+> Same shared-account warning as above, and worse here: **the client bucket has versioning
+> disabled**, so an overwrite cannot be rolled back — the previous `index.html` has to be
+> redeployed from whichever working tree produced it. Check
+> `aws s3api head-object --bucket vms-demo-client-596633517506 --key index.html` first
+> (`FoundAndFixed.md` #48).
 
 ```bash
 aws s3 cp client/index.html s3://vms-demo-client-596633517506/index.html \
@@ -106,6 +132,14 @@ actual KVS producers that cost money while running.
 `kvs-camera-init`, `kvs-camera-publish`, `kvs-agent`, `onvif-admin`,
 `kvs-event-watcher` (ONVIF detection → clips), `kvs-outage-buffer` +
 `kvs-outage-uploader` (durable outage buffering, `OUTAGE.md`).
+
+One more is **enabled on this Pi but is not part of the system**: `onvif-observe` runs
+`adapter/observe_events.py --hours 9.5`, the Phase-0 event-observation harness behind
+`Camera-Features.md` §"event capture" and `COSTS-1.4.md`'s duty-cycle figures. It restarts
+at every boot and **appends to a git-tracked file**
+(`measurements/events-cam-02-2026-09-08-overnight.jsonl`), which is why that file shows as
+modified after any long uptime. Disable it (`systemctl --user disable --now onvif-observe`)
+unless a measurement is actually wanted.
 
 A unit in one manager **cannot** `Requires=`/`After=` a unit in the other — they're
 independent systemd instances. (A templated system unit once declared
@@ -166,12 +200,31 @@ browser's MSE decoder, so "ffmpeg played it" is necessary but not sufficient evi
 ### Two independent camera pipelines converge on MediaMTX
 
 `cam-01` is a USB webcam (MJPG-only) that must be transcoded; `cam-02` (and any camera
-added later) is a real ONVIF/RTSP IP camera that passes through untouched. Both publish
+added later) is a real ONVIF/RTSP IP camera that passes through untouched.
+
+**Passthrough means the camera's codec, and that can be H.264 or H.265.** A passthrough
+producer does not assume: `adapter/bin/stream-codec.py <cameraId>` asks MediaMTX which
+video track it is actually receiving and prints `VIDEO_CODEC=h264|h265`, and
+`video_depay_chain` in `producer-lib.sh` turns that into the depayloader chain
+(`rtph265depay ! h265parse ! video/x-h265,stream-format=hvc1` vs the H.264 `avc` form).
+The wire is the authority because a camera's encoder is changed *on the camera*, so any
+registry field can be stale — the registry's `videoCodecActive` is written *from* this
+reading, not consulted for it. `stream-format=hvc1`, not byte-stream, for the same reason
+the H.264 side uses `avc`: kvssink takes codec private data only from the caps'
+`codec_data`, so Annex-B would ingest happily and then refuse to play back. No source
+within the wait is a deliberate hard failure, so systemd retries. `cam-01` is H.264-only
+(we encode it) and keeps its own chain. Both publish
 into **MediaMTX**, which is the local hub for everything downstream: it re-serves RTSP,
 exposes its own local HLS output (port 8888, LAN-reachable — used only by the ONVIF admin
 GUI's browser-side preview, never the cloud path), and exposes a control API (port 9997,
 localhost-only) used to add camera paths live without a config-file rewrite + restart
-(which would otherwise drop every other camera's connection). `cam-01`'s pipeline (`adapter/bin/publish-cam01.sh`)
+(which would otherwise drop every other camera's connection). `cam-01`'s pipeline (`adapter/bin/publish-cam01.sh`) is built from
+`/etc/adapter/cameras/cam01.env` (template `config/cameras/cam01.env.example`), not from
+literals: `CAPS`, `CAM_FPS_OUT`, `VIDEO_BITRATE`, `GOP`, `H264_PROFILE`/`LEVEL`,
+`AUDIO_RATE` and the v4l2 control lists all default to the PW310 values the script used to
+carry, so an absent file changes nothing. The decode stage follows `CAPS` (`image/jpeg` →
+`v4l2jpegdec`; `video/x-raw` → none), and `camera-init.sh` applies only the controls the
+attached camera actually has, so a different webcam does not abort it. It
 uses the Pi 4's hardware JPEG-decode/ISP-convert/H.264-encode blocks (`v4l2jpegdec`,
 `v4l2convert`, `v4l2h264enc` — all separate V4L2 M2M devices under `bcm2835-codec`) rather
 than software elements, for a ~2x CPU reduction; the encoder must be told `profile=high`
@@ -185,7 +238,11 @@ set from either GUI) — and the producer scripts read them once at startup via
 `adapter/bin/camera-audio.py`. The setting therefore applies on the camera's **next
 Start**, which is deliberate: KVS rejects a stream whose fragments change from video-only
 to audio+video partway through, so applying it live would break `GetClip` across the
-boundary. With audio off, every pipeline is byte-for-byte the pre-audio one.
+boundary. With audio off, `publish-cam01.sh` is byte-for-byte the pre-audio pipeline; the
+**producer** scripts are deliberately not, since #43b — their video-only branch links the
+source's audio pad to a `fakesink` rather than leaving it unlinked, because an unlinked
+pad can abort the whole pipeline with `not-linked (-1)` depending on pad order
+(`FoundAndFixed.md` #43).
 
 The constraint that shapes all of it: **KVS's ingest and playback paths accept different
 codecs, and ingest is the permissive one.** `kvssink` takes G.711 and malformed AAC
@@ -211,7 +268,16 @@ Measured effect on a 5-minute outage: gap-fill 27.4% → 99.8%.
 
 A separate KVS producer process per camera (`kvs-cam01.service` / `kvs-cam02.service` /
 future `kvs-cam@<id>.service` instances) pulls from MediaMTX's RTSP and pushes to its own
-Kinesis Video Stream. **This is the layer Start/Stop buttons (in either GUI) actually
+Kinesis Video Stream. None of the three producer scripts `exec gst-launch` directly: they call
+`producer_run` from `adapter/bin/producer-lib.sh`, which treats *any* end of the pipeline as
+a failure and additionally watches its output for "the source closed the session" lines,
+killing a pipeline that hangs instead of exiting. Both halves exist because a producer that
+loses its source otherwise stays `active` while uploading nothing — see `FoundAndFixed.md`
+#44 and #46 before simplifying it back to an `exec`. The units carry
+`RuntimeDirectory=vms-producer` for that watchdog's pipe. **`publish-cam01.sh` is the
+exception and still uses `exec`** — it is the publisher, not a producer, but it has the
+same exposure (MediaMTX restarts → clean EOS → exit 0 → `Restart=on-failure` ignores it),
+and the successor has not converted it either. Known gap, not an oversight. **This is the layer Start/Stop buttons (in either GUI) actually
 control** — toggling it does not affect MediaMTX or the camera's own feed, which keep
 running regardless. This is a common point of confusion: the "local preview" (MediaMTX
 HLS) and the "KVS push" (cloud) are independent signals.
@@ -227,6 +293,13 @@ MQTT control, all API routes) immediately, with no code change. IAM for
 camera-ARN-scoped actions (`kinesisvideo:*`, per-Lambda) uses a `stream/cam-*/*` wildcard
 rather than enumerated ARNs specifically so this stays true without an IAM edit per
 camera — a deliberate least-privilege tradeoff, not an oversight.
+
+`cam-01`'s row also carries hardware facts written by the admin GUI's USB scan
+(`audioCapable`, `cameraModel`, `cameraSerial`, `usbCaps`, `usbCapsProbedAt` — guide
+§22.6). `audioCapable` is the load-bearing one: it gates the producer's audio and both
+GUIs' audio checkbox, so a webcam with no microphone must set it false. **Pipeline
+settings never go in the registry** — they live in `/etc/adapter/cameras/cam01.env`,
+because a producer has to start with AWS unreachable.
 
 Credential storage in that table is phased: currently a plain `onvifPassword` attribute
 (Phase 1); a planned Phase 2 moves it to an SSM Parameter Store `SecureString` referenced
@@ -264,6 +337,25 @@ MediaMTX's path + the registry row, but deliberately never touches systemd for `
 `cam-02` — they predate the `kvs-cam@` template, and re-provisioning them would start a
 second, conflicting producer), and local control (Start/Stop, IR mode, a live
 `systemctl is-active`-backed status column, and the local-HLS preview mentioned above).
+
+It also scans the Pi's **own USB bus** (`GET /api/usb-cameras` → `adapter/usb_camera.py`,
+guide §22): formats, resolutions, frame rates, v4l2 controls and the microphone on the
+same USB device, all read from the driver so a swapped-in webcam shows its own
+capabilities rather than the PW310's. Read-only and safe while streaming. The panel
+renders the `/etc/adapter/cameras/cam01.env` it would write and can **apply** it:
+`adapter/bin/configure-camera.sh` (via `sudo`, like `provision-camera.sh`) validates every
+line against a whitelist, backs up the previous file, and writes atomically; the GUI then
+restarts the camera units and **requires MediaMTX's `bytesReceived` to advance** before
+calling it a success — `ready` alone is not proof, a stalled pipeline reports it happily.
+If video does not return within 30 s the previous configuration is restored automatically.
+Guide §22.5.
+
+Camera controls (exposure, white balance, focus) are **LAN-side only, deliberately** —
+like the codec, they are a property of a camera on this Pi, and keeping them out of the
+cloud client is also what keeps `client/index.html` identical to the successor's (#48).
+Each control has **Set now** (writes it live while streaming; lost on the next start,
+because `camera-init.sh` reapplies the file) and is saved by Apply. Every write is read
+back, since the driver clamps instead of refusing. Guide §22.7.
 
 Naming quirk both share: the camera identifier is hyphenated (`cam-01`, used for the KVS
 stream name, DynamoDB key, S3 key prefix, and every API field) but the MediaMTX path name

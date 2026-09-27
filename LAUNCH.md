@@ -423,6 +423,7 @@ goes, which `systemctl` flavour controls it, and where its logs are:
 | `kvs-agent` | user | `~/.config/systemd/user/kvs-agent.service` | `adapter/agent.py` |
 | `onvif-admin` | user | `~/.config/systemd/user/onvif-admin.service` | `adapter/onvif-admin/app.py` |
 | `kvs-event-watcher` | user | `~/.config/systemd/user/kvs-event-watcher.service` | `adapter/event_watcher.py` |
+| `onvif-observe` | user | `~/.config/systemd/user/onvif-observe.service` | `adapter/observe_events.py` — **a measurement harness, not part of the system.** Enabled on this Pi, so it restarts at every boot and appends to a git-tracked log; disable it unless you want the measurement |
 | `kvs-outage-buffer` | user | `~/.config/systemd/user/kvs-outage-buffer.service` | `adapter/outage_buffer.py` |
 | `kvs-outage-uploader` | user | `~/.config/systemd/user/kvs-outage-uploader.service` | `adapter/outage_uploader.py` |
 | `kvs-cam01` | **system** | `/etc/systemd/system/kvs-cam01.service` | `adapter/bin/stream-cam01.sh` |
@@ -472,9 +473,13 @@ Before=kvs-mediamtx.service
 Type=oneshot
 ExecStart=${VMS_HOME}/adapter/bin/camera-init.sh
 RemainAfterExit=yes
-
-[Install]
-WantedBy=default.target
+# A failure here is almost always "the USB camera has not enumerated yet" on a cold boot.
+# detect-hw.sh now waits CAMERA_WAIT_SEC (30s) for it, so this retry is the
+# second line of defence -- for a camera plugged in after boot, or one slower than the
+# wait. Without it a oneshot that failed once stayed failed forever and cam-01 was simply
+# missing from both GUIs until someone intervened (FoundAndFixed.md #42).
+Restart=on-failure
+RestartSec=10
 EOF
 
 cat > ~/.config/systemd/user/kvs-mediamtx.service <<EOF
@@ -497,7 +502,13 @@ cat > ~/.config/systemd/user/kvs-camera-publish.service <<EOF
 [Unit]
 Description=PW310 capture/encode -> publish to MediaMTX (rtsp://127.0.0.1:8554/cam01)
 After=kvs-camera-init.service kvs-mediamtx.service
-Requires=kvs-camera-init.service kvs-mediamtx.service
+# Wants= on camera-init, Requires= only on mediamtx. camera-init merely tunes
+# exposure/WB/focus; publishing works without it (the picture is just auto-exposed), so
+# its failure must not veto the stream -- with Requires= a camera-init that lost the boot
+# race took the publisher down with it (FoundAndFixed.md #42). mediamtx is a genuine hard
+# dependency: there is nowhere to publish without it.
+Wants=kvs-camera-init.service
+Requires=kvs-mediamtx.service
 
 [Service]
 Type=simple
@@ -562,6 +573,9 @@ User=${USER}
 Environment=GST_PLUGIN_PATH=${KVS_SDK_DIR}/build
 Environment=LD_LIBRARY_PATH=${KVS_SDK_DIR}/open-source/local/lib
 ExecStart=${VMS_HOME}/adapter/bin/stream-cam${cam}.sh
+# producer-lib.sh's EOS watchdog needs a pipe it can create somewhere writable; systemd
+# makes /run/vms-producer for the unit's User= and removes it on stop (FoundAndFixed #46).
+RuntimeDirectory=vms-producer
 Restart=on-failure
 RestartSec=5
 
@@ -584,6 +598,7 @@ EnvironmentFile=/etc/adapter/channels/%i.env
 Environment=GST_PLUGIN_PATH=${KVS_SDK_DIR}/build
 Environment=LD_LIBRARY_PATH=${KVS_SDK_DIR}/open-source/local/lib
 ExecStart=${VMS_HOME}/adapter/bin/stream-channel.sh
+RuntimeDirectory=vms-producer
 Restart=on-failure
 RestartSec=5
 CPUAccounting=true
@@ -637,25 +652,79 @@ The `by-id` path embeds the camera's **USB serial number**, so it breaks on a *d
 unit of the same model* — not just a different model. `by-path` is serial-free but encodes
 the physical USB port, so it breaks when you move the plug. Neither survives new hardware.
 
-`adapter/bin/resolve-usb-camera.sh` now finds both at startup and
-`publish-cam01.sh`/`camera-init.sh` use it. A UVC camera exposes two `/dev/video*` nodes
-and only one captures, so it asks which node advertises a capture format rather than
-guessing by index; for audio it matches "has a capture PCM and is not the Pi's onboard
-sound" rather than the card *name*, and emits `hw:CARD=<id>` rather than `hw:<N>` because
+`adapter/bin/detect-hw.sh` now finds both at startup and `publish-cam01.sh` /
+`camera-init.sh` source it. A UVC camera exposes two `/dev/video*` nodes and only one
+captures, so it asks which node advertises MJPG rather than guessing by index — that also
+drops the metadata node, which lists no formats at all.
+
+**The microphone is matched by USB parent, not by card name**, which is the part that is
+easy to get wrong: ALSA calls many webcams' mics plain `Webcam`, and a second one becomes
+`Webcam_1` in *plug-in order*, so the name is not a stable identity. `detect-hw.sh`
+resolves the camera's video node to its USB device through sysfs and takes the sound card
+on that same device — so it is always *that camera's* microphone, never a USB headset that
+happened to enumerate first. It is addressed as `hw:CARD=<id>`, never `hw:<N>`, because
 card numbers are reassigned on reboot (§18.1).
 
-**Proof — run it directly; it prints what the pipelines will use:**
+**Detection never guesses.** Exactly one match is used; none waits up to
+`CAMERA_WAIT_SEC` (30 s) and then fails, because at boot the user units start seconds
+before a USB camera's `by-id` link exists (`FoundAndFixed.md` #42); **several is an error**
+that lists them and asks for `CAM_MATCH` — ambiguity is not a timing problem, so waiting
+cannot resolve it.
+
+**Proof — run it directly; it reports exactly what the pipelines will use:**
 
 ```bash
-adapter/bin/resolve-usb-camera.sh
-#   CAM_DEVICE=/dev/v4l/by-id/usb-..._Webcam_...-video-index0
-#   AUDIO_CARD=hw:CARD=Webcam,DEV=0
+adapter/bin/detect-hw.sh --print
+#   config file   : /etc/adapter/cameras/cam01.env (absent -- defaults)
+#   video device  : /dev/v4l/by-id/usb-..._Webcam_...-video-index0 -> /dev/video0
+#   audio device  : hw:CARD=Webcam,DEV=0
+#   buffer mount  : /mnt/vms-buffer
+#   isolated CPUs : 1-2
+#   HW encoders   : h264
 ```
 
-Nothing printed means nothing was found — check the camera is plugged in with
-`v4l2-ctl --list-devices`. With two USB cameras attached it picks the first and says so on
-stderr; export `CAM_DEVICE` / `AUDIO_CARD` to choose, or set `audioDevice` on the camera's
-registry row, which takes precedence over discovery.
+To pin a choice, create `/etc/adapter/cameras/cam01.env` from
+`config/cameras/cam01.env.example` and set `CAM_MATCH` (a substring of the `by-id` name) or
+`CAM_DEVICE` (the exact node).
+
+**That file also carries the whole pipeline shape**, so none of it is hardcoded in the
+scripts any more: `CAPS` (what the camera is asked for), `CAM_FPS_OUT`, `VIDEO_BITRATE`,
+`GOP`, `H264_PROFILE`/`H264_LEVEL`, `AUDIO_RATE`, and the two v4l2 control lists. With no
+file present every one of them defaults to the value that was previously written into the
+script, so the PW310 behaves identically either way.
+
+Three behaviours are worth knowing before editing it:
+
+- **The decode stage follows `CAPS`.** `image/jpeg` inserts the hardware JPEG decoder; a
+  raw format such as `video/x-raw,format=YUY2` inserts none, because `v4l2convert` already
+  normalises to I420. Any other media type is refused at startup rather than producing a
+  pipeline that cannot link.
+- **`AUDIO_RATE` is not a quality setting.** Keep it at or below `1024 × CAM_FPS_OUT`
+  (guide §18.3); the publisher warns on the console when it is not, because exceeding it
+  loses roughly half the audio *silently*.
+- **A control this camera lacks is skipped, not fatal** — that is what lets a different
+  webcam work. But the driver *clamps* an out-of-range value instead of refusing it, so
+  verify with `v4l2-ctl --get-ctrl` rather than assuming a number took effect.
+
+The registry's `audioDevice` still overrides the detected microphone, but only **if that
+card is actually present**: a pin naming a card that no longer exists is ignored with a log
+line rather than obeyed. That matters because video and audio share one pipeline — a stale
+pin would otherwise make `alsasrc` fail and take cam-01's *video* down with it.
+
+**The USB camera — config file, not code.** `adapter/bin/detect-hw.sh --print` reports
+what will be used; the admin GUI's section 4 ("USB camera") scans the camera and shows
+every format, resolution, frame rate and control it supports, together with the exact
+`/etc/adapter/cameras/cam01.env` that would configure it, and can apply it. Applying
+backs up the current configuration first, restarts the camera and waits for video to
+actually flow; if it does not within 30 s the previous configuration is restored
+automatically, so a wrong setting cannot cost you the camera. **Saved configurations**
+lists the backups (newest 20, in `/etc/adapter/cameras/backups/`) and restores any of
+them. Each control also has **Set now**, which writes it to the camera immediately while
+it streams — useful for dialling exposure in against the preview, and deliberately *not*
+persistent: the next start reapplies the config file. **Reset changes and hide** puts
+back anything set that way and closes the panel; **Hide** just closes it. Guide §22 covers
+swapping in a different webcam; §22.7 covers exposure, including why a long one costs
+frame rate.
 
 **The LAN — registry, not code.** The ONVIF camera's IP, port, credentials and RTSP URL
 live in the `cameras` DynamoDB table, written by the local admin GUI (Part E). A camera
@@ -776,6 +845,37 @@ ffprobe "$URL"   # a fresh creation_time in the output is the actual proof, not 
 systemctl --user list-units 'kvs-*' --no-pager
 sudo systemctl is-active kvs-cam01.service
 ```
+
+### If a camera runs H.265 (guide §21)
+
+`cam-01` is always H.264. A passthrough camera sends whatever its own encoder is set to,
+and the producer follows it — so when a camera is switched, check the chain end to end
+rather than one link of it:
+
+```bash
+# 4. what MediaMTX is actually receiving -- the authority the producer itself uses
+curl -s http://127.0.0.1:9997/v3/paths/get/cam02 | grep -o '"tracks":\[[^]]*\]'
+venv-adapter/bin/python3 adapter/bin/stream-codec.py cam-02      # VIDEO_CODEC=h265
+
+# 5. what the producer built its pipeline from, and what KVS was told
+sudo journalctl -u kvs-cam02.service -n 80 | grep -E 'video h26|stream-codec'
+aws kinesisvideo describe-stream --stream-name cam-02 \
+  --query StreamInfo.MediaType --output text                     # video/h265
+
+# 6. playback: the master playlist must name the codec, and a frame must decode
+curl -s "$URL" | grep -o 'CODECS="[^"]*"'                        # hvc1...
+ffmpeg -nostdin -i "$URL" -frames:v 1 -y /tmp/h265.png
+```
+
+Then a **browser, on the machine that will actually watch it** — this is the step that
+matters most for H.265 and the one a Pi-side check cannot stand in for. Chrome decodes
+HEVC; Firefox and Edge need Microsoft's HEVC Video Extensions on Windows. The cloud client
+detects this and says so rather than spinning, so "the camera is broken" and "this browser
+has no HEVC decoder" stay distinguishable.
+
+**The codec cannot be changed from this repository** — set it in the camera's own web UI,
+then restart that camera's producer (Stop/Start in either GUI) so it re-reads the wire.
+Guide §21.4 lists what else was left behind with the switching code.
 
 ### If the camera has audio enabled (guide §18)
 

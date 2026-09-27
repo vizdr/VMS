@@ -46,6 +46,28 @@ def get_path_state(path: str) -> dict | None:
     return r.json()
 
 
+def path_video_codec(path: str) -> str | None:
+    """The video codec MediaMTX is actually receiving on `path` -- "h264" or "h265" -- or
+    None when the path is not ready (source offline, publisher stopped) or carries neither.
+
+    This is ground truth, unlike anything a camera *reports* about its own encoder: it is
+    what every reader (preview, outage buffer, KVS producer) will get. `tracks` is a list
+    of codec names here ("H264", "G711"); a codec change shows up after the source
+    reconnects, which a camera-side encoder switch forces (measurements/codec-phase0.md §2).
+    """
+    try:
+        state = get_path_state(path)
+    except requests.RequestException:
+        return None
+    if not state or not state.get("ready"):
+        return None
+    for track in state.get("tracks") or []:
+        name = track if isinstance(track, str) else (track or {}).get("codec", "")
+        if name in ("H264", "H265"):
+            return name.lower()
+    return None
+
+
 def patch_path(path: str, conf: dict) -> None:
     """Merge `conf` into a path's configuration.
 

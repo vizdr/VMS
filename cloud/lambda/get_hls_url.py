@@ -34,6 +34,11 @@ def lambda_handler(event, context):
             StreamName=stream,
             PlaybackMode="LIVE",
             Expires=session_ttl,
+            # fMP4 is KVS's default already; pinned because H.265 cameras depend on it --
+            # HLS carries HEVC in fragmented MP4 (the verified path, `hvc1`), and a later
+            # switch to MPEG_TS for some other reason must not silently break them
+            # (measurements/codec-phase0.md §3).
+            ContainerFormat="FRAGMENTED_MP4",
         )["HLSStreamingSessionURL"]
 
         return {

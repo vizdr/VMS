@@ -5,6 +5,7 @@ set -e
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
 
 source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, IOT_* (/etc/adapter/adapter.env)
+source "${VMS_HOME}/adapter/bin/producer-lib.sh"     # producer_run
 CERTS="${VMS_HOME}/certs"
 
 # Video is genuine passthrough -- no jpegdec/videoconvert/v4l2h264enc chain like
@@ -55,13 +56,26 @@ AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/camera-audio.py cam-02 || true)"
 eval "${AUDIO_ENV}"
 
+# The codec MediaMTX is actually receiving, never the registry's opinion of it -- a camera's
+# encoder is changed on the camera, so the wire is the only thing that cannot be stale. No
+# video within stream-codec.py's wait is a failure on purpose: systemd retries, which is
+# what a dead source has always meant for a producer. stream-codec.py also records the
+# codec (registry `videoCodecActive`, KVS `MediaType`) on a hard time budget, so a slow or
+# unreachable AWS can never delay a start.
+VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
+             ${VMS_HOME}/adapter/bin/stream-codec.py cam-02)" \
+  || { echo "stream-cam02: no H.264/H.265 video from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
+eval "${VIDEO_ENV}"
+# Unquoted where it is used below, on purpose: gst-launch needs these as separate tokens,
+# exactly like ${KVSSINK}.
+VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
+
 if [ "${AUDIO:-off}" = "on" ]; then
-  echo "stream-cam02: audio ENABLED (${AUDIO_CODEC:-PCMA} -> AAC 8kHz)"
-  exec gst-launch-1.0 -v \
+  echo "stream-cam02: audio ENABLED (${AUDIO_CODEC:-PCMA} -> AAC 8kHz), video ${VIDEO_CODEC}"
+  producer_run stream-cam02 -v \
     rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
-    ! rtph264depay ! h264parse config-interval=-1 \
-    ! video/x-h264,stream-format=avc,alignment=au ! queue ! kvs.video_0 \
+    ! ${VIDEO_CHAIN} ! queue ! kvs.video_0 \
     src. ! application/x-rtp,media=audio ! queue \
     ! rtppcmadepay ! alawdec ! audioconvert \
     ! audio/x-raw,rate=8000,channels=1 \
@@ -70,11 +84,17 @@ if [ "${AUDIO:-off}" = "on" ]; then
     ${KVSSINK}
 fi
 
-# Video-only: byte-for-byte the pipeline that ran before audio existed, so turning the
-# setting off is a true revert and not a second code path that merely resembles one.
-echo "stream-cam02: audio disabled (video only)"
-exec gst-launch-1.0 -v \
-  rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 \
-  ! rtph264depay ! h264parse config-interval=-1 \
-  ! video/x-h264,stream-format=avc,alignment=au \
-  ! ${KVSSINK}
+# Video-only -- and deliberately NOT byte-for-byte the pre-audio pipeline any more: the
+# audio pad is linked to a fakesink. MediaMTX re-serves the camera's G.711 track whether
+# or not `audioEnabled` is set, and an rtspsrc pad that nobody links can abort the entire
+# pipeline with "streaming stopped, reason not-linked (-1)" when it happens to be exposed
+# before the video pad -- a pad-ordering race, so it fires intermittently and looks like a
+# flaky camera (FoundAndFixed.md #43). The fakesink is inert when the source has no audio
+# track at all, which is cam-01's case, so the same shape is safe everywhere.
+echo "stream-cam02: audio disabled (video only), video ${VIDEO_CODEC}"
+producer_run stream-cam02 -v \
+  rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
+  src. ! application/x-rtp,media=video ! queue \
+  ! ${VIDEO_CHAIN} \
+  ! ${KVSSINK} \
+  src. ! application/x-rtp,media=audio ! queue ! fakesink sync=false async=false

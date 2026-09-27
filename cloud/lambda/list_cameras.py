@@ -3,6 +3,14 @@ import boto3, os, json
 REGION = os.environ["AWS_REGION"]
 CORS = {"Access-Control-Allow-Origin": "*"}
 
+def video_codec(item):
+    """The codec a camera is set to deliver: the admin's choice (videoCodec, written by the
+    local admin GUI when it switches the camera), else the hardware-first default the
+    adapter recorded (videoCodecDefault, adapter/codec_caps.py). Every camera predating
+    codec selection streams H.264, hence the last resort."""
+    return item.get("videoCodec") or item.get("videoCodecDefault") or "h264"
+
+
 def lambda_handler(event, context):
     try:
         table = boto3.resource("dynamodb", region_name=REGION).Table("cameras")
@@ -39,6 +47,16 @@ def lambda_handler(event, context):
                     # capability flag to gate on, only the USB buffer being present,
                     # which only the adapter can see.
                     "outageBufferSec": int(i.get("outageBufferSec", 0) or 0),
+                    # Video codec, for display only: it is chosen in the local admin GUI,
+                    # which switches the camera's own encoder -- there is deliberately no
+                    # cloud route to change it. videoEncode says where the encoding happens
+                    # ("camera" or "pi-hw", the adapter's hardware encoder); the client
+                    # also warns a viewer whose browser can't decode H.265.
+                    "videoCodec": video_codec(i),
+                    "videoEncode": (i.get("videoCodecCaps") or {}).get(video_codec(i)),
+                    # What the cloud stream last carried (set by the producer at start);
+                    # differs from videoCodec only until the producer next starts.
+                    "videoCodecActive": i.get("videoCodecActive"),
                 }
                 for i in items
             ),

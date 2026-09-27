@@ -274,9 +274,18 @@ src. ! application/x-rtp,media=audio ! queue
 - `stream-cam01.sh`: `rtpL16depay ! audioconvert ! voaacenc bitrate=32000 ! aacparse !
   audio/mpeg,mpegversion=4,stream-format=raw` → `kvs.audio_0`
 
-**With audio off, both pipelines are byte-for-byte the pre-audio ones.** Turning the
-setting off is a true revert, not a second code path that resembles one — which matters,
-because `cam-01`'s video chain took the `profile=high` bug to get right.
+**With audio off, the pipelines revert — with one deliberate exception.** Turning the
+setting off is a true revert rather than a second code path that resembles one, which
+matters because `cam-01`'s video chain took the `profile=high` bug to get right.
+`publish-cam01.sh` is byte-for-byte what ran before audio existed.
+
+The **producer** scripts (`stream-cam01.sh`, `stream-cam02.sh`, `stream-channel.sh`) are
+no longer byte-for-byte, and on purpose: their video-only branch now links the source's
+audio pad to `fakesink sync=false async=false` instead of leaving it unlinked. MediaMTX
+re-serves the camera's G.711 track whether or not audio is enabled, and an unlinked pad
+can abort the entire pipeline with `not-linked (-1)` when it happens to be exposed before
+the video pad — intermittently, which is why Start appeared to work only every other
+press (`FoundAndFixed.md` #43). The branch is inert when the source carries no audio.
 
 The guide's *original* §18.2 advised bypassing the RTSP hop entirely and going straight to
 `kvssink`. That predates MediaMTX becoming the hub; following it now would cost the local
@@ -293,7 +302,7 @@ single source of truth, both GUIs write the same row.
 |---|---|
 | `audioCapable` | hardware fact, written at registration |
 | `audioEnabled` | the user's choice, **default false** |
-| `audioDevice` | `cam-01`: `hw:CARD=Webcam,DEV=0`. **Optional since device discovery** — `adapter/bin/resolve-usb-camera.sh` finds the capture card at startup, and this field only overrides it when a specific device must be pinned (`LAUNCH.md` A9) |
+| `audioDevice` | `cam-01`: `hw:CARD=Webcam,DEV=0`. **Optional since device discovery** — `adapter/bin/detect-hw.sh` finds the microphone on the camera's own USB device at startup, and this field only overrides it when a specific device must be pinned (`LAUNCH.md` A9). The override is **soft**: if the pinned card is not present it is ignored and discovery wins, because ALSA card ids are not stable identities (a second webcam's mic becomes `Webcam_1` in plug-in order) and a stale pin would otherwise take cam-01's *video* down with it — one pipeline carries both tracks |
 | `audioCodec` | `PCM` / `PCMA` — picks the depayloader |
 
 `adapter/bin/camera-audio.py` prints shell-sourceable env; the pipeline scripts `eval` it

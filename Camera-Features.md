@@ -54,12 +54,55 @@ recording); Media streaming supports RTP multicast, RTP/TCP and RTP/RTSP/TCP.
 | `MainStream` | H.264 **2560×1440** @ 15 fps, 3000 kbps configured | G.711 64 kbps | no |
 | `SubStream` | H.264 **640×360** @ 15 fps, 500 kbps configured | G.711 64 kbps | **yes** (`cam-02` ingests this) |
 
+---
+
+## cam-01 — AVerMedia PW310 (USB), for comparison
+
+Not an ONVIF camera, so none of the above applies to it; it is included because the same
+"verified vs advertised" question has a much better answer here. V4L2 controls are
+enumerated by the driver, so what a camera reports **is** what it accepts — the gaps in a
+menu are not options, and `auto_exposure=0` or `2` on this camera returns `Invalid
+argument`. Everything below was read from the device, not from a datasheet, with
+`adapter/usb_camera.py` (guide §22.3).
+
+| | |
+|---|---|
+| Capture formats | **MJPG** and **YUYV**, 13 resolutions each, 160×120 → 1920×1080 |
+| In use | MJPG 1280×720 @ 30 → published at 15 fps (MJPG carries far more pixels per USB byte) |
+| Exposure modes | **exactly two**: `1 Manual`, `3 Aperture Priority`. No shutter priority, no full auto |
+| `exposure_time_absolute` | 50–10000, in **100 µs** units (250 = 25 ms) |
+| Gain / ISO | **none** — exposure time is the only sensor-side brightness control |
+| Other controls | brightness, contrast, saturation, gamma, sharpness, white balance (auto + temperature 2800–6500), focus (auto + absolute 0–1024), backlight compensation, power line frequency, pan/tilt/zoom |
+| Microphone | on the same USB device (interface `.2` against the camera's `.0`); S16_LE/S24_3LE, **stereo only**, 8000–48000 Hz |
+
+Three behaviours worth knowing, all measured:
+
+- **Long exposures cost frame rate**, whatever `exposure_dynamic_framerate` says: 13.6 fps
+  at 250, 12.4 at 800, **2.3 fps at 2500** (and blown out). That matters beyond motion
+  blur — guide §18.3's audio arithmetic is against the *video* frame interval.
+- **In Aperture Priority the reported exposure time is fiction.** It echoes the last value
+  *set*, not what the camera chose: after setting 50 and switching to auto it still read
+  50 while metering independently (image luma 222 → 142 on the switch). A UI must show
+  "Auto", not a number.
+- **The driver clamps rather than refusing.** A requested `white_balance_temperature=99999`
+  came back as 6500. "The write succeeded" does not mean "the value took".
+
+> **Codec, as of 2026-09-26: this camera is set to H.265, not H.264.** The table above
+> records what the profiles were configured to when they were surveyed; the encoder is
+> switchable and was switched. Both streams follow the camera's own setting, and this
+> repository follows the camera — see guide §21. The registry's `videoCodecCaps` for this
+> camera (`{"h265": "camera", "h264": "camera"}`) was written by the successor
+> repository's ONVIF Media2 probe, which is not ported here, so treat it as a snapshot.
+> `videoCodecActive` *is* maintained here, by the producer, from what MediaMTX receives.
+
 Both profiles carry a `VideoAnalyticsConfiguration` (`VideoAnalyticsName`).
 
 **Audio is now optional and off by default** (guide §18). When enabled for a camera,
 `stream-cam02.sh` depayloads the G.711 track and transcodes it to AAC; when disabled, the
-pipeline is byte-for-byte the video-only one and the audio track stays discarded on the
-wire as before.
+track is discarded — but explicitly, into a `fakesink`, not by being left unlinked. This
+camera always sends G.711 and MediaMTX always re-serves it, and an unlinked pad can abort
+the whole pipeline with `not-linked (-1)` depending on which pad appears first
+(`FoundAndFixed.md` #43).
 
 Four facts about this camera's audio that cost real debugging time:
 

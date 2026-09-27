@@ -9,13 +9,14 @@ material, not a build sequence.
 > docs.** It was written against `Demo-AWS-Video-MCh-15.md`, which
 > `Demo-AWS-Video-revCosts4.md` has since superseded; the §-numbers below still resolve,
 > because the two guides share their numbering, but the *state of the world* has moved on
-> in three places, each flagged in the text:
+> in four places, each flagged in the text:
 >
 > | Section | Then | Now |
 > |---|---|---|
 > | §1 MediaMTX | run by hand with `&`, a unit "to add later" | `kvs-mediamtx.service`, `LAUNCH.md` Part B |
 > | §2 WS-Discovery | "not implemented", a roadmap item | built and shipped — `adapter/onvif_discovery.py` + the local admin GUI |
 > | §3 VLANs | no VLAN, one flat network | **unchanged** — still the open item it describes |
+> | §4 H.264 vs H.265 | "both channels pinned to H.264", a migration to weigh | shipped — `cam-02` runs H.265, guide §21. One of §4's migration steps was also **wrong**; corrected in place below |
 >
 > The analysis in each section is what it was for, and still stands. `LAUNCH.md` is
 > authoritative for anything you actually run, `COSTS-1.4.md` for any figure, and
@@ -324,6 +325,14 @@ FritzBox 7583 ──(WLAN, trusted)── Pi wlan0   (AWS: MQTT, KVS — outboun
 
 ## 4. Codec choice: H.264 vs H.265, per camera
 
+> **This shipped on 2026-09-26/27 — read §4 for the reasoning, not for the state.**
+> `cam-02` streams H.265 end to end (producer → KVS → browser), passthrough producers pick
+> their depayloader from what MediaMTX is actually receiving, and clips spanning a codec
+> switch are split rather than lost. **Guide §21 (Appendix D) is authoritative**, with the
+> measurements in `measurements/codec-phase0.md`. Two things below are now false rather
+> than merely dated: the "both channels are pinned to H.264" premise, and migration step 3
+> — see the correction there.
+
 ### Current state
 
 Both channels are pinned to H.264 today, confirmed in the actual code, not just the
@@ -393,11 +402,14 @@ rather than assuming — in keeping with the main doc's "measure, don't assert" 
    expose them as separate profiles/paths).
 2. `stream-cam02.sh`: swap `rtph264depay ! h264parse` → `rtph265depay ! h265parse`, caps
    to `video/x-h265`.
-3. `MediaType` is set at KVS stream creation and can't be changed on an existing stream —
-   `cam-02`'s current stream (`stream/cam-02/1788026766462`, referenced in
-   `cloud/iam/clip-to-s3-policy.json`, `cloud/iam/get-hls-url-policy.json`,
-   `cloud/iam/kvs-producer-policy.json`) would need to be deleted and recreated with
-   `MediaType="video/h265"`, and those IAM policy ARNs updated to the new stream ARN.
+3. ~~`MediaType` is set at KVS stream creation and can't be changed on an existing
+   stream~~ — **wrong, and the most consequential error in this section.** `UpdateStream`
+   changes `MediaType` on a live stream: `adapter/bin/stream-codec.py` does exactly that at
+   producer start, and `cam-02` kept its stream, its ARN and its whole archive across the
+   move to H.265. Nothing was deleted or recreated, and no IAM policy needed editing —
+   those ARNs are wildcards now anyway (`stream/cam-*/*`, `FoundAndFixed.md` #41). Had this
+   step been believed, a working archive would have been destroyed to achieve something an
+   API call does in place.
 4. Verify the producer SDK build actually has HEVC support compiled in before touching
    AWS — `gst-inspect-1.0 kvssink` and check its accepted caps — same discipline as the
    main doc's §2.6 ("verify before touching AWS").

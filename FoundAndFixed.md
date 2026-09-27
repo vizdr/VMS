@@ -17,19 +17,22 @@ advice (guide §15 "Known traps").
 > Pi, and was brought back here on 2026-09-26. Entries #1–#23 are shared history and were
 > fixed in this repository first. #24–#30 arrived with the path-portability commit.
 > #31, #32, #35, #36, #37, #39 and #40 were verified as live defects *here* and fixed
-> here on 2026-09-26 — each with the verification recorded in the entry.
+> here on 2026-09-26 — each with the verification recorded in the entry. #41–#45 were found
+> in the successor while it grew H.265 support, and were likewise verified as live here
+> before being fixed here, on 2026-09-26. **#46 was found here**, by verifying #44's fix
+> against this Pi rather than assuming it transferred — on its own, it did not.
 >
-> **Two entries describe fixes this repository has NOT taken**, and say so in place:
 > **#25**'s deployment-identity config layer (`adapter/config.py`,
-> `/etc/adapter/adapter.env`) exists only in the successor; this repository still carries
-> AWS identifiers as literals. **#31**'s password rotation is outstanding in both, since
-> the credential is in shared git history.
+> `/etc/adapter/adapter.env`) was ported into this repository the same day and is no longer
+> successor-only. **#31**'s password rotation is the one fix still outstanding in both
+> repositories, since the credential is in shared git history.
 
 ---
 
 ## Overview
 
-40 defects, from the first build (2026-08-20) to the move onto a second Pi (2026-09-24/25).
+50 defects, from the first build (2026-08-20) to making the USB camera swappable
+(2026-09-27).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -73,6 +76,16 @@ advice (guide §15 "Known traps").
 | 38 | Instructions that failed when followed literally (docs consistency review) | docs | 2026-09-25 | fixed |
 | 39 | Outage supervisor crash-looped on a Pi without the USB stick | outage buffer | 2026-09-25 | fixed |
 | 40 | cam-01 never published: `gstreamer1.0-rtsp` missing from the setup lists | docs / setup | 2026-09-25 | fixed |
+| 41 | `cloud/iam/` policy files had drifted from the deployed policies | IAM / docs | 2026-09-26 | fixed |
+| 42 | cam-01 dead after a reboot: camera not yet enumerated, and nothing retried | systemd / boot | 2026-09-26 | fixed |
+| 43 | A camera played only after several Start/Stop/Reload rounds | pipeline / client | 2026-09-26 | fixed |
+| 44 | A producer stopped for good whenever MediaMTX closed its session | systemd / pipeline | 2026-09-26 | fixed |
+| 45 | Manual recording without footage returned a raw AWS 500, not the intended 503 | lambda | 2026-09-26 | fixed |
+| 46 | The producer did not exit at all on EOS — it hung `active`, uploading nothing | pipeline / systemd | 2026-09-26 | fixed |
+| 47 | The LAN admin GUI timed out in a browser while answering instantly on the Pi | network / Wi-Fi | 2026-09-27 | fixed |
+| 48 | Deploying from this repo overwrote the successor's live Lambda and client | process / deployment | 2026-09-27 | fixed |
+| 49 | Automatic rollback could not roll back — the backup list was read too late | admin GUI | 2026-09-27 | fixed |
+| 50 | MediaMTX reported a path `ready` while no media flowed at all | admin GUI / verification | 2026-09-27 | fixed |
 
 ### What they have in common
 
@@ -768,3 +781,445 @@ nothing about that component.
 `gst-inspect-1.0 rtspclientsink` in A3's proof. Verified: publisher `active` with a stable
 restart count, MediaMTX `cam01` ready, H.264 High 1280×720, decoded frame correct.
 
+
+---
+
+## Ported from the successor's codec work (2026-09-26)
+
+These five were found in `VideoSafeZone` while it was adding H.265 support, and every one
+of them was a live defect here too — this repository shares the code they are in. Each was
+re-verified against *this* Pi and account before being fixed, so the evidence below is
+local, not quoted; where the successor's fix was larger than what applies here (its H.265
+depayloader factoring, its codec-boundary clip split) only the part that applies was taken.
+
+### #41 — `cloud/iam/` policy files had drifted from the deployed policies
+
+**Found:** 2026-09-26, porting the successor's finding. **Referenced from:** guide §8.1,
+CLAUDE.md, `cloud/iam/check-drift.sh`.
+
+Every document in `cloud/iam/` was diffed against the policy actually attached to its role.
+Three had drifted and two deployed policies had no file at all:
+
+| File | Repo said | AWS actually has |
+|---|---|---|
+| `kvs-producer-policy.json` (`KVSAdapterRole/KVSProducer`) | one statement: 4 KVS actions on `stream/cam-01/*` + `stream/cam-02/*` | three: 6 KVS actions (incl. `CreateStream`, `UpdateStream`) on `stream/cam-*/*`, DynamoDB `cameras` read/write, `iot:Publish` on `adapter/adapter-01/event` |
+| `get-hls-url-policy.json` | cam-01's and cam-02's exact stream ARNs, creation timestamps and all | `stream/cam-*/*` |
+| `clip-to-s3-policy.json` | the same two exact ARNs | `stream/cam-*/*` |
+| — | missing | `CamerasRegistryRead` — `GetItem` on `cameras`, attached identically to four Lambda roles |
+| — | missing | `ListCamerasAccess` — `Scan` on `cameras` |
+
+The account was right and the repo was wrong: the policies were widened in place as GUI
+registration, the registry and event publishing were added. Nothing fails at runtime, which
+is exactly why it survived — but the files are what a reviewer reads, and read literally
+they contradict the architecture. `CLAUDE.md` says the `stream/cam-*/*` wildcard exists
+*specifically* so a camera added through the admin GUI needs no IAM edit; the file said
+every new camera needs one. A rebuild on a fresh account from `cloud/iam/` would have
+produced an adapter unable to create a stream, read the registry or publish a detection,
+and Lambdas that served nothing after `cam-02`. The ten other files, the IoT thing policy
+and the IoT rule matched. `client-bucket-oac-policy.json` differs from the live bucket
+policy by design — it is the target of §8.5.1's pending CloudFront cutover.
+
+**Fix:** the three files rewritten from the deployed documents and the two missing ones
+added (`cameras-registry-read-policy.json`, `list-cameras-policy.json`). Because the root
+cause is that nothing ever checks, this repository also carries
+**`cloud/iam/check-drift.sh`**: it compares all 14 documents against the attached policies
+semantically (statement, action and resource sets — not key order or whitespace), exits
+non-zero on any difference, and `--pull` rewrites the files from AWS. Guide §8.1 and
+CLAUDE.md now say the directory is documentation, not a deployment mechanism, and to run
+the checker after any `put-role-policy`. Verified: all 14 report `ok` / "no drift", and a
+deliberately mangled resource ARN is reported and exits 1.
+
+### #42 — cam-01 dead after a reboot: camera not yet enumerated, and nothing retried
+
+**Found:** 2026-09-26, porting the successor's finding. **Referenced from:**
+`adapter/bin/detect-hw.sh`, LAUNCH.md A8 (`kvs-camera-init`, `kvs-camera-publish`).
+
+> The script named below, `adapter/bin/resolve-usb-camera.sh`, was retired on 2026-09-27
+> and replaced by `adapter/bin/detect-hw.sh` (the successor's version, ported whole). The
+> wait this entry added survives in `camera_setup`; what changed is that ambiguity is now
+> an error rather than a first-match guess, and the microphone is matched by USB parent.
+
+The successor hit this as "I cannot watch cam01 in the web GUI" after a reboot: the kernel
+enumerated the PW310 at 10:01:17, the user manager started `kvs-camera-init` at 10:01:26,
+and the `/dev/v4l/by-id/` link did not exist yet. This repository had all three
+preconditions for the identical failure:
+
+- `resolve-usb-camera.sh` sampled the device list exactly once — 0 waits, 0 retries — so
+  `camera-init.sh` exits 1 on `${CAM_DEVICE:?no capture-capable video device found}`;
+- `kvs-camera-init.service` was `Type=oneshot` with no `Restart=`, so one miss left it
+  `failed` permanently;
+- `kvs-camera-publish.service` had `Requires=kvs-camera-init.service`, and **a start job
+  that fails on a dependency is never retried**, whatever the unit's own
+  `Restart=on-failure` says. cam-01 is then simply absent from both GUIs, and Start in the
+  GUI sits at "Connecting to rtsp://127.0.0.1:8554/cam01" forever, because MediaMTX has no
+  `cam01` path to serve.
+
+Nothing about this is specific to the discovery code that replaced the hardcoded by-id
+path (#25's portability work) — the hardcoded path would have lost the same race. It is a
+cold-boot ordering race: user units start when `default.target` is reachable, and USB
+enumeration is not part of that ordering.
+
+**Fix, the successor's three layers:** `resolve-usb-camera.sh` waits up to
+`CAMERA_WAIT_SEC` (default 30 s, `0` disables) for a capture-capable device to *appear*,
+re-scanning every second and saying on stderr that it is waiting and how long it waited;
+ambiguity still fails immediately, since waiting cannot resolve "which of two cameras".
+A short 2 s grace follows for the ALSA capture card, and only if the video node did appear
+late — a camera with no microphone is normal and must not cost every start a fixed delay.
+`kvs-camera-init.service` gains `Restart=on-failure` / `RestartSec=10`, and
+`kvs-camera-publish.service` now only `Wants=` it, keeping `Requires=` on MediaMTX alone:
+a failed exposure lock degrades to an auto-exposed picture, which must never be a reason
+to have no video at all. Verified here with a stubbed `v4l2-ctl` that reports no formats:
+the resolver waits the full budget, logs "still no capture device after 3s -- giving up",
+emits no `CAM_DEVICE` (so `camera-init.sh` still fails loudly rather than guessing), and
+costs 0.03 s when the camera is present. `systemd-analyze --user verify` is clean on both
+units and `systemctl show` confirms `Restart=on-failure` on the oneshot and
+`Wants=`/`Requires=` split on the publisher. LAUNCH.md A8's generator emits both changes,
+since the unit files are not in git.
+
+### #43 — A camera played only after several Start/Stop/Reload rounds
+
+**Found:** 2026-09-26, porting the successor's finding. **Referenced from:**
+`adapter/bin/stream-cam01.sh`, `stream-cam02.sh`, `stream-channel.sh`,
+`client/index.html` (`cmd()` / `startPoll()` / `load()`), AUDIO.md, CLAUDE.md.
+
+Two independent faults, either one enough to leave the player on "Could not load stream /
+Press Start to begin":
+
+1. **The client looked once, too early.** `cmd('start')` ran
+   `setTimeout(() => load(camera), 8000)` — a single attempt, 8 s after the API returned.
+   KVS serves LIVE HLS only once a fragment is *complete*, and a fragment closes on the
+   next keyframe, so the wait is the MQTT round-trip plus `systemctl start` plus kvssink's
+   connect plus the camera's own GOP. The successor measured the first `PERSISTED` ack at
+   **9.3–10.1 s** after Start for cam-02, whose 3 s keyframe interval is camera-side and
+   not ours to shorten. The 8 s look therefore got a 503 and never tried again, and the
+   error text invited precisely the Stop/Start/Reload dance. cam-01 escapes because its
+   encoder's GOP is ours (`h264_i_frame_period=30`) and short.
+2. **The video-only pipelines left the audio pad unlinked.** `rtspsrc ! rtph264depay` links
+   the video pad only; the camera always sends a G.711 track and MediaMTX re-serves it
+   whether or not `audioEnabled` is set. In 2 of 5 Starts the successor observed the audio
+   pad appear *first* (10:57:03.766, video at .826) and rtspsrc stop the whole pipeline
+   15 ms after the video linked: `Internal data stream error … streaming stopped, reason
+   not-linked (-1)`. systemd restarted it 5 s later, pushing the first fragment out to
+   ~20 s — far past any single look. A pure pad-ordering race, which is why 16 controlled
+   runs never reproduced it and why it looks like a flaky camera.
+
+**Fix:** the video-only branch of `stream-cam01.sh`, `stream-cam02.sh` and the template's
+`stream-channel.sh` now names the source `src` and links
+`application/x-rtp,media=audio` to `fakesink sync=false async=false`, so no pad can ever
+report `not-linked`; the branch is inert when the source genuinely has no audio track. This
+is the one place where the audio work's "video-only is byte-for-byte the pre-audio
+pipeline" promise is deliberately broken, and the comments in all three scripts say so
+rather than leaving a reader to discover it. `stream-channel.sh` matters most, since the
+camera behind a `kvs-cam@` instance is unknown when the script is written. Client side,
+`startPoll()` replaces the single timeout: `load()` now returns whether it got a session
+URL, the first look is at 5 s, it re-polls every 3 s to a 45 s ceiling behind a "Waiting
+for the first video from the camera… (up to N s more)" overlay that counts down, and Stop
+or a second Start cancels it (`cancelStartPoll()`). Verified: all three scripts parse
+(`bash -n`) and the client parses and exposes both new functions under headless Chromium,
+deployed to CloudFront (`x-cache` confirming the new copy is served).
+
+### #44 — A producer stopped for good whenever MediaMTX closed its session
+
+**Found:** 2026-09-26, porting the successor's finding. **Referenced from:**
+`adapter/bin/producer-lib.sh`, `stream-cam01.sh`, `stream-cam02.sh`, `stream-channel.sh`.
+
+Every producer ended in `exec gst-launch-1.0 …`, so gst-launch's exit status *was* the
+unit's. When MediaMTX restarts a path it closes that path's readers, and rtspsrc reports
+that as a clean end of stream: `The server closed the connection.` → `Got EOS from element
+"pipeline0"` → exit 0 → systemd `Deactivated successfully`. `Restart=on-failure` does not
+restart a clean exit, so the cloud stream stays down while the unit looks exactly like a
+user Stop — `inactive`, `Result=success`, `NRestarts=0`, and "inactive" in both GUIs.
+
+The successor found it switching a camera's encoder codec mid-stream, but the trigger is
+not codec-specific: MediaMTX closes a path's readers whenever its source goes away or
+changes. That covers a camera dropping off the LAN, a re-registration that moves the source
+URI, and a restart of `cam-01`'s own publisher — all of which happen here. It is silent
+because the failure looks like success at every layer, which is the same trap CLAUDE.md
+already warns about for `is-active`.
+
+**Fix:** `producer_run` in the new `adapter/bin/producer-lib.sh` replaces `exec` at all
+five call sites. It runs the pipeline, and treats *any* return as failure: it logs
+`<label>: pipeline ended (source closed the session) -- exiting non-zero so systemd
+restarts it` and exits 1, so the existing `Restart=on-failure` / `RestartSec=5` takes over.
+A real Stop never reaches that line, because systemd signals the whole unit. The
+`gst-launch-1.0` argument lists are unchanged token for token. The successor's
+`video_depay_chain` helper was deliberately **not** taken: it exists for its H.265
+selection work and would be dead code here.
+
+**This fix alone turned out not to be enough on this Pi** — verifying it revealed that
+`gst-launch` does not exit here at all, so there is no status for `producer_run` to
+convert. See **#46**, found by that verification; `producer_run` carries both halves.
+
+### #45 — Manual recording without footage returned a raw AWS 500, not the intended 503
+
+**Found:** 2026-09-26, porting the successor's finding. **Referenced from:**
+`cloud/lambda/record_clip.py`; `get_hls_url.py` carries the same lesson in a comment.
+
+`record_clip.py` meant to answer "no footage found for that time range -- was the stream
+live throughout?" with a 503 when KVS had nothing for the requested window. It caught
+`kv.exceptions.ResourceNotFoundException` — but `GetClip` is called on the
+`kinesis-video-archived-media` client, and **boto3 builds a separate exception class per
+client from that client's own service model**, so the two names are unrelated classes and
+the handler never matched. Every such request fell through to the generic handler as an
+HTTP 500 carrying raw AWS text. The file even had a comment explaining why `kv` was
+created outside the `try` block — careful reasoning about a clause that could not fire.
+`get_hls_url.py` had the identical fault and was fixed there earlier with an explanatory
+comment, but the fix was never recorded, so the pattern survived next door: a good argument
+for this inventory existing at all.
+
+**Fix:** match on the error *code* — `except ClientError` with
+`e.response["Error"]["Code"] == "ResourceNotFoundException"` — so the check no longer
+depends on which client raised it; any other `ClientError` still returns 500. Deployed and
+verified against the live function: an empty window on `cam-02` now returns
+`503 {"error": "no footage found for that time range -- was the stream live throughout?"}`.
+`clip_to_s3.py` needs no equivalent change — it is triggered by an IoT Rule with no caller
+waiting, and deliberately logs and re-raises so the rule's error action sees the failure;
+the successor's `no_fragments()` helper there belongs to its codec-boundary clip split.
+
+---
+
+## Found while verifying the port (2026-09-26)
+
+### #46 — The producer did not exit at all on EOS: it hung `active`, uploading nothing
+
+**Found:** 2026-09-26, verifying #44's fix on this Pi. **Referenced from:**
+`adapter/bin/producer-lib.sh`, LAUNCH.md A8 (`kvs-cam01`, `kvs-cam02`, `kvs-cam@`).
+
+#44 says MediaMTX closing a reader makes gst-launch exit 0, which `Restart=on-failure`
+ignores, and its fix turns any return into a non-zero exit. Testing that here — start
+`kvs-cam01`, then kick its reader session through MediaMTX's API
+(`POST /v3/rtspsessions/kick/<id>`), which is the same event as a camera dropping off the
+LAN — showed the premise does not hold on this machine. There was no return to convert:
+
+```
+22:18:28  rtspsrc: The server closed the connection.
+22:18:30  kvssink: INFO - EOS Event received in sink for cam-01
+22:19:07  WARN - curlCompleteSync(): [cam-01] curl perform failed ... Operation too slow.
+                 Less than 30 bytes/sec transferred the last 30 seconds
+22:19:07  WARN - putStreamCurlHandler(): [cam-01] Stream with streamHandle ... has exited
+                 without triggering end-of-stream. Service call result: 599
+```
+
+kvssink took the EOS, its `PutMedia` connection then starved because no frames were
+arriving, and the SDK sat in that state. The process was still alive **4+ minutes** later:
+`ActiveState=active`, `SubState=running`, `NRestarts=0`, `Result=success`, zero
+`PERSISTED` acks since the kick. That is strictly worse than the bug #44 describes — an
+`inactive` unit at least *looks* stopped, whereas this one reports itself as streaming in
+both GUIs and in `systemctl status`, which is precisely the "`is-active` is not proof"
+trap CLAUDE.md warns about, this time with the unit telling the truth about itself and
+lying about the stream.
+
+**Fix:** `producer_run` no longer just inspects the exit status, it watches the output.
+gst-launch's stdout and stderr go through a named pipe that the function reads line by
+line, forwarding every line to the journal and matching each against
+`PRODUCER_FATAL_PATTERNS` — rtspsrc's `The server closed the connection.` and kvssink's
+`EOS Event received in sink` / `Got EOS from element`. On a match it `kill -9`s the
+pipeline (SIGTERM would wait for the very teardown that is wedged), stops reading rather
+than waiting for EOF, and exits 1 so `Restart=on-failure` takes over.
+
+Three mechanisms were tried before the pipe, and the discarded ones are worth recording
+because each looks right:
+
+- `gst-launch … | while read` puts the loop in a subshell, where `$!` is not the pipeline
+  and cannot be killed;
+- `coproc NAME cmd` in its **simple-command** form silently sets neither `NAME` nor
+  `NAME_PID` (bash honours the name only for a compound command), so the read fails with
+  "Bad file descriptor";
+- `coproc NAME { cmd; }` works, but `$NAME_PID` is a wrapper subshell — killing it would
+  orphan the real gst-launch and leave a second producer on the same KVS stream after the
+  restart.
+
+Two smaller traps came out of the same work. Waiting for the pipe to reach EOF reintroduces
+the hang, because EOF needs *every* writer to close and anything the pipeline leaves behind
+holding that descriptor blocks the loop forever — so the loop breaks on the match instead.
+And the FIFO cannot clean itself up: a Stop kills the cgroup without unwinding the
+function, while trapping `TERM` to remove the file makes the script exit on its own terms
+during a stop, which systemd then records as a **failed** unit (observed). The pipe
+therefore lives in `$RUNTIME_DIRECTORY` — `RuntimeDirectory=vms-producer` on all three
+producer units, so systemd creates `/run/vms-producer` owned by the unit's `User=` and
+deletes it on stop.
+
+**Verified end to end on cam-01:** kick → `pipeline ended (status 137, killed by the
+watchdog)` → `Scheduled restart job, restart counter is at 1` → running again 5 s later →
+`PERSISTED` acks resume → cloud HLS through `get-hls-url` decoded to a frame (H.264 High
+1280×720, the on-screen clock reading the capture minute). A normal Stop still gives
+`Result=success` with the unit `inactive`, no orphan `gst-launch`, and `/run/vms-producer`
+removed. Stub pipelines that exit 0, exit non-zero, or hang after printing a fatal line all
+end in exit 1 — the hanging one within 1 s.
+
+---
+
+## Shared account and shared air (2026-09-27)
+
+### #47 — The LAN admin GUI timed out in a browser while answering instantly on the Pi
+
+**Found:** 2026-09-27, "Local Admin can not be launched — `Netzwerk-Zeitüberschreitung`,
+the server at 192.168.178.53:8080 is taking too long to respond." **Referenced from:**
+LAUNCH.md Part B, README (install).
+
+On the Pi the same URL answered **200 in 5–19 ms**, both on loopback and on its own LAN
+address, and `onvif-admin.service` was `active` with python3 listening on `0.0.0.0:8080`.
+Nothing in the app was wrong. Meanwhile outbound traffic was perfect: cam-01 was pushing
+15–19 `PERSISTED` fragments per 30 s to KVS, and `GetHLSStreamingSessionURL` returned a
+playable stream whose decoded frame showed the current wall clock.
+
+That asymmetry is the whole diagnosis — **outbound fine, inbound dead**:
+
+```
+iw dev wlan0 get power_save   ->  Power save: on
+iw dev wlan0 link             ->  signal: -72 dBm
+ip -br link show eth0         ->  DOWN  (no carrier: the Pi is on Wi-Fi only)
+```
+
+With Wi-Fi power save on, the radio sleeps between beacons. Traffic the Pi *initiates*
+keeps it awake and behaves normally, but a TCP SYN arriving from a laptop hits a sleeping
+station and is dropped or delayed past the browser's patience — at −72 dBm, often enough
+to look like the service is down. This project is outbound-only by design, so the admin
+GUI is the *only* thing that ever accepts an inbound connection: it is the single
+component this setting can break, and every check that runs on the Pi says it is healthy.
+
+**Fix:** power save disabled at runtime (`iw dev wlan0 set power_save off`) and persisted
+in NetworkManager, which owns this connection, so it survives a reboot:
+
+```bash
+sudo nmcli connection modify "<SSID>" 802-11-wireless.powersave 2   # 2 = disable
+sudo iw dev wlan0 set power_save off                                # take effect now
+```
+
+Verified: `Power save: off`, the setting reads back as `2 (disable)`, and the GUI answers
+200 in 6–19 ms. A wired `eth0` would also sidestep it; the Pi has no carrier on eth0 today.
+
+### #48 — Deploying from this repo overwrote the successor's live Lambda and client
+
+**Found:** 2026-09-27, investigating "streaming does not work at all on both cameras".
+**Referenced from:** CLAUDE.md ("Deploying a Lambda", "Deploying the browser client"),
+guide §8.
+
+`GET /cameras` came back carrying `videoCodec`, `videoEncode` and `videoCodecActive` —
+fields that do not exist anywhere in this repository. The `cameras` row for cam-02 read
+`videoCodec: h265`, `videoCodecActive: h265` since `2026-09-26T16:41:13Z`. **Both
+repositories deploy into the same AWS account** (596633517506), and the successor had
+moved the account on to its H.265 generation that afternoon:
+
+| Function | Last deployed | By |
+|---|---|---|
+| `list-cameras` | 2026-09-26 12:55 | successor (H.265 fields) |
+| `get-hls-url` | 2026-09-26 12:55 | successor |
+| `clip-to-s3` | 2026-09-26 16:52 | successor |
+| `record-clip` | **2026-09-26 20:00** | **this repo (#45)** |
+| `index.html` | **2026-09-26 20:03 UTC** | **this repo (#43a)** |
+
+So porting #43a and #45 back into *this* repo and deploying them — the ordinary,
+documented one-line deploy in CLAUDE.md — silently replaced the two newest artifacts of
+the *other* repo with pre-H.265 versions. The client bucket has versioning disabled, so
+the overwritten `index.html` is not recoverable from S3; it has to be redeployed from the
+successor working tree. Nothing errors, nothing logs: the deploy commands are idempotent
+and neither names a repository, so the collision is invisible at the moment it happens and
+surfaces later as "the cameras stopped working".
+
+The docs made this easy to walk into. CLAUDE.md gives a copy-paste deploy line for each
+Lambda and for the client with no mention that the target is shared, and the AWS account
+identifiers are literals in both repositories, so there is no point at which the two
+diverge on their own.
+
+**Fix (process, since the code was correct):** CLAUDE.md's two deploy sections now open
+with the warning that the account is shared with `VideoSafeZone` and that a deploy from
+here overwrites whatever that repo last deployed — check `LastModified` first
+(`aws lambda get-function-configuration --function-name <fn> --query LastModified`, and
+`aws s3api head-object --bucket vms-demo-client-596633517506 --key index.html`) and
+coordinate, because the client bucket keeps no versions. The mirror image is equally true
+and equally silent: a deploy from the successor overwrites anything deployed from here.
+**Restored**, 2026-09-27, from the successor's `master`: what the overwrite had cost was
+`record_clip.py`'s codec-split clip windows and MP4 codec sniffing — material now that
+cam-02 is H.265, since KVS refuses a clip whose fragments change codec, so a recording
+spanning the switch was being lost whole — and the client's HEVC capability detection,
+without which an H.265 camera simply looks broken in a browser that cannot decode it.
+Verified: the live `record-clip` contains `codec_windows`/`mp4_video_codec` and still
+answers an empty window with the #45 503; CloudFront serves a copy byte-identical to the
+successor's `index.html` (md5) carrying `hevcSupport`/`hevcNote`.
+
+The two trees were then reconciled rather than left to collide again: `client/index.html`
+and the five `cloud/lambda/` files that had diverged (`clip_to_s3`, `get_hls_url`,
+`list_cameras`, `list_clips`, `record_clip`) were synced from the successor, after checking
+that theirs carries everything this repo had — the outage-buffer UI, the audio section and
+live-listen, the recording modes, and #43a's post-Start retry (implemented there as
+`liveWaitUntil`, which additionally explains a missing HEVC decoder instead of retrying at
+it). All twelve deployed functions and the client are now byte-identical to this repo, so a
+deploy from either tree is a no-op rather than a silent revert. The deploy warnings in
+CLAUDE.md stay: the account is still shared, and the next divergence starts the same way.
+
+---
+
+## Making the USB camera swappable (2026-09-27)
+
+Both of these were found by testing the safety net rather than by reading it, and each one
+defeated that net in a different way. They are recorded although they never reached a
+commit, for the reason #39 was: the failure was real on the running Pi, and the lesson is
+about what counts as proof, not about a typo.
+
+### #49 — Automatic rollback could not roll back: the backup list was read too late
+
+**Found:** 2026-09-27, the first live test of "apply a configuration the camera cannot
+satisfy". **Referenced from:** `adapter/onvif-admin/app.py` (`_apply_and_verify`), guide
+§22.5.
+
+Applying a camera configuration from the admin GUI writes
+`/etc/adapter/cameras/cam01.env`, restarts the camera and waits for video. If video does
+not come back it is supposed to restore the configuration it displaced — which matters
+more than it sounds, because every setting in that file feeds the single pipeline that
+carries cam-01's video, so a resolution the camera does not offer does not degrade the
+stream, it removes the camera.
+
+The test — `CAPS=image/jpeg,width=9999,height=9999` — produced:
+
+```
+{"ok": false, "rolledBack": false,
+ "error": "no video within 30s and no backup to roll back to -- the camera is
+           left with the new settings"}
+```
+
+There was a backup; the code could not see it. `_apply_and_verify()` listed the existing
+backups to work out afterwards which one it had just displaced, but the write had already
+happened by then — `configure-camera.sh apply` creates the backup as part of writing, so
+the "before" list already contained it and the difference came back empty. The camera was
+left broken and had to be recovered by hand from a terminal, which is precisely the
+situation the feature exists to prevent: the person who makes this mistake in a browser is
+the person who cannot fix it from there.
+
+**Fix:** the write moved *inside* `_apply_and_verify`, so the list is taken before it
+happens. Verified by re-running the same impossible configuration: no video in 30 s → the
+previous file restored → video back, and the restored file byte-identical to the one
+saved before the test. The revert path had the same shape of bug and was fixed in the same
+pass (`configure-camera.sh` now stages the chosen backup to a temp file before backing up
+the current one; two backups inside the same second also collided, so names now take a
+`-2` suffix — found because reverting restored the configuration it had just replaced).
+
+### #50 — MediaMTX reported a path `ready` while no media flowed at all
+
+**Found:** 2026-09-27, recovering the camera after #49. **Referenced from:**
+`adapter/onvif-admin/app.py` (`_camera_is_live`), guide §22.5, CLAUDE.md.
+
+The first version of the apply check asked MediaMTX whether the path was ready:
+
+```python
+if st.get("ready") and st.get("tracks"):   # not proof
+```
+
+While recovering from #49, `GET /v3/paths/get/cam01` returned `"ready": true` with
+`"tracks": ["H264"]` — and nothing was arriving. `ffprobe` reported `width=0 height=0`,
+and `ffmpeg` refused outright: *"Output file does not contain any stream"*. The publisher
+had connected to MediaMTX and declared its tracks, then stalled; `ready` describes that
+handshake, not the flow of media. So the check would have called a dead camera healthy,
+and — worse than useless — it would have reported success for exactly the broken
+configurations rollback exists to catch.
+
+This is `systemctl is-active` one layer further in. CLAUDE.md already warns that a unit
+can be `active` while a stream is dead; the same is true of a media server's own readiness
+flag, and for the same reason: both describe a state that was entered, not work being
+done.
+
+**Fix:** require MediaMTX's `bytesReceived` counter to **advance** — sample it, wait, and
+only accept the camera as live when the number has grown. Measured at ~380 KB per 3 s on
+cam-01, so the signal is unambiguous. Verified in both directions: a valid change reports
+success in 4.6 s, and the impossible one now fails and rolls back rather than being
+declared fine.

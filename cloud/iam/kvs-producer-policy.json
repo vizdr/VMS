@@ -1,16 +1,22 @@
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "kinesisvideo:DescribeStream",
-      "kinesisvideo:GetDataEndpoint",
-      "kinesisvideo:PutMedia",
-      "kinesisvideo:TagStream"
-    ],
-    "Resource": [
-      "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-01/*",
-      "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-02/*"
-    ]
-  }]
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["kinesisvideo:DescribeStream", "kinesisvideo:GetDataEndpoint",
+                 "kinesisvideo:PutMedia", "kinesisvideo:TagStream",
+                 "kinesisvideo:CreateStream", "kinesisvideo:UpdateStream"],
+      "Resource": "arn:aws:kinesisvideo:eu-central-1:596633517506:stream/cam-*/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:UpdateItem"],
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/cameras"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:eu-central-1:596633517506:topic/adapter/adapter-01/event"
+    }
+  ]
 }

@@ -266,7 +266,7 @@ with `ls -l /dev/v4l/by-id/` rather than copying a literal example). Two entries
 UVC metadata/still-image node, not a second video stream.
 
 > **Superseded for the running system, and worth understanding why.** The pipelines no
-> longer hardcode this path: `adapter/bin/resolve-usb-camera.sh` discovers it at startup
+> longer hardcode this path: `adapter/bin/detect-hw.sh` discovers it at startup
 > (`LAUNCH.md` A9). The literal above embeds the camera's **USB serial number**, so it
 > breaks on a *different unit of the same model*, which is exactly what happens when the
 > project is set up on new hardware. `by-path` is serial-free but encodes the physical USB
@@ -1415,6 +1415,23 @@ aws lambda create-function --function-name publish-cmd \
   --handler publish_cmd.lambda_handler --zip-file fileb://publish_cmd.zip \
   --environment "Variables={THING_NAME=adapter-01}" --timeout 10 --region eu-central-1
 ```
+
+> **`cloud/iam/` documents the policies; it does not deploy them.** Nothing reads these
+> files after the `put-role-policy` calls above, so every later widening — and there have
+> been several — happens against the live role and leaves the file behind. Three of them
+> drifted for weeks without a symptom: `get-hls-url-policy.json`, `clip-to-s3-policy.json`
+> and `kvs-producer-policy.json` still named per-stream ARNs with creation timestamps
+> (`stream/cam-01/1787244081283`) long after the deployed policies had moved to the
+> `stream/cam-*/*` wildcard that §16.6 relies on, and two policies attached in production
+> (`CamerasRegistryRead`, `ListCamerasAccess`) had no file at all. The repo therefore said
+> a third camera needs an IAM edit, which is exactly the opposite of the design. Nothing
+> breaks at runtime, which is why it survives: this is a documentation defect with
+> security-review consequences, since the files are what a reviewer reads.
+>
+> `cloud/iam/check-drift.sh` diffs every file against the attached policy (semantically —
+> not on key order or whitespace) and `--pull` overwrites the files from the deployed
+> versions. Run it after any `put-role-policy`, and treat it as the last step of any change
+> that widens a permission. `FoundAndFixed.md` #41.
 
 ### 8.2 Cognito user pool
 
@@ -3130,7 +3147,7 @@ Two corollaries worth internalising:
 Card numbers shift on reboot — `hw:3,0` is not stable.
 
 > The card *name* is not portable either: `hw:CARD=Webcam` is this device's id, not a
-> constant. `adapter/bin/resolve-usb-camera.sh` now derives it at startup by looking for a
+> constant. `adapter/bin/detect-hw.sh` now derives it at startup by looking for a
 > card that has a capture PCM and is not the Pi's onboard audio, so a different microphone
 > works with no edit (`LAUNCH.md` A9). A camera's registry row may still name an exact
 > `audioDevice`, which wins over discovery. The commands below remain the right way to
@@ -3816,3 +3833,429 @@ happens to storage or reads. §9 is the small, safe version of the argument; §1
 full one. Neither replaces KVS entirely — both keep it for what it's actually good at
 (live, low-latency, random-seek access), and route only what benefits from S3's
 economics (durable, cheap, long-lived, sequential archive) away from it.
+
+---
+
+## 21. Appendix D — H.264 or H.265, per camera
+
+A passthrough camera's codec is whatever the camera itself is set to, and the pipeline
+follows it. `cam-02` has been sending H.265 since 2026-09-26; `cam-01` is H.264 and cannot
+be anything else. Nothing on the Pi transcodes video in either direction.
+
+**This repository has the pipeline and the cloud half of the feature, not the switch.**
+Ported from the successor repository (`VideoSafeZone`) on 2026-09-27, together with the
+evidence file `measurements/codec-phase0.md` — commands, numbers and the browser matrix —
+which this section does not repeat. §21.4 lists precisely what was left behind and what
+that costs.
+
+### 21.1 Where the encoding happens decides what can be offered
+
+| Camera | H.264 | H.265 |
+|---|---|---|
+| `cam-01`, USB, encoded on the Pi | **Pi hardware** (`v4l2h264enc`) | **not offered** |
+| ONVIF camera whose encoder offers both (`cam-02`) | camera | camera |
+| ONVIF camera without H.265 | camera | not offered |
+
+**The Pi 4 cannot encode H.265 in hardware.** Its only encode block is H.264
+(`/dev/video11`); `/dev/video19 rpi-hevc-dec` is a *decoder*. GStreamer registers
+`v4l2h265enc` only when an HEVC encoder device exists, and on this Pi it does not.
+
+Software H.265 was measured on the successor's identical hardware and rejected — `x265enc`
+(ultrafast, zerolatency) on real PW310 video could not hold frame rate at 720p:
+
+| `cam-01` encoding | frame rate held | CPU (of 4 cores) |
+|---|---|---|
+| H.264, hardware, 1280×720 @15 | 15 | 0.11 |
+| H.265, x265, 1280×720 @15 | **no — ~9.8 fps** | 3.3 |
+| H.265, x265, 640×360 @15 | 15.4 | 1.55 |
+
+A synthetic `videotestsrc` pattern had suggested ~1 core at 23 fps; real sensor content is
+far harder to encode. Measure a codec change on the camera, never on a test pattern
+(`measurements/codec-phase0.md` §6). There is no software-encode path anywhere in this
+design, so `cam-01` stays H.264.
+
+### 21.2 Producers follow what MediaMTX receives, not the registry
+
+`adapter/bin/stream-codec.py` runs at every passthrough producer start and asks MediaMTX
+which video track is actually arriving, printing `VIDEO_CODEC=h264|h265`.
+`video_depay_chain` in `adapter/bin/producer-lib.sh` turns that into the chain:
+
+```text
+h264: rtph264depay ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au
+h265: rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au
+```
+
+Three properties of this are load-bearing:
+
+- **The wire is the authority.** A camera's encoder is changed *on the camera*, so any
+  registry field describing it can be stale the moment someone opens the camera's own web
+  UI. Reading the live track list means a producer is correct on its next start whatever
+  happened, and it needs no AWS — so a producer still starts while AWS is unreachable,
+  the rule `cam-01` has always lived by.
+- **`stream-format=hvc1` is not optional.** kvssink sends codec private data only from the
+  caps' `codec_data`, and its H.265 pad template pins no stream format, so an Annex-B
+  stream would ingest happily and never play back. This is the same ingest-versus-playback
+  asymmetry §18.1 describes for audio, and the reason H.265 was verified at
+  `GetHLSStreamingSessionURL` and on a decoded frame, never at `PutMedia`.
+- **No source is a deliberate hard failure.** `stream-codec.py` waits up to 30 s and then
+  exits 1, so the unit fails and systemd retries — what a dead source has always meant for
+  a producer.
+
+On a change it also records `videoCodecActive` / `videoCodecActiveSince` in the registry
+and corrects the KVS stream's `MediaType` (`UpdateStream`, so the archive and ARN survive —
+**a stream never has to be recreated for a new codec**). That step is best-effort on an
+8-second budget: AWS can never hold up a start. The producer role needs
+`kinesisvideo:UpdateStream` for it (`cloud/iam/kvs-producer-policy.json`).
+
+**A codec switch while streaming costs ~10 s of cloud video.** MediaMTX closes the
+producer's session when its source changes; the producer then exits and restarts on the new
+codec. That only works because a producer treats *any* end of its pipeline as a failure
+(`producer_run`, `FoundAndFixed.md` #44) and kills a pipeline that hangs instead of exiting
+(#46). The same mechanism covers a camera dropping off the network.
+
+### 21.3 KVS: one codec per session, one codec per clip
+
+KVS plays H.265 — live HLS carries `CODECS="hvc1.1.6.L90.0"` in fMP4 (`get_hls_url.py`
+pins `FRAGMENTED_MP4` explicitly) and `GetClip` returns MP4s tagged `hvc1`. What KVS
+refuses is **mixing codecs in one request**:
+
+| Request spanning a switch | Result |
+|---|---|
+| `GetClip` | `InvalidCodecPrivateDataException: The codec private data is not consistent between all fragments` — the whole clip is lost |
+| ON_DEMAND HLS | playlist lists everything, then HTTP 400 at the first fragment of the new codec |
+| LIVE HLS opened after the switch | plays |
+
+So `record_clip.py` and `clip_to_s3.py` split a window that crosses
+`videoCodecActiveSince` into **one clip per codec**, both labelled `codec-switch`, rather
+than trimming it — no footage is dropped. One side may legitimately be empty (the ~10 s
+restart); only "no footage on either side" is an error. Only the latest switch is recorded,
+so two switches inside one 45 s detection window would still lose that window.
+
+Every clip records its own codec on its `clips` row, read from the MP4's own `moov` sample
+entry (`mp4_video_codec`) rather than from the registry — the two halves of a split differ,
+and the registry only knows the current codec. `moov` only: `ftyp`'s brand list can say
+`avc1` and `mdat` can contain anything.
+
+**Browsers are the real constraint, not KVS.** Chrome decodes HEVC; Firefox and Edge cannot
+without Microsoft's HEVC Video Extensions on Windows. The cloud client therefore probes
+`MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L90.0"')` and explains the
+failure — including a link to the extension — instead of retrying at a stream the browser
+will never decode. An H.265 camera in a browser without a decoder is otherwise
+indistinguishable from a broken camera.
+
+### 21.4 What this repository does *not* have
+
+The successor's camera-side half was deliberately not ported, because nothing here needs
+it to stream:
+
+| Not ported | Consequence here |
+|---|---|
+| `adapter/codec_caps.py` | `videoCodecCaps`, `videoCodecDefault`, `videoEncoderToken`, `videoCodecProbe` are never written or refreshed by this repo. The rows carry values written when the successor ran against this shared table; treat them as a snapshot, not live truth |
+| `adapter/onvif_media2.py` | No ONVIF Media2 client. Media1's encoding enum stops at H.264, so an ONVIF camera's H.265 capability cannot be discovered from here at all |
+| Admin-GUI codec switch (`POST /api/cameras/<id>/codec`) | **The codec cannot be changed from this repo.** Change it in the camera's own web UI (or from the successor's admin GUI); the pipeline then follows it on the producer's next start |
+
+The cloud client displays `videoCodec` / `videoCodecActive` and never sets them, which is
+the successor's design too: codec is a property of a camera on the LAN, and there is
+deliberately no cloud route to it.
+
+One wrinkle worth knowing rather than fixing: registering a camera through the local admin
+GUI still creates its KVS stream with `MediaType="video/h264"`
+(`adapter/onvif-admin/app.py`), because registration happens before anything has seen the
+camera's video. If that camera turns out to send H.265, the label is wrong only until its
+producer first starts — `stream-codec.py` then corrects it with `UpdateStream` (§21.2).
+`MediaType` is consumer metadata and nothing in this system reads it to make a decision, so
+the window is cosmetic; it is called out here so the mismatch is not mistaken for a bug.
+
+---
+
+## 22. Appendix E — The USB camera: detection, configuration and swapping
+
+`cam-01` is the one camera this project owns end to end — the Pi finds it, configures it,
+decodes it and encodes it. Everything about it used to be written into two shell scripts:
+the device path, the capture format, the resolution, the frame rate, the bitrate, the
+keyframe interval and seven v4l2 control values. All of it was true of exactly one
+AVerMedia PW310, so replacing that webcam meant editing scripts.
+
+This appendix covers what changed so a different webcam can be used instead. Built
+2026-09-27 in phases W0–W3; applying a new configuration from the GUI (with backup and
+revert) is W4 and is **not** built yet.
+
+### 22.1 Detection: one match, or an error
+
+`adapter/bin/detect-hw.sh` (ported from the successor repository, which had solved this
+better than the original `resolve-usb-camera.sh`) answers four questions at every start:
+which video node, which microphone, which buffer mount, which hardware encoders.
+
+Its rules matter more than its code:
+
+- **Exactly one match is used. None waits, several fails.** A camera missing at boot is a
+  timing problem — the user units start seconds before a USB camera's `by-id` link exists
+  — so detection waits `CAMERA_WAIT_SEC` (30 s) and only then fails, letting systemd retry
+  (`FoundAndFixed.md` #42). *Several* cameras is not a timing problem, so it fails
+  immediately, lists them, and asks for `CAM_MATCH`. The old script picked the first and
+  logged a warning, which is a guess wearing a disclaimer.
+- **The microphone is matched by USB parent, never by card name.** `alsa_card_for_video`
+  resolves the video node to its USB device through sysfs and takes the sound card on that
+  same device. On this Pi the camera's interfaces are `…usb-0:1.3:1.0` (video) and
+  `…usb-0:1.3:1.2` (audio) — same device, different interface. Name matching would be
+  actively wrong: ALSA calls many webcams' microphones plain `Webcam`, and a second one
+  becomes `Webcam_1` **in plug-in order**, so the same name can mean a different
+  microphone tomorrow. It also stops a USB headset being adopted as the camera's mic.
+- **A registry `audioDevice` pin is soft.** It is honoured only when that card is present;
+  otherwise it is ignored with a log line and detection wins. This one is not inherited —
+  both repositories obeyed the pin unconditionally. It matters because video and audio
+  share **one** pipeline: `alsasrc` failing to open a stale device ("Could not open audio
+  device for recording", verified) takes cam-01's *video* down with it. A bad setting must
+  cost the setting, never the camera.
+
+### 22.2 Configuration: `/etc/adapter/cameras/cam01.env`
+
+Every value the pipeline is built from now lives in one file, read by `camera-init.sh` and
+`publish-cam01.sh` through `load_env_file`. Template: `config/cameras/cam01.env.example`.
+
+| Key | What it sets |
+|---|---|
+| `CAM_MATCH` / `CAM_DEVICE` | which camera, when detection needs help |
+| `CAPS` | what the camera is asked for — media type, resolution, frame rate |
+| `CAM_FPS_OUT` | frame rate published, after `videorate drop-only` |
+| `VIDEO_BITRATE`, `GOP` | encoder bitrate and `h264_i_frame_period` |
+| `H264_PROFILE`, `H264_LEVEL` | `high`/`4`; **not** baseline (guide §16.1) |
+| `AUDIO_RATE` | microphone sample rate — see the constraint below |
+| `V4L2_MODE_CTRLS`, `V4L2_VALUE_CTRLS` | controls, applied in two passes |
+
+**With no file present, every key falls back to the value the script used to contain**, so
+the PW310 behaves identically either way. That was verified rather than assumed: the
+generated `gst-launch` argument list is **token for token identical** to the pre-change
+pipeline, in both the video-only (29 tokens) and audio (47 tokens) branches, compared with
+a stub `gst-launch-1.0`.
+
+Three behaviours follow from the file, each one a thing that would otherwise break on a
+different camera:
+
+- **The decode stage follows `CAPS`.** `image/jpeg` inserts the hardware JPEG decoder;
+  `video/x-raw` (YUYV and friends) inserts none, because `v4l2convert` already normalises
+  to I420 for the encoder. Anything else is refused at startup rather than producing a
+  pipeline that cannot link. Verified live by running cam-01 at
+  `video/x-raw,format=YUY2,640x480@30` → H.264 High 640×480 @ 20 fps, frame decoded and
+  inspected, then restored.
+- **`camera-init.sh` applies only the controls the attached camera has.** A control the
+  camera lacks is skipped and named. Previously an unknown control exited 1 under `set -e`,
+  which aborted the script — so every control *after* it was silently never applied — and
+  the unit then failed and retried forever. A rejected *value* is reported but does not
+  fail the unit, because a configuration error is not transient and looping on it helps
+  nobody; a missing camera still fails, because that one is worth retrying.
+- **`AUDIO_RATE` is checked against `CAM_FPS_OUT`.** Guide §18.3's rule is that an audio
+  frame must last at least as long as a video frame, or KVS silently drops about half the
+  audio. The publisher warns when `AUDIO_RATE > 1024 × CAM_FPS_OUT`, with a 5 % margin so
+  cam-01's measured-good 16 kHz at 15 fps does not cry wolf. It warns rather than refusing.
+
+> **The driver clamps, it does not refuse.** A requested
+> `white_balance_temperature=99999` came back as 6500, the maximum. So "the write
+> succeeded" does not mean "the value took"; anything that needs an exact value must read
+> it back with `--get-ctrl`. Any UI over these controls has to validate ranges itself.
+
+### 22.3 Scanning: what the camera can actually do
+
+`adapter/usb_camera.py` reports every attached USB camera and its capabilities, shared by
+the admin GUI (`GET /api/usb-cameras`) and the command line
+(`python3 adapter/usb_camera.py`) — the same split as `onvif_discovery` and
+`discover-onvif.py`. Per camera: identity, formats with their resolutions and frame rates,
+the interesting v4l2 controls with ranges and menu entries, and the microphone with its
+`arecord` capabilities.
+
+It is **read-only and safe while streaming** (0.46 s for a full scan on this Pi, with the
+camera live), and it delegates the USB-parent rule to `detect-hw.sh` rather than
+reimplementing it — two copies of one fact always drift.
+
+Two properties are worth contrasting with the ONVIF side. There are no credentials and no
+multicast timeout; and capability here is **fact, not claim**. `Camera-Features.md` marks
+ONVIF features "verified" vs "advertised" because that camera's own claims proved
+unreliable; a V4L2 menu control enumerates exactly the entries the driver accepts — the
+gaps are not options, and setting `auto_exposure` to 0 or 2 on the PW310 returns
+`Invalid argument`.
+
+### 22.4 The admin GUI panel
+
+Section 4 of the local admin GUI, "USB camera (cam-01)". A **Scan USB cameras** button
+next to the existing ONVIF **Scan LAN**, then per camera: identity, microphone, and a form
+whose every choice comes from the scan — format, resolution and frame rate are chained
+dropdowns listing only combinations the camera reports, and only controls it actually has
+are rendered, so a fixed-focus webcam shows no focus slider rather than a dead one.
+
+Below the form is the **configuration that would be written** — the exact
+`/etc/adapter/cameras/cam01.env` contents, rendered live as the form changes. Three
+decisions keep that preview honest, all three added after testing showed the first version
+getting them wrong:
+
+- **It opens on the running configuration**, not on the camera's best capability. The
+  first version defaulted to the largest resolution the camera supports, so a scan-then-
+  apply would have moved cam-01 to 1080p without anyone asking.
+- **It writes only controls the file already manages, plus ones the user actually moved.**
+  The form shows all fourteen the PW310 exposes; pinning all of them would turn driver
+  defaults into configuration.
+- **It preserves settings the form does not expose** (`H264_PROFILE`, `H264_LEVEL`) and
+  keeps the existing order of the control lists, so applying without editing anything
+  reproduces the current file exactly — verified by regenerating it and diffing against
+  the live file.
+
+`CAM_MATCH` is written **only when more than one camera is attached**. With a single
+camera detection needs no help, and pinning the `by-id` string — which carries that unit's
+serial number — would break on a replacement of the very same model, the exact brittleness
+the by-id path was removed for.
+
+### 22.5 Applying, backing up and reverting
+
+**Apply and restart camera** writes the previewed file and then proves the camera came
+back. **Saved configurations** lists previous ones and restores any of them, with the same
+verification.
+
+`adapter/bin/configure-camera.sh`, invoked via `sudo` exactly as `provision-camera.sh` is,
+owns everything that touches `/etc/adapter/cameras/`: `apply`, `list`, `revert`. It
+validates **every line against a whitelist of keys and value patterns** and refuses
+anything else — the file is read by shell scripts, so a value containing a backtick is a
+command, not a setting. It writes through a temporary file and `mv`, so a reader sees the
+old file or the new one and never half of either.
+
+It deliberately does **not** restart anything. The camera units are systemd *user* units,
+which root cannot manage, and the caller has to verify the outcome anyway — so root's job
+stays "write this file, keep a copy of the old one", which is the smallest thing that has
+to be trusted.
+
+The GUI accepts the file as text rather than as fields, because the panel already renders
+exactly what should be written; re-deriving it server-side would be a second generator
+free to disagree with the preview. That is safe precisely because the text is validated,
+not trusted.
+
+**Automatic rollback is the point of the feature, not a nicety.** Every setting in this
+file feeds one pipeline that carries both video and audio, so a resolution the camera does
+not offer does not degrade the stream — it removes the camera, and the person who made the
+mistake in a browser is exactly the person who cannot fix it from there. So Apply:
+
+1. lists the existing backups, **before** writing;
+2. writes (the helper backs up the current file as it goes);
+3. restarts `kvs-camera-init` and `kvs-camera-publish`;
+4. waits up to 30 s for video to actually flow;
+5. on failure, restores the backup it just displaced, restarts again, and reports whether
+   video came back.
+
+Backups live in `/etc/adapter/cameras/backups/`, named for when they were taken, carrying
+`CAM_MODEL` / `SAVED_AT` so the GUI can offer "AVerMedia PW310 — 27 Sep 12:30" rather than
+a timestamp. The newest 20 are kept.
+
+> **Verifying with MediaMTX's `ready` flag is not enough**, and this was learned the
+> expensive way here. After a failed configuration the path sat at `ready: true`
+> advertising an `H264` track while **no media arrived at all** — `ffprobe` could not
+> decode a single frame and `ffmpeg` reported "Output file does not contain any stream".
+> `ready` means a publisher connected and declared its tracks, which a stalled pipeline
+> does perfectly well. The check therefore requires MediaMTX's `bytesReceived` counter to
+> **advance**, which is the difference between a camera that says it is working and one
+> that is. This is the same lesson as `systemctl is-active`, one layer further in.
+
+Verified end to end on the live camera:
+
+| Test | Result |
+|---|---|
+| Apply a valid change (640×480 @ 10 fps) | applied and verified in 4.6 s; stream matched |
+| Apply an impossible one (9999×9999) | no video in 30 s → previous configuration restored → **video back**, and the file byte-identical to the pre-test one |
+| Revert to a listed backup | restored and verified in 6.9 s |
+| Invalid content (`EVIL=1`, injection attempts, empty file) | refused with the offending line number; **nothing written** |
+| Backup names, traversal (`../../etc/passwd`, another camera's backup) | refused |
+| Pruning | oldest removed beyond the keep limit |
+
+Two bugs in the first version of this were found by running those tests rather than
+reading the code, and both are recorded (`FoundAndFixed.md` #49 and #50) because each
+defeated the safety net itself: the backup list was captured *after* the write, so the
+rollback diff came back empty and a broken camera was left in place with "no backup to
+roll back to"; and the liveness check believed `ready`.
+
+### 22.6 What the registry learns, and what it must not
+
+A camera swap changes hardware facts that things outside this Pi depend on, so the scan
+can write them to the `cameras` row — **Save capabilities to registry**, and automatically
+after any verified apply or revert, since that is the moment they may have changed.
+
+| Attribute | Why it is there |
+|---|---|
+| `audioCapable` | **Load-bearing.** `camera-audio.py` gates the producer's audio on it, both GUIs grey out the audio checkbox without it, and `set_camera_audio` refuses to enable it. Swap in a webcam with no microphone and this must become false — otherwise all three offer audio that cannot work, and enabling it stalls the *video* too, because kvssink collects across pads |
+| `cameraModel`, `cameraSerial` | which unit is actually attached |
+| `usbCaps` | formats and their resolutions, the exposure modes, the control names, the microphone — descriptive, for a client that cannot scan this LAN |
+| `usbCapsProbedAt` | a snapshot time, for the same reason `videoCodecProbe` carries one: this is what was true when it was taken, not live truth |
+
+Two boundaries are deliberate:
+
+- **Pipeline settings are never written to the registry.** `CAPS`, frame rates, bitrate
+  and control values stay in `/etc/adapter/cameras/cam01.env`, because a producer must
+  start with AWS unreachable — the rule `cam-01` has always lived by. The registry holds
+  facts *about* the camera; the file holds what to do with it.
+- **A stale `audioDevice` pin is reported, never deleted.** The sync says so
+  ("registry pins audioDevice=…, but this camera's microphone is …") and leaves it: it is
+  the operator's setting, `publish-cam01.sh` already ignores it safely when it does not
+  resolve (§22.1), and silently removing someone's configuration is worse than naming it.
+
+The sync is best-effort and cannot affect the camera. A slow or unreachable account
+degrades to `{"synced": false, "reason": …}`, the same discipline `stream-codec.py`
+applies to recording the codec. Nothing in the cloud needed changing: `audioCapable` was
+already consumed by `list_cameras`, and the new attributes are simply ignored by every
+Lambda that does not read them — verified after the first sync.
+
+### 22.7 Adjusting exposure (and the other controls), live
+
+Camera controls are **LAN-side only, by decision**: exposure is a property of a camera on
+this Pi, set once while looking at it, and the cloud client deliberately has no route to
+it — the same reasoning §21.3 gives for the codec. It also keeps `client/index.html` and
+`cloud/lambda/` identical to the successor's, which is what `FoundAndFixed.md` #48 cost a
+day to restore.
+
+There are two distinct actions, because they answer different questions:
+
+| | What it does | Survives a restart? |
+|---|---|---|
+| **Set now** (per control) | writes the control to the camera immediately, while it streams | **No** — `camera-init.sh` reapplies the config file on the next start |
+| **Apply and restart camera** | writes the value into `/etc/adapter/cameras/cam01.env` | Yes, and with the backup and rollback of §22.5 |
+
+Live setting is possible because V4L2 controls can be written while the publisher holds
+the device, verified here: exposure 600 → 120 → 250 changed image luma 80 → 32 → 65 with
+no restart and no interruption. That is what makes *finding* a value practical — nudge it
+and watch the local preview — while keeping the thing that can break video on the path
+that has a safety net. Verified that the distinction is real: setting 600 live and then
+restarting `kvs-camera-init` returned the camera to the file's 250.
+
+Every write is **read back**, because this driver clamps rather than refuses (§22.2). The
+GUI puts the clamped value back into the field, so what is shown describes the camera
+rather than the request. Out-of-range values are refused before the driver sees them
+(`exposure_time_absolute: 99999 is outside 50-10000`), as are menu values the driver does
+not offer (`auto_exposure: 2 is not one of [1, 3]`).
+
+Exposure gets two pieces of presentation the raw number cannot carry:
+
+- **The unit.** `exposure_time_absolute` is in 100 µs steps, so the panel shows "250 =
+  25.0 ms" beside it, against the frame interval it has to fit inside.
+- **The frame-rate cliff.** Above one frame interval the sensor slows down instead of
+  keeping up — measured 13.6 fps at 250, 12.4 at 800 and **2.3 fps at 2500**, with
+  `exposure_dynamic_framerate` already off. The panel warns as soon as the value exceeds
+  one frame interval at the configured capture rate. This matters beyond blur: §18.3's
+  audio timing is measured against the *video* frame interval, so a long exposure with
+  audio enabled starts costing audio frames as well.
+
+Two buttons close the panel, and the difference between them is the point:
+
+| | |
+|---|---|
+| **Hide** | closes the panel and changes nothing — anything already written with *Set now* stays written |
+| **Reset changes and hide** | writes every *Set now* control back to the value it had when the panel was opened, then closes |
+
+Form edits need no undoing: they never left the form, so clearing the panel discards
+them. *Set now* is the case that does, because those values went straight to the camera,
+are in no file, and would otherwise sit there until some later restart quietly reapplied
+the configuration — a difference between the running camera and its config that nothing
+would have reported. Only the **first** value per control is remembered, so undoing
+returns to where the panel opened rather than to the previous nudge of a slider that has
+been swept. If a restore fails the panel deliberately stays open, since closing it would
+hide the one thing that needs attention. A fresh scan clears the undo record, because the
+rebuilt form already shows what the camera reports now.
+
+In **Aperture Priority** the time field is disabled and labelled *"camera decides — the
+value shown is the last one set, not the one in use"*. That is not a simplification: the
+control genuinely reports the last value written rather than the one being used — after
+setting 50 and switching to auto it still read 50 while metering independently (image luma
+222 → 142 across the switch). Showing a live number there would be showing fiction.

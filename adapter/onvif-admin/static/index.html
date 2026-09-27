@@ -44,6 +44,18 @@
   }
   .preview-box video { width: 100%; height: 100%; object-fit: cover; }
   .preview-box .preview-msg { color: #999; font-size: 0.7rem; text-align: center; padding: 0 4px; }
+  .usb-grid { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.7rem;
+              align-items: center; font-size: 0.85rem; margin-top: 0.6rem; }
+  .usb-grid label { color: #555; }
+  .usb-grid select, .usb-grid input { width: auto; min-width: 12rem; }
+  .usb-sub { grid-column: 1 / -1; margin: 0.5rem 0 0.1rem; font-weight: 600; font-size: 0.8rem;
+             color: #333; border-top: 1px dashed #ccc; padding-top: 0.5rem; }
+  .usb-note { grid-column: 1 / -1; font-size: 0.78rem; color: #777; margin: 0; }
+  .usb-warn { grid-column: 1 / -1; font-size: 0.78rem; color: #b8860b; margin: 0.2rem 0 0; }
+  .usb-grid button.setnow { font-size: 0.7rem; padding: 0.12rem 0.4rem; margin: 0; }
+  .ctl-inactive { opacity: 0.45; }
+  pre.envpreview { background: #f6f6f6; border: 1px solid #ddd; border-radius: 4px;
+                   padding: 0.6rem; font-size: 0.75rem; overflow-x: auto; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -84,6 +96,20 @@
   <button onclick="loadAnalytics()">Read settings</button>
 </p>
 <div id="analytics"></div>
+
+<h2>4. USB camera (cam-01)</h2>
+<p class="status">
+  The webcam on this Pi's own USB bus. Everything below is read from the driver, so the
+  choices offered are the ones the attached camera actually supports -- swap in a
+  different webcam and scan again. Read-only for now: applying is the next step.
+</p>
+<button onclick="scanUsb()">Scan USB cameras</button>
+<button id="usbResetBtn" onclick="resetUsb()" style="display:none"
+        title="Undo anything set with &quot;Set now&quot;, discard edits, and close this panel">Reset changes and hide</button>
+<button id="usbHideBtn" onclick="hideUsb()" style="display:none"
+        title="Close this panel and leave everything as it is">Hide</button>
+<span id="usbStatus" class="status"></span>
+<div id="usbResult"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
@@ -453,6 +479,468 @@ async function setIr(id, mode) {
     el.textContent = `IR: ${mode}`;
   } catch (e) {
     el.textContent = e.message;
+  }
+}
+
+// ---- 4. USB camera -----------------------------------------------------------------
+// Everything rendered here comes from GET /api/usb-cameras, which reads the driver. No
+// resolution, frame rate or exposure mode is written into this page: a different webcam
+// offers different ones, and hardcoding today's would be the very thing that makes a swap
+// painful. The scan is read-only and safe while the camera is streaming.
+let usbScan = null;
+// control -> the value it had when the panel was opened, recorded the first time "Set
+// now" writes it. Only the first is kept: undoing has to go back to where we started,
+// not to the previous nudge of a slider someone has been sweeping.
+let usbLiveChanges = {};
+
+// The current configuration, parsed once per scan. The form must open showing what is
+// running now, not a fresh guess: a user who scans and applies without touching anything
+// should get the file they already had. Opening on "the biggest resolution this camera
+// supports" would silently move cam-01 to 1080p on the next Apply.
+function currentCaps() {
+  const caps = (usbScan.config || {}).CAPS || "";
+  const m = caps.match(/^(image\/jpeg|video\/x-raw)(?:,format=(\w+))?,width=(\d+),height=(\d+),framerate=(\d+)/);
+  if (!m) return null;
+  const fmt = m[1] === "image/jpeg" ? "MJPG" : (m[2] === "YUY2" ? "YUYV" : m[2]);
+  return { format: fmt, width: +m[3], height: +m[4], fps: +m[5] };
+}
+
+// name -> value for every control the config currently manages, and the set of names, so
+// the generated file keeps managing exactly those and does not start pinning controls
+// that have always been left at the driver's default.
+// Modes first, values second: a value like exposure_time_absolute is refused while its
+// automatic is still on -- the same two passes camera-init.sh makes, for the same reason.
+function isModeCtrl(n) {
+  return /^auto_|_automatic$|_automatic_continuous$|^exposure_dynamic_framerate$/.test(n);
+}
+
+// The order the file lists them in, preserved so an untouched Apply is a no-op.
+function currentCtrlOrder() {
+  const cfg = usbScan.config || {};
+  const names = (list) => (list || "").split(",").map(p => p.split("=")[0].trim()).filter(Boolean);
+  return { modes: names(cfg.V4L2_MODE_CTRLS), values: names(cfg.V4L2_VALUE_CTRLS) };
+}
+
+function currentCtrls() {
+  const cfg = usbScan.config || {};
+  const out = {};
+  for (const list of [cfg.V4L2_MODE_CTRLS, cfg.V4L2_VALUE_CTRLS]) {
+    for (const pair of (list || "").split(",")) {
+      const [k, v] = pair.split("=");
+      if (k) out[k.trim()] = (v || "").trim();
+    }
+  }
+  return out;
+}
+
+async function scanUsb() {
+  const st = document.getElementById("usbStatus");
+  st.textContent = "scanning…";
+  try {
+    usbScan = await api("/api/usb-cameras");
+    // The rebuilt form shows what the camera reports now, which already includes any
+    // live change -- so there is no longer an older value to undo.
+    usbLiveChanges = {};
+    st.textContent = `${usbScan.cameras.length} camera(s) found`;
+    renderUsb();
+  } catch (e) {
+    st.innerHTML = `<span class="error">scan failed: ${e.message}</span>`;
+  }
+}
+
+function renderUsb() {
+  const d = usbScan;
+  const box = document.getElementById("usbResult");
+  if (!d.cameras.length) {
+    box.innerHTML = `<div class="device-card"><span class="error">No USB camera found.</span>
+      <div class="meta">Check it is plugged in: <code>v4l2-ctl --list-devices</code></div></div>`;
+    return;
+  }
+  // Several cameras is not a thing to pick from silently -- detection refuses to guess
+  // and wants CAM_MATCH, so say that here rather than quietly choosing the first.
+  const ambiguous = d.ambiguous
+    ? `<div class="usb-warn">${d.cameras.length} cameras attached — detection will not guess
+       between them. Set <code>CAM_MATCH</code> in ${d.configFile} to choose one.</div>` : "";
+  box.innerHTML = ambiguous + d.cameras.map((c, i) => renderUsbCamera(c, i)).join("");
+  document.getElementById("usbResetBtn").style.display = "";
+  document.getElementById("usbHideBtn").style.display = "";
+  d.cameras.forEach((c, i) => { if (c.formats.length) { fillSizes(i); } exposureHints(i); });
+}
+
+// Close the panel, change nothing. Anything already written to the camera with "Set now"
+// stays written -- that is the difference from Reset, and the reason both exist.
+function hideUsb() {
+  document.getElementById("usbResult").innerHTML = "";
+  document.getElementById("usbStatus").textContent = "";
+  document.getElementById("usbResetBtn").style.display = "none";
+  document.getElementById("usbHideBtn").style.display = "none";
+}
+
+// Put the camera back the way it was, then close.
+//
+// Form edits need no undoing -- they were never anywhere but the form, and clearing the
+// panel discards them. What does need undoing is "Set now": those went straight to the
+// camera, are not in any file, and would otherwise sit there until the next restart
+// quietly reapplied the configuration. So each one is written back to the value it had
+// when the panel opened.
+async function resetUsb() {
+  const st = document.getElementById("usbStatus");
+  const entries = Object.entries(usbLiveChanges);
+  if (entries.length) {
+    st.textContent = `undoing ${entries.length} live change(s)…`;
+    const failed = [];
+    for (const [key, original] of entries) {
+      const name = key.split(":")[1];
+      try {
+        await api("/api/usb-cameras/control", {
+          method: "POST", body: JSON.stringify({ name, value: Number(original) }),
+        });
+      } catch (e) {
+        failed.push(`${name}: ${e.message}`);
+      }
+    }
+    if (failed.length) {
+      // Do not hide on failure: the camera is not back where it was, and closing the
+      // panel would hide exactly the thing that needs attention.
+      st.innerHTML = `<span class="error">could not undo ${failed.join("; ")}</span>`;
+      return;
+    }
+  }
+  usbLiveChanges = {};
+  hideUsb();
+}
+
+function renderUsbCamera(c, i) {
+  const mic = c.audio && c.audio.card
+    ? `${c.audio.card} <span class="meta">(${c.audio.probe}${c.audio.rates ? ", " + c.audio.rates + " Hz, " + c.audio.channels + "ch" : ""})</span>`
+    : `<span class="meta">no microphone on this camera</span>`;
+  const sel = c.selected ? `<span class="badge">in use</span>` : "";
+  const cfg = usbScan.config || {};
+  // Only the camera detection actually selected is pre-set from the running config; for
+  // any other camera those values describe a different device and may not even be
+  // offered by this one.
+  const cur = c.selected ? currentCaps() : null;
+  return `
+  <div class="device-card">
+    <strong>${c.name || c.byId}</strong>${sel}
+    <div class="meta">${c.device}<br>${c.node} · ${c.bus || ""} · driver ${c.driver || "?"}</div>
+    <div class="meta">Microphone: ${mic}</div>
+    <div class="usb-grid">
+      <div class="usb-sub">Capture</div>
+      <label>Format</label>
+      <select id="u-fmt-${i}" onchange="fillSizes(${i})">
+        ${c.formats.map(f => `<option value="${f.format}" ${cur && cur.format === f.format ? "selected" : ""}>${f.format} — ${f.description}</option>`).join("")}
+      </select>
+      <label>Resolution</label>
+      <select id="u-size-${i}" onchange="fillFps(${i})"></select>
+      <label>Frame rate (camera)</label>
+      <select id="u-fps-${i}" onchange="renderEnv(${i})"></select>
+
+      <div class="usb-sub">Encode</div>
+      <label>Frame rate (published)</label>
+      <input id="u-fpsout-${i}" type="number" min="1" max="60" value="${cfg.CAM_FPS_OUT || 15}" oninput="renderEnv(${i})">
+      <label>Bitrate (bit/s)</label>
+      <input id="u-bitrate-${i}" type="number" step="100000" value="${cfg.VIDEO_BITRATE || 1000000}" oninput="renderEnv(${i})">
+      <label>Keyframe interval</label>
+      <input id="u-gop-${i}" type="number" min="1" value="${cfg.GOP || 30}" oninput="renderEnv(${i})">
+      <label>Audio rate (Hz)</label>
+      <input id="u-arate-${i}" type="number" step="1000" value="${cfg.AUDIO_RATE || 16000}" oninput="renderEnv(${i})">
+      <div class="usb-note" id="u-audiowarn-${i}"></div>
+
+      <div class="usb-sub">Image controls — only what this camera has</div>
+      ${renderCtrls(c, i)}
+    </div>
+    <div class="usb-sub" style="margin-top:0.8rem">Configuration that would be written</div>
+    <pre class="envpreview" id="u-env-${i}">…</pre>
+    <button onclick="applyUsb(${i})">Apply and restart camera</button>
+    <button onclick="loadBackups()">Saved configurations</button>
+    <button onclick="syncRegistry(${i})" title="Record this camera's capabilities in the cameras registry">Save capabilities to registry</button>
+    <span id="u-applyStatus-${i}" class="status"></span>
+    <div id="usbBackups"></div>
+  </div>`;
+}
+
+// A control the camera does not report simply is not rendered -- that is the whole point:
+// a fixed-focus webcam should show no focus slider rather than a dead one. Menu controls
+// list the driver's own entries, which are exactly the values it accepts (the gaps in the
+// range are not options).
+function renderCtrls(c, i) {
+  const order = ["auto_exposure", "exposure_time_absolute", "exposure_dynamic_framerate",
+                 "white_balance_automatic", "white_balance_temperature",
+                 "focus_automatic_continuous", "focus_absolute",
+                 "brightness", "contrast", "saturation", "gamma", "sharpness",
+                 "backlight_compensation", "power_line_frequency"];
+  return order.filter(n => c.controls[n]).map(n => {
+    const ct = c.controls[n];
+    const id = `u-ctl-${i}-${n}`;
+    // Managed by the config file -> show that value; otherwise show what the driver
+    // currently reports. `data-initial` is what renderEnv() compares against to decide
+    // whether the user actually changed anything.
+    const managed = c.selected ? currentCtrls() : {};
+    const init = (n in managed) ? managed[n] : String(ct.value);
+    let field;
+    if (ct.type === "menu") {
+      field = `<select id="${id}" data-initial="${init}" data-managed="${n in managed}" oninput="renderEnv(${i})">${
+        (ct.menu || []).map(m => `<option value="${m.value}" ${String(m.value) === init ? "selected" : ""}>${m.label}</option>`).join("")}</select>`;
+    } else if (ct.type === "bool") {
+      field = `<select id="${id}" data-initial="${init}" data-managed="${n in managed}" oninput="renderEnv(${i})">
+                 <option value="0" ${init === "0" ? "selected" : ""}>off</option>
+                 <option value="1" ${init === "1" ? "selected" : ""}>on</option></select>`;
+    } else {
+      const unit = ct.unit === "100us" ? " ×100 µs" : "";
+      field = `<input id="${id}" type="number" min="${ct.min}" max="${ct.max}" step="${ct.step || 1}"
+                      value="${init}" data-initial="${init}" data-managed="${n in managed}" oninput="renderEnv(${i})">
+               <span class="meta">${ct.min}–${ct.max}${unit}</span>`;
+    }
+    // "Set now" writes the control straight to the camera so it can be judged against the
+    // preview; the value only persists once the configuration is saved.
+    const live = `<button class="setnow" onclick="setCtrlNow(${i},'${n}')">Set now</button>`;
+    const extra = n === "exposure_time_absolute"
+      ? `<span class="meta" id="u-expms-${i}"></span>` : "";
+    return `<label>${n}</label><div>${field} ${live} <span class="meta" id="u-ctlmsg-${i}-${n}"></span>${extra}</div>`;
+  }).join("");
+}
+
+function fillSizes(i) {
+  const c = usbScan.cameras[i];
+  const fmt = document.getElementById(`u-fmt-${i}`).value;
+  const f = c.formats.find(x => x.format === fmt) || { sizes: [] };
+  const sizes = [...f.sizes].sort((a, b) => b.width * b.height - a.width * a.height);
+  const cur = c.selected ? currentCaps() : null;
+  const want = cur && cur.format === fmt ? `${cur.width}x${cur.height}` : null;
+  document.getElementById(`u-size-${i}`).innerHTML =
+    sizes.map(s => `<option value="${s.width}x${s.height}" ${want === `${s.width}x${s.height}` ? "selected" : ""}>${s.width}×${s.height}</option>`).join("");
+  fillFps(i);
+}
+
+function fillFps(i) {
+  const c = usbScan.cameras[i];
+  const fmt = document.getElementById(`u-fmt-${i}`).value;
+  const [w, h] = document.getElementById(`u-size-${i}`).value.split("x").map(Number);
+  const f = c.formats.find(x => x.format === fmt);
+  const size = f && f.sizes.find(s => s.width === w && s.height === h);
+  const fps = size ? [...size.fps].sort((a, b) => b - a) : [];
+  const cur2 = c.selected ? currentCaps() : null;
+  const wantFps = cur2 && cur2.format === fmt && cur2.width === w && cur2.height === h ? cur2.fps : null;
+  document.getElementById(`u-fps-${i}`).innerHTML =
+    fps.map(v => `<option value="${v}" ${wantFps === v ? "selected" : ""}>${v} fps</option>`).join("");
+  renderEnv(i);
+}
+
+// The preview is the deliverable of this step: exactly the file that would be written,
+// so what the GUI is about to do is inspectable before anything can do it.
+function renderEnv(i) {
+  const c = usbScan.cameras[i];
+  const val = id => (document.getElementById(id) || {}).value;
+  const fmt = val(`u-fmt-${i}`), size = val(`u-size-${i}`), fps = val(`u-fps-${i}`);
+  if (!fmt || !size || !fps) return;
+  const [w, h] = size.split("x");
+  // GStreamer names the raw format YUY2 where V4L2 calls it YUYV; MJPG is image/jpeg.
+  const caps = fmt === "MJPG"
+    ? `image/jpeg,width=${w},height=${h},framerate=${fps}/1`
+    : `video/x-raw,format=${fmt === "YUYV" ? "YUY2" : fmt},width=${w},height=${h},framerate=${fps}/1`;
+
+  // Controls already in the file keep their existing order, so applying without editing
+  // anything reproduces the current file byte for byte -- which is what makes "no change"
+  // visible as no change in the backup diff.
+  const cfgOrder = c.selected ? currentCtrlOrder() : { modes: [], values: [] };
+  const seen = new Set();
+  const modes = [], values = [];
+  const emit = (n) => {
+    const el = document.getElementById(`u-ctl-${i}-${n}`);
+    if (!el || seen.has(n)) return;
+    if (el.dataset.managed !== "true" && el.value === el.dataset.initial) return;
+    seen.add(n);
+    (isModeCtrl(n) ? modes : values).push(`${n}=${el.value}`);
+  };
+  cfgOrder.modes.forEach(emit);
+  cfgOrder.values.forEach(emit);
+  for (const n of Object.keys(c.controls)) {
+    const el = document.getElementById(`u-ctl-${i}-${n}`);
+    if (!el || seen.has(n)) continue;
+    // Write a control only if the config already manages it, or the user moved it. The
+    // form shows everything the camera has, but pinning all fourteen would turn driver
+    // defaults into configuration -- a change nobody asked for, and one more thing to be
+    // wrong on the next camera.
+    if (el.dataset.managed !== "true" && el.value === el.dataset.initial) continue;
+    seen.add(n);
+    (isModeCtrl(n) ? modes : values).push(`${n}=${el.value}`);
+  }
+
+  const fpsOut = Number(val(`u-fpsout-${i}`)) || 15;
+  const aRate = Number(val(`u-arate-${i}`)) || 16000;
+  const warn = document.getElementById(`u-audiowarn-${i}`);
+  // Guide 18.3: an audio frame must last at least as long as a video frame or KVS drops
+  // roughly half the audio, silently. Same 5% margin the publisher applies.
+  if (warn) {
+    const audioMs = 1024000 / aRate, videoMs = 1000 / fpsOut;
+    warn.className = audioMs < videoMs * 0.95 ? "usb-warn" : "usb-note";
+    warn.textContent = audioMs < videoMs * 0.95
+      ? `Audio frames ${audioMs.toFixed(0)} ms vs video ${videoMs.toFixed(0)} ms — KVS will drop audio (guide §18.3). Use ≤ ${1024 * fpsOut} Hz.`
+      : `Audio frames ${audioMs.toFixed(0)} ms vs video ${videoMs.toFixed(0)} ms — within the limit (guide §18.3).`;
+  }
+
+  const cfg2 = usbScan.config || {};
+  // CAM_MATCH only when there is something to disambiguate. With one camera attached,
+  // detection finds it without help, and pinning the by-id string (which carries this
+  // unit's serial number) would break on a replacement of the very same model -- the
+  // exact brittleness the by-id path was removed for.
+  const match = usbScan.ambiguous
+    ? `CAM_MATCH=${(c.byId.match(/^usb-(.+)-video-index\d+$/) || [, c.byId])[1]}\n` : "";
+  // Settings this form does not expose are carried over rather than dropped: leaving
+  // them out would silently return them to their defaults.
+  const carried = ["H264_PROFILE", "H264_LEVEL"]
+    .filter(k => cfg2[k]).map(k => `${k}=${cfg2[k]}`).join("\n");
+
+  exposureHints(i);
+  document.getElementById(`u-env-${i}`).textContent =
+`# ${usbScan.configFile}
+${match}CAPS=${caps}
+CAM_FPS_OUT=${fpsOut}
+VIDEO_BITRATE=${val(`u-bitrate-${i}`)}
+GOP=${val(`u-gop-${i}`)}
+${carried ? carried + "\n" : ""}AUDIO_RATE=${aRate}
+V4L2_MODE_CTRLS=${modes.join(",")}
+V4L2_VALUE_CTRLS=${values.join(",")}`;
+}
+
+// Apply writes the previewed file and then proves the camera came back; if it did not,
+// the server has already restored the previous configuration by the time we are told.
+// The button stays disabled meanwhile, because a second Apply mid-restart would race the
+// verification and could roll back to the configuration being tested.
+async function applyUsb(i) {
+  const st = document.getElementById(`u-applyStatus-${i}`);
+  const content = document.getElementById(`u-env-${i}`).textContent;
+  const btns = document.querySelectorAll("#usbResult button");
+  if (!confirm("Write this configuration and restart cam-01?\n\n" +
+               "The camera drops out briefly. If video does not come back within 30 s, " +
+               "the previous configuration is restored automatically.")) return;
+  btns.forEach(b => b.disabled = true);
+  st.textContent = "applying, then waiting for video…";
+  try {
+    const r = await fetch("/api/usb-cameras/apply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.ok) {
+      st.innerHTML = `applied — ${d.verified}`;
+      await scanUsb();                      // re-read: the running config has changed
+    } else if (d.rolledBack) {
+      st.innerHTML = `<span class="error">${d.error}</span>`;
+      await scanUsb();
+    } else {
+      st.innerHTML = `<span class="error">${d.error || `HTTP ${r.status}`}</span>`;
+    }
+  } catch (e) {
+    st.innerHTML = `<span class="error">${e.message}</span>`;
+  } finally {
+    document.querySelectorAll("#usbResult button").forEach(b => b.disabled = false);
+  }
+}
+
+// The cloud client cannot scan this LAN, so what it knows about the camera comes from
+// the registry. audioCapable is the load-bearing one: it is what greys out the audio
+// checkbox for a camera with no microphone, in both GUIs.
+async function syncRegistry(i) {
+  const st = document.getElementById(`u-applyStatus-${i}`);
+  st.textContent = "recording capabilities…";
+  try {
+    const d = await api("/api/usb-cameras/sync-registry", { method: "POST" });
+    st.innerHTML = d.synced
+      ? `registry updated — ${d.cameraModel || "camera"}, audio ${d.audioCapable ? "available" : "not available"}` +
+        (d.stalePin ? `<br><span class="error">${d.stalePin}</span>` : "")
+      : `<span class="error">not recorded: ${d.reason}</span>`;
+  } catch (e) {
+    st.innerHTML = `<span class="error">${e.message}</span>`;
+  }
+}
+
+async function setCtrlNow(i, name) {
+  const el = document.getElementById(`u-ctl-${i}-${name}`);
+  const key = `${i}:${name}`;
+  if (!(key in usbLiveChanges)) usbLiveChanges[key] = el.dataset.initial;
+  const msg = document.getElementById(`u-ctlmsg-${i}-${name}`);
+  msg.textContent = "…";
+  try {
+    const d = await api("/api/usb-cameras/control", {
+      method: "POST", body: JSON.stringify({ name, value: Number(el.value) }),
+    });
+    // The driver clamps rather than refusing, so show what it actually took, not what we
+    // asked for -- and put the clamped value back in the field so the preview below
+    // describes the camera and not our request.
+    if (d.clamped) { el.value = d.actual; msg.innerHTML = `<span class="error">clamped to ${d.actual}</span>`; }
+    else msg.textContent = "set (not saved)";
+    renderEnv(i); exposureHints(i);
+  } catch (e) {
+    msg.innerHTML = `<span class="error">${e.message}</span>`;
+  }
+}
+
+// Exposure needs explaining in two places the raw number does not.
+//
+//  - Its unit is 100 microseconds, so "250" is 25 ms. Nobody should have to convert that.
+//  - Above one frame interval the sensor cannot keep the frame rate and silently slows
+//    down: measured 13.6 fps at 250, 12.4 at 800 and 2.3 fps at 2500 on this camera, with
+//    exposure_dynamic_framerate already off. That is not just motion blur -- guide §18.3's
+//    audio timing is against the video frame interval, so a long exposure with audio on
+//    starts costing audio frames too.
+//  - In Aperture Priority the camera chooses, and the control reports the last value
+//    *set*, not the one in use. Showing a number there would be showing fiction.
+function exposureHints(i) {
+  const exp = document.getElementById(`u-ctl-${i}-exposure_time_absolute`);
+  const out = document.getElementById(`u-expms-${i}`);
+  if (!exp || !out) return;
+  const mode = document.getElementById(`u-ctl-${i}-auto_exposure`);
+  const auto = mode && mode.value === "3";
+  exp.disabled = auto;
+  exp.parentElement.classList.toggle("ctl-inactive", auto);
+  if (auto) {
+    out.innerHTML = `<em>camera decides — the value shown is the last one set, not the one in use</em>`;
+    return;
+  }
+  const capsFps = Number((document.getElementById(`u-fps-${i}`) || {}).value) || 30;
+  const maxUnits = Math.floor(10000 / capsFps);          // one frame interval, in 100 µs
+  const ms = (Number(exp.value) / 10).toFixed(1);
+  out.innerHTML = Number(exp.value) > maxUnits
+    ? `= ${ms} ms — <span style="color:#b8860b">longer than one frame at ${capsFps} fps
+       (${maxUnits} = ${(maxUnits/10).toFixed(1)} ms); the camera will drop frame rate</span>`
+    : `= ${ms} ms (frame interval at ${capsFps} fps is ${(maxUnits/10).toFixed(1)} ms)`;
+}
+
+async function loadBackups() {
+  const box = document.getElementById("usbBackups");
+  box.textContent = "loading…";
+  try {
+    const d = await api("/api/usb-cameras/backups");
+    if (!d.backups.length) { box.innerHTML = `<p class="status">No saved configurations yet.</p>`; return; }
+    box.innerHTML = `<table><thead><tr><th>Saved</th><th>Camera</th><th></th></tr></thead><tbody>` +
+      d.backups.map(b => `<tr>
+        <td>${b.savedAt.replace("T", " ").replace("Z", " UTC")}</td>
+        <td>${b.model}</td>
+        <td><button onclick="revertUsb('${b.name}')">Restore</button></td></tr>`).join("") +
+      `</tbody></table><p class="status">Restoring also restarts the camera and checks video came back.</p>`;
+  } catch (e) {
+    box.innerHTML = `<span class="error">${e.message}</span>`;
+  }
+}
+
+async function revertUsb(name) {
+  if (!confirm(`Restore ${name} and restart cam-01?`)) return;
+  const box = document.getElementById("usbBackups");
+  box.innerHTML = "restoring, then waiting for video…";
+  try {
+    const r = await fetch("/api/usb-cameras/revert", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backup: name }),
+    });
+    const d = await r.json().catch(() => ({}));
+    box.innerHTML = (r.ok && d.ok)
+      ? `<p class="status">restored — ${d.verified}</p>`
+      : `<span class="error">${d.error || `HTTP ${r.status}`}</span>`;
+    await scanUsb();
+  } catch (e) {
+    box.innerHTML = `<span class="error">${e.message}</span>`;
   }
 }
 

@@ -42,6 +42,10 @@ def lambda_handler(event, context):
                 # serialize directly -- cast to int. None for clips recorded before this
                 # field existed (older items simply don't have the attribute).
                 "durationSec": int(i["durationSec"]) if "durationSec" in i else None,
+                # "h264" / "h265", read from the clip itself when it was made
+                # (record_clip.py, clip_to_s3.py, adapter/outage_uploader.py). Shown after
+                # the duration; None only for a clip whose codec could not be read.
+                "videoCodec": i.get("videoCodec"),
             })
         return {"statusCode": 200, "headers": CORS, "body": json.dumps({"clips": clips})}
     except Exception as e:

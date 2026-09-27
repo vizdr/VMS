@@ -16,8 +16,11 @@ unauthenticated on this LAN. Not intended to be port-forwarded or exposed beyond
 import asyncio
 import base64
 import re
+import os
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 import camera_control
 import onvif_discovery
+import usb_camera
 from aws_device_creds import get_session
 
 app = Flask(__name__, static_folder="static")
@@ -65,6 +69,239 @@ def scan():
                 entry["enrichError"] = str(e)
         results.append(entry)
     return jsonify({"devices": results})
+
+
+@app.get("/api/usb-cameras")
+def usb_cameras():
+    """What USB cameras are attached and what each can do -- the "Scan USB cameras" button.
+
+    The local counterpart of /api/scan: WS-Discovery finds networked ONVIF cameras, this
+    finds the ones on this Pi's own USB bus. It is easier and more trustworthy than the
+    ONVIF side -- no credentials, no multicast timeout, and the capabilities come from the
+    driver rather than from what a vendor advertises.
+
+    GET, not POST, and deliberately: it takes no input, changes nothing, and is safe to
+    repeat. It also runs happily while the camera is streaming (every call is a read), so
+    pressing the button never disturbs a live feed.
+    """
+    try:
+        return jsonify(usb_camera.scan())
+    except Exception as e:  # noqa: BLE001 -- a probe failure must read as a failed scan,
+        return jsonify({"error": f"scan failed: {e}"}), 500   # not a 500 from Flask itself
+
+
+CONFIGURE_SH = str(Path(__file__).resolve().parent.parent / "bin" / "configure-camera.sh")
+USB_UNITS = ("kvs-camera-init.service", "kvs-camera-publish.service")
+APPLY_VERIFY_SEC = 30
+
+
+def _sudo_configure(*args):
+    """Run the privileged config helper. Its stderr is the user-facing reason on failure."""
+    p = subprocess.run(["sudo", CONFIGURE_SH, *args], capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout).strip() or "configure-camera.sh failed")
+    return p.stdout
+
+
+def _restart_usb_units():
+    """Restart the camera units. These are systemd *user* units, so this runs unprivileged
+    here rather than inside the sudo helper -- root cannot manage them at all."""
+    for unit in USB_UNITS:
+        subprocess.run(["systemctl", "--user", "restart", unit], capture_output=True,
+                       text=True, timeout=60)
+
+
+def _path_bytes(path):
+    """MediaMTX's received-byte counter for a path, or None if it is not publishing."""
+    try:
+        r = requests.get(f"{MEDIAMTX_API}/v3/paths/get/{path}", timeout=3)
+        if r.ok:
+            st = r.json()
+            if st.get("ready") and st.get("tracks"):
+                return st.get("bytesReceived", 0)
+    except requests.RequestException:
+        pass
+    return None
+
+
+def _camera_is_live(path="cam01", budget=APPLY_VERIFY_SEC):
+    """True once MediaMTX is actually *receiving bytes* on that path again.
+
+    `systemctl is-active` proves nothing, and -- learned the hard way while building this
+    -- neither does MediaMTX's `ready` flag: after a failed configuration the path sat at
+    ready:true advertising an H264 track while no media arrived at all, and ffprobe could
+    not decode a single frame. `ready` means a publisher connected and declared its
+    tracks, which a pipeline can do and then stall. So require the byte counter to
+    actually advance: that is the difference between a camera that says it is working and
+    one that is.
+    """
+    deadline = time.monotonic() + budget
+    first = None
+    while time.monotonic() < deadline:
+        n = _path_bytes(path)
+        if n is not None:
+            if first is None:
+                first = n
+            elif n > first:
+                return True
+        time.sleep(2)
+    return False
+
+
+def _sync_usb_registry():
+    """Record the attached camera's hardware facts on the `cameras` row. Best effort.
+
+    Never allowed to affect the camera: the registry is a *consumer* of this information,
+    and the pipeline runs from /etc/adapter/cameras/cam01.env with no AWS involved at all.
+    So a slow or unreachable account degrades to "not recorded", exactly as
+    stream-codec.py treats the same problem -- returning the reason rather than raising.
+    """
+    try:
+        snap = usb_camera.registry_snapshot()
+        if not snap:
+            return {"synced": False, "reason": "no camera selected"}
+        item = cameras_table().get_item(Key={"cameraId": "cam-01"}).get("Item") or {}
+        cameras_table().update_item(
+            Key={"cameraId": "cam-01"},
+            UpdateExpression=("SET audioCapable = :ac, cameraModel = :cm, cameraSerial = :cs, "
+                              "usbCaps = :uc, usbCapsProbedAt = :ts"),
+            ExpressionAttributeValues={
+                ":ac": snap["audioCapable"], ":cm": snap["cameraModel"],
+                ":cs": snap["cameraSerial"], ":uc": snap["usbCaps"], ":ts": snap["usbCapsProbedAt"],
+            },
+        )
+        out = {"synced": True, "audioCapable": snap["audioCapable"],
+               "cameraModel": snap["cameraModel"]}
+        # A pin that no longer resolves is reported, never silently deleted: it is the
+        # operator's setting, and publish-cam01.sh already ignores it safely. Saying so
+        # here is what turns "audio quietly went missing" into something visible.
+        pin = item.get("audioDevice")
+        if pin and pin != snap["usbCaps"]["microphone"]:
+            out["stalePin"] = (f"registry pins audioDevice={pin}, but this camera's "
+                               f"microphone is {snap['usbCaps']['microphone'] or 'absent'}")
+        return out
+    except Exception as e:  # noqa: BLE001
+        return {"synced": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+@app.post("/api/usb-cameras/control")
+def usb_set_control():
+    """Set one camera control live, without restarting anything.
+
+    Separate from applying a configuration on purpose. This is for *finding* a value --
+    nudge the exposure and watch the preview -- and it does not survive a restart, because
+    camera-init.sh reapplies the config file. Saving is what makes it stick, and that path
+    has the backup and the rollback precisely because it is the one that can break video.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(usb_camera.set_control(body.get("name"), body.get("value")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
+
+
+@app.post("/api/usb-cameras/sync-registry")
+def usb_sync_registry():
+    """Record the attached camera's capabilities in the registry, on demand."""
+    return jsonify(_sync_usb_registry())
+
+
+@app.get("/api/usb-cameras/backups")
+def usb_backups():
+    """Saved configurations, newest first, each with when it was taken and which camera
+    it describes -- so reverting is a choice between recognisable things."""
+    try:
+        rows = []
+        for line in _sudo_configure("list", "cam01").splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                rows.append({"name": parts[0], "savedAt": parts[1], "model": parts[2]})
+        return jsonify({"backups": rows})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
+
+
+def _apply_and_verify(write, what):
+    """Write a configuration, restart, and prove video came back -- or put it back.
+
+    Automatic rollback is not a nicety here. cam-01's video and audio share one pipeline
+    and every setting in this file feeds it, so a resolution the camera does not offer, or
+    a microphone name that no longer exists, does not degrade the stream -- it removes the
+    camera. Without this, a GUI mistake would cost the camera until someone with a
+    terminal noticed, and the person who made the mistake is exactly the person who cannot
+    fix it from here.
+    """
+    # Before the write: `apply` creates the backup, so a list taken afterwards already
+    # contains it and the "what did we just displace?" diff comes back empty -- which is
+    # exactly how the first version of this failed, leaving a broken camera in place with
+    # "no backup to roll back to".
+    before = _sudo_configure("list", "cam01").splitlines()
+    write()
+    _restart_usb_units()
+    if _camera_is_live():
+        return jsonify({"ok": True, "applied": what, "verified": "video is flowing again",
+                        "registry": _sync_usb_registry()})
+
+    # It did not come back. The newest backup is the configuration we just displaced.
+    after = _sudo_configure("list", "cam01").splitlines()
+    fresh = [l.split("\t")[0] for l in after if l not in before]
+    if not fresh:
+        return jsonify({"ok": False, "applied": what, "rolledBack": False,
+                        "error": f"no video within {APPLY_VERIFY_SEC}s and no backup to "
+                                 "roll back to -- the camera is left with the new settings"}), 500
+    _sudo_configure("revert", "cam01", fresh[0])
+    _restart_usb_units()
+    recovered = _camera_is_live()
+    return jsonify({"ok": False, "applied": what, "rolledBack": True, "restored": fresh[0],
+                    "recovered": recovered,
+                    "error": f"no video within {APPLY_VERIFY_SEC}s -- the previous "
+                             f"configuration was restored and video "
+                             f"{'is back' if recovered else 'did NOT come back either'}"}), 409
+
+
+@app.post("/api/usb-cameras/apply")
+def usb_apply():
+    """Write the configuration the panel previewed, then prove the camera still works.
+
+    The body is the file itself, not a set of fields: the panel already renders exactly
+    what should be written, and re-deriving it here would be a second generator free to
+    disagree with the preview. It is safe because configure-camera.sh validates every line
+    against a whitelist and refuses anything else -- the text is checked, not trusted.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"error": "content (the configuration file) is required"}), 400
+
+    tmp = Path(tempfile.gettempdir()) / f"cam01-apply-{os.getpid()}.env"
+    try:
+        tmp.write_text(content)
+        return _apply_and_verify(lambda: _sudo_configure("apply", "cam01", str(tmp)),
+                                 "new configuration")
+    except RuntimeError as e:
+        # Validation refused it. Nothing was written, so there is nothing to undo.
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@app.post("/api/usb-cameras/revert")
+def usb_revert():
+    """Restore a saved configuration, with the same verification as applying one."""
+    name = (request.get_json(force=True, silent=True) or {}).get("backup")
+    if not isinstance(name, str) or not name:
+        return jsonify({"error": "backup name is required"}), 400
+    try:
+        return _apply_and_verify(lambda: _sudo_configure("revert", "cam01", name),
+                                 f"backup {name}")
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
 
 
 @app.get("/api/cameras")
