@@ -94,6 +94,18 @@ the Pi's own USB bus, so this is also where the webcam is scanned, configured an
 adjusted (guide §22): it reads what the camera can actually do, writes the configuration
 with a backup, and rolls back automatically if video does not return.
 
+<p align="center">
+  <img src="ONVIF-Admin-Demo.png" width="900">
+</p>
+
+<p align="center">
+  <img src="USB-Cam-01.png" width="900">
+</p>
+
+<p align="center">
+  <img src="ONVIF-cam-02.png" width="900">
+</p>
+
 ---
 
 ## Measured results
