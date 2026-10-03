@@ -247,6 +247,13 @@ record fields are live-patchable through the same control API
 `recordDeleteAfter: 0s` is set **once at arming and never changed**. The supervisor's own
 5 s tick deletes completed `live/` segments older than the pre-roll.
 
+> **Since 2026-10-03 (`PIR-MQTT-VMS-PI4.md` Phase 12) this holds for the ring on the stick.** A
+> camera armed for the PIR trigger records into RAM (`$XDG_RUNTIME_DIR/vms/ring/`) with
+> `recordDeleteAfter: 10m`, a backstop five times the supervisor's own retention, so a dead
+> supervisor can't fill the 374 MB runtime tmpfs. It can't race a capture: RAM segments leave
+> the ring within one tick. At T0 nothing changes in MediaMTX either way; moving a segment out
+> of the RAM ring is a durable copy (`.part`, fsync, rename, then delete) instead of a rename.
+
 **At T0 the supervisor makes no MediaMTX API call at all.** It stops deleting, and starts
 renaming completed segments from `live/<path>/` into `outage/<id>/<path>/` — same
 filesystem, atomic, instant.
@@ -269,6 +276,25 @@ Simpler, no coupling, and it survives a missed invocation. The last segment of a
 has an unpatched duration — `ffprobe` it and drop only that one if it fails.
 
 ### 4.4 Arming rules
+
+> **Since 2026-10-03 there is a second reason to arm:** a camera whose registry row has
+> `pirRecording` on is armed regardless of its producer, for the PIR trigger
+> (`PIR-MQTT-VMS-PI4.md` §3.6, Phase 5). The rules below are unchanged for the outage
+> reason, and only cameras armed for it join an outage capture. The supervisor also
+> hard-links PIR sessions' segments into the session, before the outage sweep each tick. The
+> storage layout in §4.7 gains that `pir/` directory.
+>
+> **Phase 12, 2026-10-03:** a camera armed for PIR (`pir` or `outage+pir`) keeps its ring in
+> RAM, with the session footage staged there too as hard links; the stick receives only
+> finished clips, plus outage captures as before. A camera armed only for the outage keeps
+> its ring on the stick, unchanged. Everything that reads the ring looks in both places. The
+> outage regression passed again with the ring in RAM: 288 s blocked, one 338 s backfilled
+> clip, gap-fill 99.72 %.
+>
+> **Regression after that change, 2026-10-03** (live, §7 method: IPv4 + IPv6 range block,
+> 265 s): outage detected 14 s after the block, recovered after 277 s, backfilled as one 304 s
+> clip that fully covers the 152 s KVS gap, with a PIR session sharing the same segments
+> throughout. Details: `PIR-MQTT-VMS-PI4.md` Phase 5.
 
 Armed only when **all** hold: `outageBufferSec > 0`; that camera's KVS producer is active;
 the USB filesystem is genuinely mounted.

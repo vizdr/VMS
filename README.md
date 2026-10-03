@@ -78,6 +78,7 @@ either GUI controls exactly that process.
 | **H.264 or H.265** | Passthrough cameras stream whichever their encoder is set to; producers read the codec off the wire, and clips spanning a switch are split rather than lost — guide §21 |
 | **Optional audio** | Per-camera, off by default, for both cameras — [`AUDIO.md`](AUDIO.md) |
 | **Durable outage buffering** | Records to a USB stick while AWS is unreachable and backfills on recovery — [`OUTAGE.md`](OUTAGE.md) |
+| **PIR motion trigger** | A Pico 2 W's PIR sensor, over a local MQTT broker, triggers local clips of the USB camera, recorded from a ring in RAM; clips you choose are copied to AWS, from either GUI — [`PIR-MQTT-VMS-PI4.md`](PIR-MQTT-VMS-PI4.md) |
 | **Remote control** | Outbound MQTT over 443 (ALPN), so it traverses HTTPS-only firewalls |
 | **Device identity** | One X.509 certificate and an IoT role alias — **no static AWS keys on the Pi** |
 
@@ -85,7 +86,8 @@ either GUI controls exactly that process.
 
 **Cloud client** (`client/index.html`) — static, S3-hosted behind CloudFront,
 Cognito-authenticated, reachable from anywhere. Live view, recording, clips, per-camera
-settings.
+settings, and for a camera with a PIR sensor the motion trigger, the Pi's live status and its
+local motion clips with Upload to AWS.
 
 **Local admin** (`adapter/onvif-admin/`) — a small Flask app on the Pi, LAN-only. It
 exists because **WS-Discovery is UDP multicast and only works from the camera's own LAN
@@ -365,7 +367,8 @@ adapter/            on-device Python and pipelines
     configure-camera.sh writes/backs up /etc/adapter/cameras/*.env (via sudo)
     stream-codec.py     which codec MediaMTX is actually receiving (guide §21)
 client/index.html   the cloud browser client (single file)
-cloud/lambda/       one file per Lambda
+cloud/lambda/       one file per Lambda (deployed as pir-<name> copies: cloud/deploy-pir.sh)
+cloud/pir_stack.py  creates this project's own pir- cloud resources; IDs in cloud/pir-stack.json
 cloud/iam/          one policy document per role, plus check-drift.sh
 cloud/iot/          IoT rules and thing policy
 config/             templates for /etc/adapter (adapter.env, cameras/cam01.env)
@@ -392,6 +395,7 @@ produced a nonexistent unit that `systemctl` silently no-op'd against.
 | [`Camera-Features.md`](Camera-Features.md) | What the ONVIF camera actually does, marked **verified** vs *advertised* |
 | [`AUDIO.md`](AUDIO.md) | Optional audio: design, the two silent bugs, withdrawn claims |
 | [`OUTAGE.md`](OUTAGE.md) | Durable outage buffering: design, measurements, open questions |
+| [`PIR-MQTT-VMS-PI4.md`](PIR-MQTT-VMS-PI4.md) | **Plan, largely built:** a PIR motion sensor (Pico 2 W, local MQTT) as a recording trigger for the USB camera, recorded locally and uploaded on request; this project's own cloud resources; the compatibility contract with the successor project. Done so far: the local broker (Phase 0; Appendix B is the Mosquitto setup manual), the Pico firmware (Phase 1), the PIR switch in the admin GUI (Phase 3) the session logic with its replay tool (Phase 4) ring recording for PIR in the outage supervisor (Phase 5), the watcher that turns motion into local clips on the USB stick (Phase 6), uploading clips requested on the LAN to the shared clip list (Phase 7), the admin page's PIR panel and clip list (Phase 8), this project's own `pir-` cloud resources (Phase 9), the Pi's live PIR status and local clip index in the cloud, with uploads requested from there (Phase 10), this project's own cloud page (Phase 11), and the ring buffer and session footage in RAM (Phase 12). Next: Phase 12's one-week soak, before PIR mode is left on unattended |
 | [`OUTBOUND-CLOUD.md`](OUTBOUND-CLOUD.md) | The outbound-only architectural thesis |
 | [`NETWORK.md`](NETWORK.md) | Planning notes: MediaMTX's role, how WS-Discovery works, VLAN options, H.264 vs H.265. Reasoning, not a runbook — its banner marks what has moved on, and its codec section is superseded by guide §21 |
 | [`measurements/`](measurements/) | Raw recorded results, including [`codec-phase0.md`](measurements/codec-phase0.md) — the H.264/H.265 evidence (encode capability, KVS behaviour, browser matrix) |

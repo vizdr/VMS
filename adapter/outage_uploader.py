@@ -13,6 +13,10 @@ Buffered clips land in the SAME place as evidence clips -- `clips/<cameraId>/...
 row in the `clips` table -- so list/play/tier/delete and the S3 lifecycle rule all work
 on them unchanged. The key shape is not cosmetic: delete_clip.py derives the camera from
 `key.split("/")[1]`.
+
+It is also the one executor of PIR clip uploads (PIR-MQTT-VMS-PI4.md §3.7, §3.11), from both
+GUIs: the admin app's `upload-requested` marker, and `uploadRequestedAt` set on a clip's
+pir-local row by the cloud page. Results go to `uploaded.json` and onto that row.
 """
 import json
 import os
@@ -27,12 +31,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
 import camera_control
-from outage_buffer import (BUFFER_ROOT, OUTAGE_DIR, buffer_ready, log, segment_start,
-                           utc_now)
+from outage_buffer import (BUFFER_ROOT, OUTAGE_DIR, PIR_DIR, buffer_ready, log, read_registry_cache,
+                           segment_start, utc_now)
+from pir_cloud import clip_start_ts
 
 REGION = config.AWS_REGION
 BUCKET = config.EVIDENCE_BUCKET
 SCAN_SEC = 30
+PIR_TABLE, PIR_REQUEST_INDEX = "pir-local", "upload-requests"   # cloud/pir_stack.py
+PIR_SESSION_MAX_AGE_SEC = 1800     # the cloud poll runs every pass; the token lives 3600 s
+PIR_VERIFY_SEC = 300               # a clip deleted in AWS is back to "local only" within 5 min
 
 # At recovery kvssink is flushing its own backlog up the same uplink. Piling ~1 GB of
 # chunks on top can cause a second outage and lose that backlog -- so wait, then upload
@@ -131,7 +139,8 @@ def seg_duration(probe: dict) -> float:
         return 0.0
 
 
-def merge(chunk: list[tuple[Path, dict]], out: Path) -> bool:
+def merge(chunk: list[tuple[Path, dict]], out: Path,
+          inpoint: float = None, outpoint: float = None) -> bool:
     """Concat with ffmpeg, transcoding audio to AAC.
 
     `-c:a aac` is mandatory, not a preference. MediaMTX writes LPCM as ISO 23003-5 `ipcm`
@@ -142,8 +151,19 @@ def merge(chunk: list[tuple[Path, dict]], out: Path) -> bool:
     `+faststart` because the clip is played from a presigned URL in a <video> tag;
     `+genpts` because each segment's internal timestamps do not start at zero.
     """
+    # inpoint/outpoint trim the first and last file (seconds from each file's own start) --
+    # the PIR watcher cuts a session's window out of whole ring segments. With -c:v copy the
+    # cut lands on the keyframe at or before the inpoint, so a clip may start up to one GOP
+    # (2 s on cam-01) early -- never late.
+    lines = []
+    for i, (p, _) in enumerate(chunk):
+        lines.append(f"file '{p}'\n")
+        if i == 0 and inpoint:
+            lines.append(f"inpoint {inpoint:.3f}\n")
+        if i == len(chunk) - 1 and outpoint:
+            lines.append(f"outpoint {outpoint:.3f}\n")
     listing = out.with_suffix(".txt")
-    listing.write_text("".join(f"file '{p}'\n" for p, _ in chunk))
+    listing.write_text("".join(lines))
     rate = audio_rate(chunk[0][1])
     # At 8 kHz, 1024-sample AAC frames are 128 ms, and 64 kbps needs 8192 bits per frame
     # against a 6144 ceiling -- ffmpeg clamps and warns. Same arithmetic that sets the
@@ -162,15 +182,32 @@ def merge(chunk: list[tuple[Path, dict]], out: Path) -> bool:
     return True
 
 
-def upload_and_register(session, camera_id: str, merged: Path,
-                        start: datetime, duration: float, labels: list[str]) -> bool:
-    """Upload, confirm, then register. Returns True only if all three succeeded."""
+def video_codec(path: Path) -> str | None:
+    """'h264' / 'h265', the names clip_to_s3.py and record_clip.py write into the clips table.
+    Every other row there carries it; uploads from here used to be the only ones without
+    (PIR-MQTT-VMS-PI4.md §4.3, data contract rule 3)."""
+    probe = ffprobe(path)
+    for s in (probe or {}).get("streams", []):
+        if s.get("codec_type") == "video":
+            return {"h264": "h264", "hevc": "h265"}.get(s.get("codec_name"))
+    return None
+
+
+def upload_and_register(session, camera_id: str, merged: Path, start: datetime,
+                        duration: float, labels: list[str], suffix: str = "outage") -> str | None:
+    """Upload, confirm, then register. Returns the S3 key only if all three succeeded.
+
+    `suffix` names the file: "outage" for backfill, "pir-s<seq>" for a requested PIR clip --
+    the seq because two PIR sessions can start in the same second, and the key has only
+    second resolution.
+    """
     from boto3.s3.transfer import TransferConfig
     from botocore.config import Config
     from botocore.exceptions import ClientError
 
     key = (f"clips/{camera_id}/{start.strftime('%Y/%m/%d')}/"
-           f"{start.strftime('%H%M%S')}-outage.mp4")
+           f"{start.strftime('%H%M%S')}-{suffix}.mp4")
+    codec = video_codec(merged)
     cfg = Config(connect_timeout=10, read_timeout=60, retries={"max_attempts": 3})
     s3 = session.client("s3", region_name=REGION,
                         endpoint_url=f"https://s3.{REGION}.amazonaws.com", config=cfg)
@@ -187,10 +224,10 @@ def upload_and_register(session, camera_id: str, merged: Path,
         head = s3.head_object(Bucket=BUCKET, Key=key)
         if head["ContentLength"] != merged.stat().st_size:
             log("    size mismatch after upload -- keeping local copy")
-            return False
+            return None
     except Exception as e:
         log(f"    upload failed ({type(e).__name__}: {str(e)[:120]}) -- keeping local copy")
-        return False
+        return None
 
     try:
         table = session.resource("dynamodb", region_name=REGION).Table("clips")
@@ -201,6 +238,7 @@ def upload_and_register(session, camera_id: str, merged: Path,
                 "s3Key": key,
                 "labels": labels,
                 "durationSec": int(round(duration)),
+                **({"videoCodec": codec} if codec else {}),
             },
             # clip_to_s3.py and record_clip.py both put_item unconditionally; do not copy
             # that here. A key collision with a real evidence clip must fail loudly rather
@@ -210,10 +248,10 @@ def upload_and_register(session, camera_id: str, merged: Path,
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
             log(f"    a clip already exists at {start.isoformat()} -- not overwriting")
-            return True          # object is in S3; do not retry forever
+            return key           # object is in S3; do not retry forever
         log(f"    registry write failed ({e}) -- keeping local copy")
-        return False
-    return True
+        return None
+    return key
 
 
 def process_group(session, capture_dir: Path, cam_dir: Path, camera_id: str,
@@ -306,6 +344,234 @@ def process_capture(session, capture_dir: Path) -> None:
         log(f"  {j['outageId']}: incomplete -- will retry next pass")
 
 
+def pending_pir_uploads() -> list[Path]:
+    """PIR sessions whose clip someone asked to upload (PIR-MQTT-VMS-PI4.md §3.7): a merged
+    clip with an `upload-requested` marker and no `uploaded.json` yet."""
+    if not PIR_DIR.is_dir():
+        return []
+    return sorted(m.parent for m in PIR_DIR.glob("*/upload-requested")
+                  if not (m.parent / "uploaded.json").exists())
+
+
+_pir_warned = set()
+
+
+def process_pir_request(session, sdir: Path, via: str = "lan", requested_by: str | None = None) -> None:
+    """Upload one requested PIR clip. The local clip stays: an upload is a copy (D10), and
+    local retention (pir_watcher.py) decides when the local file goes."""
+    try:
+        j = json.loads((sdir / "state.json").read_text())
+    except Exception:
+        return
+    clip = sdir / (j.get("clip") or "clip.mp4")
+    if j.get("status") != "merged" or not clip.exists():
+        if sdir.name not in _pir_warned:          # not ready yet, or failed: say so once
+            log(f"pir {sdir.name}: upload requested, but the clip is {j.get('status')} -- waiting")
+            _pir_warned.add(sdir.name)
+        return
+    start = datetime.fromtimestamp(float(j["from"])).astimezone()
+    labels = ["pir", f"pir:seq {j.get('seq')}"]
+    log(f"pir {sdir.name}: upload requested" + (f" in the cloud by {requested_by}" if via == "cloud" else ""))
+    key = upload_and_register(session, j["cameraId"], clip, start,
+                              float(j.get("durationSec") or 0), labels,
+                              suffix=f"pir-s{j.get('seq')}")
+    if not key:
+        log(f"  pir {sdir.name}: not uploaded -- the request stays and is retried next pass")
+        return
+    record = {"s3Key": key, "startTs": start.isoformat(), "uploadedAt": utc_now().isoformat(),
+              "sizeBytes": clip.stat().st_size, "videoCodec": video_codec(clip),
+              "via": via, "requestedBy": requested_by}
+    _write_json(sdir / "uploaded.json", record)
+    log(f"  pir {sdir.name}: in AWS as {key}; local copy kept")
+
+
+def _write_json(path: Path, data) -> None:
+    """This process is the only writer of uploaded.json and cloud-request.json."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)
+
+
+# --- cloud requests and results on pir-local (PIR-MQTT-VMS-PI4.md §3.11, Phase 10) -------------
+
+_pir_cloud = {"session": None, "at": 0.0, "ok": None, "unindexed": set(), "verified": 0.0}
+
+
+def _pir_session():
+    c = _pir_cloud
+    if c["session"] is None or time.monotonic() - c["at"] > PIR_SESSION_MAX_AGE_SEC:
+        from aws_device_creds import get_session
+        c["session"], c["at"] = get_session(REGION), time.monotonic()
+    return c["session"]
+
+
+def _short_timeouts():
+    # One attempt, seconds not minutes: this runs every pass, and an unreachable AWS must not
+    # cost what boto3's defaults take (outage_buffer._fetch_registry).
+    from botocore.config import Config
+    return Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
+
+
+def _pir_table():
+    return _pir_session().resource("dynamodb", region_name=REGION, config=_short_timeouts()).Table(PIR_TABLE)
+
+
+def cloud_requests(cameras: list[str]) -> list[dict]:
+    """Rows where someone pressed Upload in the cloud page and no result is written yet.
+    Read from the sparse index, never by querying the table: see pir_stack.ensure_request_index."""
+    from boto3.dynamodb.conditions import Attr, Key
+    table, found = _pir_table(), []
+    for cam in cameras:
+        kwargs = {"IndexName": PIR_REQUEST_INDEX, "KeyConditionExpression": Key("cameraId").eq(cam),
+                  "FilterExpression": Attr("uploadedKey").not_exists() & Attr("uploadError").not_exists()}
+        while True:
+            r = table.query(**kwargs)
+            found += r["Items"]
+            if "LastEvaluatedKey" not in r:
+                break
+            kwargs["ExclusiveStartKey"] = r["LastEvaluatedKey"]
+    return sorted(found, key=lambda i: i["uploadRequestedAt"])
+
+
+def _row_result(row_key: dict, **fields) -> bool:
+    """Write the uploader's fields -- and only those -- onto an existing index row. False if the
+    row is not there (not indexed yet, or already expired): never create a row from here."""
+    from botocore.exceptions import ClientError
+    sets = ", ".join(f"{k} = :{k}" for k in fields)
+    removes = [k for k in ("uploadError",) if k not in fields]
+    try:
+        _pir_table().update_item(
+            Key=row_key, ConditionExpression="attribute_exists(sk)",
+            UpdateExpression=f"SET {sets}" + (f" REMOVE {', '.join(removes)}" if removes else ""),
+            ExpressionAttributeValues={f":{k}": v for k, v in fields.items()})
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def process_cloud_request(session, row: dict) -> None:
+    sid, key = row.get("sessionId"), {"cameraId": row["cameraId"], "sk": row["sk"]}
+    sdir = PIR_DIR / sid if sid else None
+    if sdir is None or not (sdir / "state.json").exists():
+        # buffer_ready() was checked by the caller, so a missing folder really is gone, not an
+        # unplugged stick.
+        _row_result(key, uploadError="gone", uploadedAt=utc_now().isoformat())
+        log(f"pir {sid}: requested in the cloud by {row.get('requestedBy')}, but the clip is gone")
+        return
+    try:
+        j = json.loads((sdir / "state.json").read_text())
+    except Exception:
+        return
+    if j.get("status") != "merged" or not (sdir / (j.get("clip") or "clip.mp4")).exists():
+        _row_result(key, uploadError=f"clip {j.get('status')}", uploadedAt=utc_now().isoformat())
+        return
+    if not (sdir / "cloud-request.json").exists():
+        # Recorded locally: the admin app shows it, and retention treats the clip as pending.
+        _write_json(sdir / "cloud-request.json", {
+            "requestedAt": row["uploadRequestedAt"], "requestedBy": row.get("requestedBy"),
+            "seenAt": utc_now().isoformat()})
+    if not (sdir / "uploaded.json").exists():
+        process_pir_request(session, sdir, via="cloud", requested_by=row.get("requestedBy"))
+    # The result reaches the row through mirror_results(), like every other upload's.
+
+
+def mirror_results() -> None:
+    """Put every local upload result onto its index row, whichever GUI asked for it -- so the
+    cloud page shows a clip uploaded from the admin app as 'in AWS' too. uploaded.json gets
+    indexRowUpdated once that write succeeded; until the watcher has indexed the clip there is
+    no row yet, and this retries quietly each pass."""
+    if not PIR_DIR.is_dir():
+        return
+    for path in sorted(PIR_DIR.glob("*/uploaded.json")):
+        try:
+            rec = json.loads(path.read_text())
+            j = json.loads((path.parent / "state.json").read_text())
+        except Exception:
+            continue
+        if rec.get("indexRowUpdated"):
+            continue
+        key = {"cameraId": j["cameraId"], "sk": f"clip#{clip_start_ts(j)}"}
+        if _row_result(key, uploadedKey=rec["s3Key"], uploadedAt=rec["uploadedAt"]):
+            _write_json(path, {**rec, "indexRowUpdated": True})
+            _pir_cloud["unindexed"].discard(path.parent.name)
+        elif path.parent.name not in _pir_cloud["unindexed"]:
+            _pir_cloud["unindexed"].add(path.parent.name)
+            log(f"pir {path.parent.name}: uploaded, but its index row isn't there yet -- retrying")
+
+
+def verify_uploads() -> None:
+    """A PIR clip whose AWS copy was deleted -- from either project's page, or by hand -- goes
+    back to "on the Pi only" in both GUIs and can be uploaded again (D10: deleting the copy in
+    AWS never touches the local clip). Existence is read by listing the day folders that hold
+    uploads, not by HEAD: without ListBucket on the whole bucket, a HEAD on a missing key answers
+    403, not 404, and PirLocal grants ListBucket for `clips/` only.
+
+    Resetting ends the request cycle, so this also removes the request markers -- the admin app's
+    `upload-requested` and pir-control's `uploadRequestedAt`/`requestedBy`. It is the one place
+    this process touches another writer's field, and only once the copy is gone: left in place,
+    either marker would make the next pass upload the clip again. uploaded.json goes last, so a
+    crash halfway leaves a state the next check simply repeats."""
+    from botocore.exceptions import ClientError
+    records = {}
+    for path in PIR_DIR.glob("*/uploaded.json") if PIR_DIR.is_dir() else []:
+        try:
+            records[path.parent] = (json.loads(path.read_text()),
+                                    json.loads((path.parent / "state.json").read_text()))
+        except Exception:
+            continue
+    if not records:
+        return
+    s3 = _pir_session().client("s3", region_name=REGION, config=_short_timeouts(),
+                               endpoint_url=f"https://s3.{REGION}.amazonaws.com")
+    existing = set()
+    for prefix in {rec["s3Key"].rsplit("/", 1)[0] + "/" for rec, _ in records.values()}:
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
+            existing.update(o["Key"] for o in page.get("Contents", []))
+    for sdir, (rec, j) in records.items():
+        if rec["s3Key"] in existing:
+            continue
+        try:
+            _pir_table().update_item(
+                Key={"cameraId": j["cameraId"], "sk": f"clip#{clip_start_ts(j)}"},
+                ConditionExpression="uploadedKey = :k",     # only a row that still points at it
+                UpdateExpression="REMOVE uploadedKey, uploadedAt, uploadError, uploadRequestedAt, requestedBy",
+                ExpressionAttributeValues={":k": rec["s3Key"]})
+        except ClientError as e:
+            if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+        for name in ("upload-requested", "cloud-request.json", "uploaded.json"):
+            (sdir / name).unlink(missing_ok=True)
+        log(f"pir {sdir.name}: its AWS copy {rec['s3Key']} was deleted -- back to local only")
+
+
+def pir_cloud_pass(session_for_upload) -> None:
+    """One pass of the cloud side. Its own error handling: an unreachable AWS here must not
+    hold up outage backfill or LAN requests, and is logged once per streak, not every 30 s."""
+    cameras = [cam for cam, row in read_registry_cache().items() if row.get("pirTopic")]
+    if not cameras:
+        return
+    c = _pir_cloud
+    try:
+        rows = cloud_requests(cameras)
+        if rows:
+            session = session_for_upload or c["session"]
+            for row in rows:
+                process_cloud_request(session, row)
+        mirror_results()
+        if time.monotonic() - c["verified"] >= PIR_VERIFY_SEC:
+            verify_uploads()
+            c["verified"] = time.monotonic()
+        if c["ok"] is False:
+            log("pir-local reachable again -- cloud requests resume")
+        c["ok"] = True
+    except Exception as e:  # noqa: BLE001
+        if c["ok"] is not False:
+            log(f"pir-local unreachable ({type(e).__name__}: {str(e)[:120]}) -- cloud requests wait")
+        c["ok"], c["session"] = False, None
+
+
 def _camera_id_for_path(mediamtx_path: str) -> str:
     # "cam02" -> "cam-02". camera_control owns the forward conversion; this is the only
     # place the inverse is needed, and it must agree with it.
@@ -324,13 +590,19 @@ def main():
                 time.sleep(SCAN_SEC)
                 continue
             pending = sorted(OUTAGE_DIR.glob("*/state.json"))
-            if pending:
+            pir_requests = pending_pir_uploads()
+            session = None
+            if pending or pir_requests:
                 from aws_device_creds import get_session
                 # Fresh session per pass: the role-alias token is valid 3600s and this is
                 # a long-running daemon (see aws_device_creds.py).
                 session = get_session(REGION)
                 for journal in pending:
                     process_capture(session, journal.parent)
+                # After any outage backfill: that is the footage KVS lost, so it goes first.
+                for sdir in pir_requests:
+                    process_pir_request(session, sdir)
+            pir_cloud_pass(session)          # None: it uses its own cached session
             time.sleep(SCAN_SEC)
         except KeyboardInterrupt:
             return 0

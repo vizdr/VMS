@@ -56,6 +56,35 @@
   .ctl-inactive { opacity: 0.45; }
   pre.envpreview { background: #f6f6f6; border: 1px solid #ddd; border-radius: 4px;
                    padding: 0.6rem; font-size: 0.75rem; overflow-x: auto; white-space: pre-wrap; }
+  .pir-grid { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.8rem;
+              font-size: 0.85rem; margin-top: 0.5rem; }
+  .pir-grid .k { color: #555; }
+  .dot { display: inline-block; width: 0.65rem; height: 0.65rem; border-radius: 50%;
+         background: #999; margin-right: 0.3rem; vertical-align: -1px; }
+  .dot.on { background: #2a7d2a; } .dot.off { background: #c0392b; } .dot.motion { background: #e67e22; }
+  .pir-warn { color: #b8860b; font-size: 0.85rem; margin-top: 0.4rem; }
+  .clip-thumb { width: 96px; height: 54px; object-fit: cover; background: #000; display: block; }
+  .clip-actions button { font-size: 0.75rem; padding: 0.2rem 0.5rem; margin: 0 0.25rem 0.2rem 0; }
+  .clip-player video { width: 100%; max-width: 640px; background: #000; display: block; }
+  .clip-player .close-player { margin-top: 0.35rem; font-size: 0.8rem; padding: 0.25rem 0.7rem; }
+  /* Pager under the clip list: the same as the cloud page's (the successor's layout, page
+     numbers as plain links). On a single page only the count shows. */
+  .clips-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.6rem; }
+  .clips-pager > button { font-size: 0.8rem; padding: 0.3rem 0.7rem; margin-right: 0; }
+  .clips-pager.single > button, .clips-pager.single .pg-numbers { display: none; }
+  .clips-pager .pg-numbers { display: contents; }
+  .clips-pager .pg-num {
+    background: none; border: none; margin: 0; padding: 0.2rem 0.35rem; min-width: 1.4rem;
+    font: inherit; font-size: 0.9rem; color: #0645ad; text-decoration: underline; cursor: pointer;
+  }
+  .clips-pager .pg-num:hover:not(:disabled) { color: #0b0080; }
+  .clips-pager .pg-num.pg-current { color: #222; font-weight: 700; text-decoration: none; cursor: default; }
+  .clips-pager .pg-num:disabled:not(.pg-current) { color: #999; cursor: default; }
+  .clips-pager .pg-gap { color: #888; padding: 0 0.2rem; }
+  .clips-page-label { color: #888; font-size: 0.85rem; margin: 0 0.5rem; }
+  .clips-pager.single .clips-page-label { margin-left: 0; }
+  .aws-state { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 1rem; color: #fff; white-space: nowrap; }
+  .aws-local { background: #999; } .aws-requested { background: #b8860b; } .aws-done { background: #2a7d2a; }
 </style>
 </head>
 <body>
@@ -110,6 +139,30 @@
         title="Close this panel and leave everything as it is">Hide</button>
 <span id="usbStatus" class="status"></span>
 <div id="usbResult"></div>
+
+<h2>5. PIR sensor</h2>
+<p class="status">
+  The Pico 2 W's motion sensor, as kvs-pir-watcher sees it (refreshed every 5 s). With the
+  PIR trigger on, each motion records this camera locally from the ring buffer on the USB
+  stick -- no KVS push needed. Keep it off unattended until the ring moves to RAM (D7).
+</p>
+<div id="pirPanel"><span class="status">loading...</span></div>
+
+<h2>6. PIR clips</h2>
+<p class="status">
+  Clips on the USB stick, newest first. <b>Upload to AWS</b> copies one into the cloud clip
+  list (labelled <code>pir</code>); the local copy stays. <b>Keep</b> protects a clip from the
+  14-day clean-up. LAN only: these files never leave the Pi unless you upload them.
+</p>
+<div id="pirClips"><span class="status">loading...</span></div>
+<div id="pirClipsPager" class="clips-pager single">
+  <button class="pg-first">&laquo; Newest</button>
+  <button class="pg-newer">&lsaquo; Newer</button>
+  <span class="pg-numbers"></span>
+  <button class="pg-older">Older &rsaquo;</button>
+  <button class="pg-last">Oldest &raquo;</button>
+  <span class="clips-page-label"></span>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
@@ -327,6 +380,15 @@ async function loadCameras() {
             </label>
             <div id="outageStatus-${c.cameraId}" class="status"></div>
           </div>
+          ${c.pirTopic ? `
+          <div style="margin-top:4px">
+            <label class="cb" title="Record this camera locally when the PIR sensor (${c.pirTopic}) detects motion. The switch is stored now; the recording itself arrives in a later phase (PIR-MQTT-VMS-PI4.md).">
+              <input type="checkbox" id="pir-${c.cameraId}"
+                     onchange="setPirRecording('${c.cameraId}', this.checked)">
+              PIR trigger
+            </label>
+            <div id="pirStatus-${c.cameraId}" class="status"></div>
+          </div>` : ""}
         </td>
         <td>
           <div class="ctl-row">
@@ -350,6 +412,8 @@ async function loadCameras() {
       if (aud) aud.checked = !!c.audioEnabled;
       const ob = tr.querySelector(`#outage-${c.cameraId}`);
       if (ob) ob.value = String(c.outageBufferSec || 0);
+      const pir = tr.querySelector(`#pir-${c.cameraId}`);
+      if (pir) pir.checked = !!c.pirRecording;
     }
     const anSel = document.getElementById("anCam");
     if (anSel) {
@@ -429,6 +493,24 @@ async function setOutageBuffer(id, secs) {
       ? "buffering on — needs KVS push running"
       : "off";
   } catch (e) {
+    el.textContent = e.message;
+  }
+}
+
+// Registry-only, and a separate flag from recordingMode on purpose: the table is shared
+// with the successor, which must never see a recording mode it doesn't know. Nothing reads
+// the flag yet -- the local recorder that will arrives in a later phase of the PIR plan,
+// and the status text says so rather than implying recording has started.
+async function setPirRecording(id, enabled) {
+  const el = document.getElementById(`pirStatus-${id}`);
+  const box = document.getElementById(`pir-${id}`);
+  el.textContent = "saving…";
+  try {
+    await api(`/api/cameras/${id}/pir`, { method: "POST",
+      body: JSON.stringify({ pirRecording: enabled }) });
+    el.textContent = enabled ? "on — saved; local recording not built yet" : "off";
+  } catch (e) {
+    if (box) box.checked = !enabled;   // never show a setting the server refused
     el.textContent = e.message;
   }
 }
@@ -943,6 +1025,242 @@ async function revertUsb(name) {
     box.innerHTML = `<span class="error">${e.message}</span>`;
   }
 }
+
+// --- 5. PIR sensor ------------------------------------------------------------------------
+const fmtTime = iso => iso ? new Date(iso).toLocaleTimeString() : "--";
+const ago = iso => iso ? `${Math.round((Date.now() - new Date(iso)) / 1000)} s ago` : "never";
+
+async function loadPir() {
+  const el = document.getElementById("pirPanel");
+  let h;
+  try { h = await api("/api/pir"); } catch (e) { el.innerHTML = `<span class="error">${e.message}</span>`; return; }
+  if (!h.available) { el.innerHTML = `<p class="pir-warn">PIR status unavailable: ${h.reason}</p>`; return; }
+  let html = h.stale ? `<p class="pir-warn">The watcher's last heartbeat is ${h.ageSec} s old --
+    everything below is <b>unknown</b>, not current. Is kvs-pir-watcher running?</p>` : "";
+  if (!h.brokerConnected) html += `<p class="pir-warn">The watcher is not connected to the local broker.</p>`;
+  if (h.ntpSynced === false) html += `<p class="pir-warn">The Pi's clock is not NTP-synced (it has no RTC).</p>`;
+  for (const [base, p] of Object.entries(h.picos || {})) {
+    const online = p.online === true ? `<span class="dot on"></span>online`
+                 : p.online === false ? `<span class="dot off"></span>offline` : `<span class="dot"></span>unknown`;
+    const motion = p.warmingUp ? "warming up" : p.motion ? `<span class="dot motion"></span>motion` : "still";
+    const cmd = p.retriggerCmd === undefined ? "none seen since the watcher started"
+              : `${p.retriggerCmd === "0" ? "single-trigger" : "retriggerable"} at ${fmtTime(p.retriggerCmdAt)}`;
+    html += `<div class="device-card"><b>${base}</b>
+      <div class="pir-grid">
+        <span class="k">Pico</span><span>${online} &middot; heartbeat ${ago(p.lastStateAt)}</span>
+        <span class="k">Sensor</span><span>${motion} &middot; ${p.count ?? "?"} motions since boot${p.dropped ? ` &middot; <span class="error">${p.dropped} events dropped on the Pico</span>` : ""}</span>
+        <span class="k">Trigger mode</span><span>last command: ${cmd}
+          <span class="status">(the Pico doesn't report its mode; it returns to retriggerable when it reboots)</span></span>
+      </div>
+      <table><thead><tr><th>Time</th><th>Event</th><th>#</th><th>Lasted</th><th>Arrived late by</th></tr></thead><tbody>
+      ${(p.recentEvents || []).map(e => `<tr><td>${fmtTime(e.at)}</td><td>${e.event}</td><td>${e.seq}</td>
+        <td>${e.durationMs != null ? (e.durationMs / 1000).toFixed(2) + " s" : ""}</td>
+        <td>${e.lateSec == null ? "?" : e.lateSec + " s"}</td></tr>`).join("") || `<tr><td colspan=5 class="status">no events yet</td></tr>`}
+      </tbody></table></div>`;
+  }
+  for (const [id, c] of Object.entries(h.cameras || {})) {
+    const counts = Object.entries(c.counts || {}).map(([k, v]) => `${k}: ${v}`).join(", ") || "none";
+    html += `<div class="device-card"><b>${id}</b> &larr; ${c.pirTopic}
+      <div class="pir-grid">
+        <span class="k">PIR trigger</span><span>${c.pirRecording ? "<b>on</b>" : "off"}
+          <button onclick="togglePir('${id}', ${!c.pirRecording})">${c.pirRecording ? "Switch off" : "Switch on"}</button>
+          <span id="pirPanelStatus-${id}" class="status"></span></span>
+        <span class="k">Ring buffer</span><span>${c.ringRecording ? '<span class="dot on"></span>recording' : '<span class="dot"></span>not recording'}</span>
+        <span class="k">Session</span><span>${c.session}${c.sessionId ? ` (${c.sessionId})` : ""}</span>
+        <span class="k">Last motion / clip</span><span>${fmtTime(c.lastEventAt)} / ${fmtTime(c.lastClipAt)}</span>
+        <span class="k">Since the watcher started</span><span>${counts}</span>
+        <span class="k">Trigger mode</span><span>
+          <button onclick="setRetrigger('${id}', true)">Retriggerable</button>
+          <button onclick="setRetrigger('${id}', false)">Single-trigger</button>
+          <span id="pirModeStatus-${id}" class="status"></span></span>
+      </div></div>`;
+  }
+  el.innerHTML = html || `<p class="status">No camera has a PIR sensor (pirTopic).</p>`;
+}
+
+async function togglePir(id, on) {
+  const el = document.getElementById(`pirPanelStatus-${id}`);
+  el.textContent = "saving…";
+  try {
+    await api(`/api/cameras/${id}/pir`, { method: "POST", body: JSON.stringify({ pirRecording: on }) });
+    el.textContent = "saved -- the watcher and the ring follow within 60 s";
+    loadCameras();
+  } catch (e) { el.textContent = e.message; }
+}
+
+async function setRetrigger(id, on) {
+  const el = document.getElementById(`pirModeStatus-${id}`);
+  el.textContent = "sending…";
+  try {
+    await api(`/api/cameras/${id}/pir/retrigger`, { method: "POST", body: JSON.stringify({ retriggerable: on }) });
+    el.textContent = `sent: ${on ? "retriggerable" : "single-trigger"}`;
+  } catch (e) { el.textContent = e.message; }
+}
+
+// --- 6. PIR clips --------------------------------------------------------------------------
+// The requester's name comes from the cloud (a Cognito user name): text, never markup.
+const escText = v => String(v ?? "").replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
+
+// Paged like the cloud page's lists: PIR_PAGE_SIZE per page, newest first. `page` is a page
+// number, "first", "last", "older", "newer" or "current" (what the 15 s refresh and every
+// action use, so the view stays put). The server answers a page past the end with the last.
+const PIR_PAGE_SIZE = 10;
+const pirPg = { page: 1, pages: 1, total: 0, busy: false, req: 0 };
+
+async function loadPirClips(page = "current") {
+  const el = document.getElementById("pirClips");
+  const target = pageTarget(pirPg, page);
+  const req = pirPg.req = pirPg.req + 1;
+  pirPg.busy = true;
+  renderPirPager();
+  let d;
+  try { d = await api(`/api/pir-clips?limit=${PIR_PAGE_SIZE}&page=${target}`); }
+  catch (e) {
+    if (req !== pirPg.req) return;
+    pirPg.busy = false; renderPirPager();
+    el.innerHTML = `<span class="error">${e.message}</span>`;
+    return;
+  }
+  if (req !== pirPg.req) return;
+  Object.assign(pirPg, { busy: false, page: d.page, pages: d.pages, total: d.total });
+  renderPirPager();
+  if (!d.clips.length) { el.innerHTML = `<p class="status">No PIR clips on the stick.</p>`; return; }
+  const rows = d.clips.map(c => {
+    const sid = c.sessionId;
+    const when = c.from ? new Date(c.from * 1000).toLocaleString() : "?";
+    // Requests come from either GUI (§3.11): this page's marker, or the cloud page's, which the
+    // uploader records locally as cloudRequest when it picks it up (within 30 s).
+    const by = r => r && r.requestedBy ? ` by ${escText(r.requestedBy)}` : "";
+    const cloudPending = c.cloudRequest && !c.uploaded;
+    const pending = (c.uploadRequested || c.cloudRequest) && !c.uploaded;
+    const aws = c.uploaded ? `<span class="aws-state aws-done" title="${escText(c.uploaded.s3Key)}">in AWS</span>`
+                  + (c.uploaded.via === "cloud" ? `<div class="status">asked for in the cloud${by(c.uploaded)}</div>` : "")
+              : cloudPending ? `<span class="aws-state aws-requested" title="requested ${escText(c.cloudRequest.requestedAt)}">uploading</span>`
+                  + `<div class="status">asked for in the cloud${by(c.cloudRequest)}</div>`
+              : c.uploadRequested ? `<span class="aws-state aws-requested">upload requested</span>`
+              : `<span class="aws-state aws-local">local only</span>`;
+    const ready = c.status === "merged" && c.hasClip;
+    const state = c.status === "merged" ? `${c.durationSec} s` : c.status === "failed"
+                ? `<span class="error">failed: ${c.error || "?"}</span>` : `${c.status}…`;
+    return `<tr id="pirrow-${sid}">
+      <td>${c.hasThumb ? `<img class="clip-thumb" src="/api/pir-clips/${sid}/thumb-1.jpg" alt="">` : ""}</td>
+      <td>${when}<div class="status">${c.cameraId} &middot; closed by ${c.reason || "--"}</div></td>
+      <td>${state}</td><td>${aws}</td>
+      <td class="clip-actions">
+        <button ${ready ? "" : "disabled"} onclick="playPirClip('${sid}')">&#9654; Play</button>
+        <button ${ready && !c.uploaded && !pending ? "" : "disabled"} onclick="uploadPirClip('${sid}')">Upload to AWS</button>
+        ${c.uploadRequested && !c.uploaded && !cloudPending ? `<button onclick="uploadPirClip('${sid}', true)">Cancel upload</button>` : ""}
+        <label class="cb"><input type="checkbox" ${c.kept ? "checked" : ""} onchange="keepPirClip('${sid}', this.checked)"> keep</label>
+        <button ${["merged", "failed"].includes(c.status) && !pending ? "" : "disabled"} onclick="deletePirClip('${sid}', ${!!c.uploaded})">Delete</button>
+        <div id="pirClipStatus-${sid}" class="status"></div>
+      </td></tr>`;
+  }).join("");
+  el.innerHTML = `<table><thead><tr><th></th><th>Recorded</th>
+    <th>Length</th><th>AWS</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderPirPager() {
+  const n = pirPg.total;
+  renderPager(document.getElementById("pirClipsPager"), pirPg, loadPirClips,
+              `${n} clip${n === 1 ? "" : "s"} on the stick`);
+}
+
+// A pager action, resolved against where the list is now.
+function pageTarget(pg, page) {
+  return page === "first" ? 1
+    : page === "last" ? "last"
+    : page === "older" ? pg.page + 1
+    : page === "newer" ? Math.max(1, pg.page - 1)
+    : page === "current" ? pg.page
+    : page;
+}
+
+// The page numbers to offer: all of them up to 9 pages, else the first, the last and two
+// either side of the current one, with null marking each gap ("…").
+function pageNumbers(page, pages) {
+  if (pages <= 9) return Array.from({ length: pages }, (_, i) => i + 1);
+  const shown = [...new Set([1, page - 2, page - 1, page, page + 1, page + 2, pages])]
+    .filter(n => n >= 1 && n <= pages).sort((a, b) => a - b);
+  const out = [];
+  shown.forEach((n, i) => { if (i && n - shown[i - 1] > 1) out.push(null); out.push(n); });
+  return out;
+}
+
+function renderPager(pager, pg, go, label) {
+  const { page, pages, busy } = pg;
+  pager.classList.toggle("single", pages <= 1);
+  const nums = pager.querySelector(".pg-numbers");
+  nums.innerHTML = "";
+  for (const n of pageNumbers(page, pages)) {
+    if (n === null) { nums.insertAdjacentHTML("beforeend", '<span class="pg-gap">…</span>'); continue; }
+    const b = document.createElement("button");
+    b.className = "pg-num" + (n === page ? " pg-current" : "");
+    b.textContent = n;
+    b.disabled = busy || n === page;
+    if (n === page) b.setAttribute("aria-current", "page");
+    b.onclick = () => go(n);
+    nums.appendChild(b);
+  }
+  pager.querySelector(".clips-page-label").textContent = label;
+  for (const [cls, action, off] of [["pg-first", "first", page === 1], ["pg-newer", "newer", page === 1],
+                                    ["pg-older", "older", page === pages], ["pg-last", "last", page === pages]]) {
+    const b = pager.querySelector("." + cls);
+    b.disabled = busy || off;
+    b.onclick = () => go(action);
+  }
+}
+
+// One player at a time, opened under its clip's row. It closes with its own "Stop & close
+// player" button (as on the cloud page), with Play again, or by opening another clip. While one
+// is open the 15 s refresh pauses, so the list doesn't redraw under the video.
+function playPirClip(sid) {
+  const open = document.getElementById(`pirplay-${sid}`);
+  closePirPlayer();
+  if (open) return;                         // Play on the clip already playing: just close it
+  const row = document.getElementById(`pirrow-${sid}`);
+  const tr = document.createElement("tr");
+  tr.id = `pirplay-${sid}`;
+  tr.innerHTML = `<td colspan=5 class="clip-player">
+      <video controls autoplay src="/api/pir-clips/${sid}/clip.mp4"></video>
+      <button class="close-player" onclick="closePirPlayer()">Stop &amp; close player</button></td>`;
+  row.after(tr);
+}
+
+function closePirPlayer() {
+  for (const cell of document.querySelectorAll(".clip-player")) {
+    const v = cell.querySelector("video");
+    if (v) { v.pause(); v.removeAttribute("src"); v.load(); }   // also ends the stick read
+    cell.parentElement.remove();
+  }
+}
+
+async function uploadPirClip(sid, cancel = false) {
+  const el = document.getElementById(`pirClipStatus-${sid}`);
+  try {
+    const r = await api(`/api/pir-clips/${sid}/upload`, { method: "POST", body: JSON.stringify(cancel ? { cancel: true } : {}) });
+    el.textContent = r.state === "requested" ? "requested -- uploads within 30 s" : r.state;
+    setTimeout(loadPirClips, 1000);
+  } catch (e) { el.textContent = e.message; }
+}
+
+async function keepPirClip(sid, keep) {
+  const el = document.getElementById(`pirClipStatus-${sid}`);
+  try { await api(`/api/pir-clips/${sid}/keep`, { method: "POST", body: JSON.stringify({ keep }) });
+        el.textContent = keep ? "kept" : "not kept"; }
+  catch (e) { el.textContent = e.message; loadPirClips(); }
+}
+
+async function deletePirClip(sid, inAws) {
+  if (!confirm(`Delete this clip from the USB stick?${inAws ? "\n\nThe copy in AWS stays -- delete that one in the cloud clip list." : ""}`)) return;
+  const el = document.getElementById(`pirClipStatus-${sid}`);
+  try { await api(`/api/pir-clips/${sid}`, { method: "DELETE" }); loadPirClips(); }
+  catch (e) { el.textContent = e.message; }
+}
+
+// While a clip plays its row must stay put, so the list only refreshes when nothing is playing.
+loadPir(); loadPirClips();
+setInterval(loadPir, 5000);
+setInterval(() => { if (!document.querySelector(".clip-player")) loadPirClips(); }, 15000);
 
 loadCameras();
 </script>

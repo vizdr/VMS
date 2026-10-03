@@ -27,12 +27,14 @@ for s in "A3 $KVS_SDK/build/libgstkvssink.so" \
   set -- $s; [ -e "$2" ] && echo "ok       $1  $2" || echo "MISSING  $1  $2"
 done
 command -v aws >/dev/null && echo "ok       A6  aws CLI" || echo "MISSING  A6  aws CLI"
+systemctl is-active --quiet mosquitto && echo "ok       A10 mosquitto (optional: PIR)" \
+                                      || echo "absent   A10 mosquitto (optional: PIR)"
 ```
 
 If everything is there you only need **Part B** — unless the repo was cloned to a new
 folder, in which case re-run **A8** first so the unit files point at it. A fresh Pi runs
 A1 → A8 in order, except that A3's build runs for hours in the background, so A4–A7 fit
-inside it.
+inside it. **A10 is optional**: only the PIR motion trigger (`kvs-pir-watcher`) needs it.
 
 ### A1. System stability hardening (§1.4) — do this before anything else
 
@@ -401,6 +403,13 @@ import sys; sys.path.insert(0, 'adapter'); from aws_device_creds import get_sess
 print(get_session().client('sts').get_caller_identity()['Arn'])"   # …assumed-role/KVSAdapterRole/…
 ```
 
+**This project's own cloud resources** (optional until its page is used; `PIR-MQTT-VMS-PI4.md`
+§3.9): `venv-adapter/bin/python3 cloud/pir_stack.py` creates the `pir-` API, function copies,
+table (with the index the Pi's uploader polls), app client and device policy, idempotently, and
+records their IDs in
+`cloud/pir-stack.json`; `--check` only reports. Code updates afterwards:
+`cloud/deploy-pir.sh all`.
+
 ### A8. Install the systemd units — once per Pi, again whenever the clone moves
 
 Part B only *enables and starts* units; this step creates their files. Unit files live
@@ -426,6 +435,7 @@ goes, which `systemctl` flavour controls it, and where its logs are:
 | `onvif-observe` | user | `~/.config/systemd/user/onvif-observe.service` | `adapter/observe_events.py` — **a measurement harness, not part of the system.** Enabled on this Pi, so it restarts at every boot and appends to a git-tracked log; disable it unless you want the measurement |
 | `kvs-outage-buffer` | user | `~/.config/systemd/user/kvs-outage-buffer.service` | `adapter/outage_buffer.py` |
 | `kvs-outage-uploader` | user | `~/.config/systemd/user/kvs-outage-uploader.service` | `adapter/outage_uploader.py` |
+| `kvs-pir-watcher` | user | `~/.config/systemd/user/kvs-pir-watcher.service` | `adapter/pir_watcher.py` — PIR motion → local clips (`PIR-MQTT-VMS-PI4.md` Phase 6). Needs A10's broker and credentials; idles harmlessly while no camera has `pirRecording` on |
 | `kvs-cam01` | **system** | `/etc/systemd/system/kvs-cam01.service` | `adapter/bin/stream-cam01.sh` |
 | `kvs-cam02` | **system** | `/etc/systemd/system/kvs-cam02.service` | `adapter/bin/stream-cam02.sh` |
 | `kvs-cam@` | **system** | `/etc/systemd/system/kvs-cam@.service` (+ `/etc/adapter/channels/<path>.env` per instance) | `adapter/bin/stream-channel.sh` |
@@ -521,7 +531,7 @@ RestartSec=5
 WantedBy=default.target
 EOF
 
-# Python daemons: one template, five units. All run under the venv's interpreter
+# Python daemons: one template, six units. All run under the venv's interpreter
 # (a bare python3 wouldn't see awsiotsdk/boto3/onvif), from the directory they live in.
 py_unit() {  # name  description  working-dir  script  [extra [Unit] lines]
 cat > ~/.config/systemd/user/$1.service <<EOF
@@ -551,6 +561,8 @@ py_unit kvs-outage-buffer   "Durable outage buffering supervisor (OUTAGE.md)" \
         "After=kvs-mediamtx.service"
 py_unit kvs-outage-uploader "Backfill buffered outage footage to S3 (OUTAGE.md)" \
         "${VMS_HOME}/adapter"             "${VMS_HOME}/adapter/outage_uploader.py"
+py_unit kvs-pir-watcher     "PIR motion -> local clips (PIR-MQTT-VMS-PI4.md)" \
+        "${VMS_HOME}/adapter"             "${VMS_HOME}/adapter/pir_watcher.py"
 
 systemctl --user daemon-reload
 ```
@@ -766,8 +778,96 @@ talking to whichever account a stale default happened to name — the failure th
 hardest to notice and most expensive to get wrong.
 
 Not covered by this file: the browser client (`client/index.html` carries the API Gateway
-and Cognito IDs it is built against) and the `cloud/` IAM documents, which name the
+and Cognito IDs it is built against, `pir-api` and `pir-web` from `cloud/pir-stack.json`) and the `cloud/` IAM documents, which name the
 account in ARNs. `grep -rn 596633517506 .` finds those.
+
+### A10. Local MQTT broker and `paho-mqtt` — optional, only for the PIR trigger
+
+Needed only for the PIR motion trigger (`PIR-MQTT-VMS-PI4.md`): a Pico 2 W publishes motion
+events to this broker, and `kvs-pir-watcher` subscribes as the `vms` user. Without A10, leave
+that unit disabled in Part B: it can't start without the broker, `paho-mqtt` and the
+`MQTT_*` keys. Leaving the broker running costs nothing. That file's **Appendix B** is the full manual, with the reasoning,
+every expected output and troubleshooting; this is the short form. Done on this Pi on
+2026-10-03.
+
+```bash
+sudo apt install mosquitto mosquitto-clients
+
+# Users. -c creates the file: first user only, or it wipes the others.
+# Type each password at the prompt. mosquitto_passwd's "owner is not root" warning is
+# expected -- ignore it, the broker needs the file owned by mosquitto (Appendix B.3).
+sudo mosquitto_passwd -c /etc/mosquitto/passwd pico
+sudo mosquitto_passwd /etc/mosquitto/passwd vms
+sudo mosquitto_passwd /etc/mosquitto/passwd gui
+
+sudo tee /etc/mosquitto/acl > /dev/null <<'EOF'
+user pico
+topic write home/pico2w-01/#
+topic read  home/pico2w-01/pir/cmd/#
+
+user vms
+topic read  home/#
+topic write home/pico2w-01/pir/cmd/#
+
+user gui
+topic read  home/#
+EOF
+sudo chown mosquitto:mosquitto /etc/mosquitto/passwd /etc/mosquitto/acl
+sudo chmod 600 /etc/mosquitto/passwd /etc/mosquitto/acl
+
+sudo tee /etc/mosquitto/conf.d/vms.conf > /dev/null <<'EOF'
+listener 1883
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl
+EOF
+sudo systemctl restart mosquitto
+
+"$VMS_HOME/venv-adapter/bin/pip" install paho-mqtt
+```
+
+Paste each `sudo tee … <<'EOF'` block whole, through its `EOF` line. Typed line by line at
+the prompt, the file contents only produce `bash: user: command not found`.
+
+**Proof:**
+
+```bash
+ss -ltn | grep 1883                         # 0.0.0.0:1883 -- not only 127.0.0.1:1883
+mosquitto_pub -h localhost -t test -m x     # Connection Refused: not authorised.
+"$VMS_HOME/venv-adapter/bin/python3" -c "import paho.mqtt; print(paho.mqtt.__version__)"   # 2.1.0
+```
+
+Then run Appendix B.6's authenticated and ACL tests with the real passwords.
+
+**Credentials for VMS's own clients.** The Phase 2 logger `adapter/observe_pir.py` (and later
+the PIR watcher) connects as `vms`. It finds the broker through four keys in
+`/etc/adapter/adapter.env`; they are in the A9 template, so a file installed from it already
+has them. The `vms` password goes in a separate file, typed at a prompt so it never reaches
+your shell history:
+
+```bash
+grep '^MQTT_' /etc/adapter/adapter.env       # MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASSWORD_FILE
+read -rsp 'vms password: ' P; echo
+printf '%s' "$P" | sudo sh -c 'umask 077; cat > /etc/adapter/mqtt-vms.password'; unset P
+sudo chown root:"$USER" /etc/adapter/mqtt-vms.password
+sudo chmod 640 /etc/adapter/mqtt-vms.password
+```
+
+**Proof:** a 30-second run connects instead of being refused:
+
+```bash
+venv-adapter/bin/python3 adapter/observe_pir.py --out /tmp/pir-check.jsonl --hours 0.01
+grep -c '"kind": "connected"' /tmp/pir-check.jsonl     # 1, and no "connect_failed"
+rm /tmp/pir-check.jsonl
+```
+
+Two things to know:
+
+- **Nothing needs opening.** Port 1883 is reachable on the LAN only, so the home router still
+  has no inbound ports.
+- **Don't put a TLS listener on 8883.** The nftables rule from guide §7.3 drops every
+  outgoing connection to 8883, including the Pi's own clients connecting to its broker.
+
 ---
 
 ## Part B — Launch (every session / after a reboot)
@@ -792,6 +892,7 @@ systemctl --user enable --now onvif-admin         # local camera admin GUI, port
 systemctl --user enable --now kvs-event-watcher   # ONVIF detection -> evidence clips
 systemctl --user enable --now kvs-outage-buffer   # durable outage buffering (OUTAGE.md)
 systemctl --user enable --now kvs-outage-uploader # backfills buffered footage to S3
+systemctl --user enable --now kvs-pir-watcher     # PIR motion -> local clips; only once A10 is done
 ```
 
 **`enable --now`, not `start`** — every line above. A unit that is only `start`ed runs
@@ -800,9 +901,11 @@ until the next reboot and then silently does not come back. That is not hypothet
 five days later left outage buffering switched off with nothing to indicate it. Part C's
 checks pass in that state, because everything they look at is still healthy.
 
-The last four are additions since the original list. `onvif-admin` is only needed when you
+The last five are additions since the original list. `onvif-admin` is only needed when you
 want to discover/register/control cameras (Part E); `kvs-event-watcher` only does anything
 for a camera whose `recordingMode` is a detection mode — it idles otherwise, at no cost.
+`kvs-pir-watcher` needs A10 and idles while no camera has its PIR switch on; it also keeps the
+cloud's PIR status and clip index current (`PIR-MQTT-VMS-PI4.md` §3.10–§3.11).
 
 That's it — the actual KVS producer (`kvs-cam01.service`, a **system** unit, not user) is
 deliberately *not* auto-started here. It's controlled on demand by the agent, either via
@@ -932,11 +1035,31 @@ To test it, use `adapter/bin/awsblock.sh on|off` — **not** §10.2's `iptables`
 which is IPv4-only and silently ineffective here. Then
 `adapter/bin/gap-fill.py --stream cam-02 --last 600`.
 
+### If the PIR trigger is set up (`PIR-MQTT-VMS-PI4.md`)
+
+Needs A10. The switch is per camera (admin GUI or this project's cloud page) and **stays off
+when nobody is around** until the plan's Phase 12 soak has run.
+
+```bash
+systemctl is-active mosquitto; systemctl --user is-active kvs-pir-watcher
+# the watcher's view: Pico online, the effective state ("off", "armed", or why not), cloud sync
+python3 -c "import json;h=json.load(open('/run/user/$(id -u)/vms/pir-state.json'));c=h['cameras']['cam-01'];print(h['ts'], c['effective'], 'cloud ok:', h['cloud']['ok'])"
+
+# with the switch on: the ring is in RAM and stays bounded (~4 segments), never on the stick
+curl -s http://127.0.0.1:9997/v3/config/paths/get/cam01 | python3 -m json.tool | grep -i "recordpath\|deleteafter"
+ls /run/user/$(id -u)/vms/ring/cam01/ | wc -l
+ls /mnt/vms-buffer/pir/ | tail -3        # one folder per session: clip.mp4, thumb-1.jpg
+```
+
 ---
 
 ## Part D — Access the browser client (§8, Checkpoint 7)
 
-**URL:** https://dugyd3kkt36pw.cloudfront.net  (CloudFront + TLS, §8.5.1)
+**URL:** https://d10sy0s307vyid.cloudfront.net  (this project's own page and API since
+2026-10-03, `PIR-MQTT-VMS-PI4.md` Phase 11; deploy with `cloud/deploy-pir.sh client`)
+
+`https://dugyd3kkt36pw.cloudfront.net` (§8.5.1) is the shared page, which is now the successor's:
+the same login works there, but this repository never deploys to it.
 
 **Login:** username `demo-viewer`, password `DemoViewer2026!`
 

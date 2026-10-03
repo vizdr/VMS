@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cam-01 / cam-02</title>
+<title>VMS cameras</title>
 <style>
   body { font-family: sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
   #login, #app { display: none; }
@@ -100,6 +100,40 @@
   }
   .browser-note strong { display: block; margin-bottom: 0.2rem; }
   .codec-warn { color: #8a5a00; font-size: 0.85rem; margin: -0.6rem 0 0.9rem; }
+
+  /* Pager under a clip list: the successor's layout (« Newest ‹ Newer 1 2 … 9 Older › Oldest »,
+     then the clip count), with the page numbers as plain links rather than raised buttons. On a
+     single page only the count shows. */
+  .clips-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.6rem; }
+  .clips-pager > button { font-size: 0.8rem; padding: 0.3rem 0.7rem; margin-right: 0; }
+  .clips-pager.single > button, .clips-pager.single .pg-numbers { display: none; }
+  .clips-pager .pg-numbers { display: contents; }
+  .clips-pager .pg-num {
+    background: none; border: none; margin: 0; padding: 0.2rem 0.35rem; min-width: 1.4rem;
+    font: inherit; font-size: 0.9rem; color: #0645ad; text-decoration: underline; cursor: pointer;
+  }
+  .clips-pager .pg-num:hover:not(:disabled) { color: #0b0080; }
+  .clips-pager .pg-num.pg-current { color: #222; font-weight: 700; text-decoration: none; cursor: default; }
+  .clips-pager .pg-num:disabled:not(.pg-current) { color: #999; cursor: default; }
+  .clips-pager .pg-gap { color: #888; padding: 0 0.2rem; }
+  .clips-page-label { color: #888; font-size: 0.85rem; margin: 0 0.5rem; }
+  .clips-pager.single .clips-page-label { margin-left: 0; }
+
+  /* PIR (PIR-MQTT-VMS-PI4.md §3.10-§3.11). Badges reuse .tier-badge's pill shape. */
+  .pir-badge { background: #6a3d9a; }
+  .pir-state-armed { background: #2a7d2a; }
+  .pir-state-off { background: #999; }
+  .pir-state-warn { background: #b8860b; }
+  .pir-state-unknown { background: #666; }
+  .pir-live { font-size: 0.85rem; color: #444; line-height: 1.6; margin-top: 0.35rem; }
+  .pir-thumb { width: 120px; height: 68px; object-fit: cover; background: #000;
+               border-radius: 3px; flex: none; display: inline-block; }
+  .pir-clip-deleted { opacity: 0.5; }
+  .aws-local { background: #999; }
+  .aws-requested { background: #b8860b; }
+  .aws-done { background: #2a7d2a; }
+  .aws-failed { background: #c0392b; }
+  .aws-deleted { background: #666; }
 </style>
 </head>
 <body>
@@ -130,9 +164,13 @@
 
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
-const API = "https://svfvg7xh9g.execute-api.eu-central-1.amazonaws.com/prod";
+// This project's own API and app client (PIR-MQTT-VMS-PI4.md §3.9, Phase 11): pir-api and
+// pir-web on the user pool shared with the successor. Never the shared kvs-demo-api: this page
+// lives in its own bucket, and the shared page and API belong to the successor (#48).
+// Values from cloud/pir-stack.json.
+const API = "https://wkq6c6zmb1.execute-api.eu-central-1.amazonaws.com/prod";
 const COGNITO_REGION = "eu-central-1";
-const COGNITO_CLIENT_ID = "1r0n2cor1pgqvahfogs6cfno7s";
+const COGNITO_CLIENT_ID = "284r1pa1n9dgdumg1q65n57kcn";
 
 // Fetched from GET /cameras (backed by the "cameras" DynamoDB registry) after login,
 // rather than hardcoded here -- a camera added through the registry shows up on next
@@ -360,7 +398,8 @@ async function checkForNewClips(camera) {
   const alertEl = document.getElementById(`clipsAlert-${camera}`);
   if (!s || !alertEl) return;
   try {
-    const r = await fetch(`${API}/clips?camera=${camera}`, { headers: { Authorization: idToken } });
+    // limit=1: only the newest clip matters here -- one read and one S3 HEAD per poll
+    const r = await fetch(`${API}/clips?camera=${camera}&limit=1`, { headers: { Authorization: idToken } });
     if (!r.ok) return;
     const data = await r.json();
     const newest = data.clips.length ? data.clips[0].startTs : null;
@@ -453,6 +492,20 @@ function renderCameraPanel(cam) {
       <div id="outageStatus-${cam.id}" class="status">${outageHint(cam.outageBufferSec)}</div>
     </div>
 
+    <div class="setting-section" id="pirSection-${cam.id}" hidden>
+      <h3>PIR motion sensor</h3>
+      <label class="audio-row">
+        <input type="checkbox" id="pir-${cam.id}" onchange="setPirMode('${cam.id}', this.checked)">
+        <span><strong>Record on motion</strong> <small>— to the Pi's USB drive · applies within two minutes</small></span>
+      </label>
+      <div id="pirLive-${cam.id}" class="pir-live">Waiting for the Pi's status…</div>
+      <div class="setting-note">
+        Clips stay on the Pi until you upload one below. Until the recording ring moves to
+        RAM, switch this off when nobody is around: it writes to the USB drive continuously.
+      </div>
+      <div id="pirStatus-${cam.id}" class="status"></div>
+    </div>
+
     <p>
       <button id="recordBtn-${cam.id}" onclick="toggleRecording('${cam.id}')">&#9679; Start Recording</button>
       <span id="recordStatus-${cam.id}" class="status"></span>
@@ -460,10 +513,38 @@ function renderCameraPanel(cam) {
 
     <div class="clips-section">
       <h3>Evidence clips
-        <button onclick="loadClips('${cam.id}')" style="font-size:0.8rem">Refresh</button>
+        <button onclick="loadClips('${cam.id}', 'first')" style="font-size:0.8rem">Refresh</button>
       </h3>
       <div id="clipsAlert-${cam.id}" class="clips-alert"></div>
       <ul id="clipsList-${cam.id}" class="clips-list"></ul>
+      <div id="clipsPager-${cam.id}" class="clips-pager single">
+        <button class="pg-first">&laquo; Newest</button>
+        <button class="pg-newer">&lsaquo; Newer</button>
+        <span class="pg-numbers"></span>
+        <button class="pg-older">Older &rsaquo;</button>
+        <button class="pg-last">Oldest &raquo;</button>
+        <span class="clips-page-label"></span>
+      </div>
+    </div>
+
+    <div class="clips-section" id="pirClipsSection-${cam.id}" hidden>
+      <h3>Motion clips on the Pi
+        <button onclick="loadPirClips('${cam.id}', 'first')" style="font-size:0.8rem">Refresh</button>
+      </h3>
+      <div class="setting-note">
+        Recorded locally when the PIR sensor saw motion, and kept on the Pi for 14 days. They
+        can't be played from here — the Pi accepts no connections from outside. <strong>Upload
+        to AWS</strong> copies a clip into <em>Evidence clips</em> within a minute.
+      </div>
+      <ul id="pirClipsList-${cam.id}" class="clips-list"></ul>
+      <div id="pirClipsPager-${cam.id}" class="clips-pager single">
+        <button class="pg-first">&laquo; Newest</button>
+        <button class="pg-newer">&lsaquo; Newer</button>
+        <span class="pg-numbers"></span>
+        <button class="pg-older">Older &rsaquo;</button>
+        <button class="pg-last">Oldest &raquo;</button>
+        <span class="clips-page-label"></span>
+      </div>
     </div>`;
   return div;
 }
@@ -518,7 +599,8 @@ async function login() {
       state[cam.id] = { hls: null, userStopped: true, recording: false, recordingStartTs: null,
                         recordingTimer: null, refreshTimer: null, netRetries: 0,
                         clipsTimer: null, renderedLatest: null, listen: false,
-                        outageBufferSec: cam.outageBufferSec || 0 };
+                        outageBufferSec: cam.outageBufferSec || 0,
+                        clipsPg: newPager(), pir: null, pirPg: newPager(), pirPending: false };
       camerasDiv.appendChild(renderCameraPanel(cam));
       // The <select> is built via innerHTML, so the stored value has to be applied after
       // the node is in the DOM rather than as a `selected` attribute in the template.
@@ -529,11 +611,12 @@ async function login() {
       const ob = document.getElementById(`outage-${cam.id}`);
       if (ob) ob.value = String(cam.outageBufferSec || 0);
       syncClipPolling(cam.id, cam.recordingMode);
-      loadClips(cam.id);
+      loadClips(cam.id, "first");
     }
     // Warn up front, before the viewer meets a black player, once the registry reports a
     // camera recording in H.265 (videoCodec, from the codec-selection work).
     if (CAMERAS.some(c => c.videoCodec === "h265") && !hevcSupport().live) showHevcHelp();
+    initPir();
   } catch (e) {
     errorEl.textContent = "Network error: " + e.message;
   }
@@ -837,29 +920,49 @@ async function stopRecording(camera) {
     statusEl.textContent = (data.keys && data.keys.length > 1)
       ? `Recording saved as ${data.keys.length} clips — the camera's video codec changed during it.`
       : "Recording saved.";
-    loadClips(camera);
+    loadClips(camera, "first");   // the new clip is the newest, on the first page
   } catch (e) {
     statusEl.textContent = "Network error saving recording: " + e.message;
   }
 }
 
-async function loadClips(camera) {
+// Shows one page of CLIPS_PAGE_SIZE clips, newest first (the successor's paging). `page` is a
+// page number, "first", "last", "older", "newer", or "current" (reload the page being viewed,
+// e.g. after a tier change or a delete). Every response carries the camera's current page
+// count and clip total, so the numbers follow deletes and new clips on each load; a page past
+// the end comes back as the last page (list_clips.py).
+async function loadClips(camera, page = "current") {
+  const s = state[camera], pg = s.clipsPg;
   const list = document.getElementById(`clipsList-${camera}`);
+  const target = pageTarget(pg, page);
+  // Only the latest request may render: a slow response must not overwrite a newer page.
+  const req = pg.req = (pg.req || 0) + 1;
+  pg.busy = true;
+  renderClipsPager(camera);
   list.innerHTML = "<li>Loading…</li>";
   try {
-    const r = await fetch(`${API}/clips?camera=${camera}`, { headers: { Authorization: idToken } });
+    const q = `camera=${camera}&limit=${CLIPS_PAGE_SIZE}&page=${target}`;
+    const r = await fetch(`${API}/clips?${q}`, { headers: { Authorization: idToken } });
     const data = await r.json();
-    if (!r.ok) { list.innerHTML = `<li>Error: ${data.error || r.status}</li>`; return; }
-    // remember the newest rendered clip so checkForNewClips() can spot arrivals, and
-    // clear any pending hint since the list is now current
-    state[camera].renderedLatest = data.clips.length ? data.clips[0].startTs : null;
-    const alertEl = document.getElementById(`clipsAlert-${camera}`);
-    if (alertEl) { alertEl.textContent = ""; alertEl.style.display = "none"; }
+    if (req !== pg.req) return;
+    pg.busy = false;
+    if (!r.ok) { list.innerHTML = `<li>Error: ${data.error || r.status}</li>`; renderClipsPager(camera); return; }
+    pg.page = data.page || 1;
+    pg.pages = data.pages || 1;
+    pg.total = data.total ?? data.clips.length;
+    renderClipsPager(camera);
+    if (pg.page === 1) {
+      // remember the newest clip so checkForNewClips() can spot arrivals, and clear any
+      // pending hint since the newest page is now on screen. An older page shows neither.
+      s.renderedLatest = data.clips.length ? data.clips[0].startTs : null;
+      const alertEl = document.getElementById(`clipsAlert-${camera}`);
+      if (alertEl) { alertEl.textContent = ""; alertEl.style.display = "none"; }
+    }
 
     if (data.clips.length === 0) { list.innerHTML = "<li>No clips yet.</li>"; return; }
 
     list.innerHTML = "";
-    for (const clip of data.clips) {
+    for (const clip of data.clips.slice(0, CLIPS_PAGE_SIZE)) {
       const li = document.createElement("li");
       const when = new Date(clip.startTs).toLocaleString();
       const tierClass = "tier-" + clip.tier;
@@ -868,6 +971,8 @@ async function loadClips(camera) {
       const duration = clip.durationSec != null ? formatDuration(clip.durationSec) : "duration unknown";
       li.innerHTML = `
         <span class="tier-badge ${tierClass}">${tierText}${restoreNote}</span>
+        ${(clip.labels || []).includes("pir")
+          ? `<span class="tier-badge pir-badge" title="Recorded by the PIR motion sensor">PIR</span>` : ""}
         <span class="clip-meta">${when}
           <span class="clip-duration">· ${duration}${clipCodecHtml(clip)}</span>
           <span class="clip-labels">${(clip.labels || []).join(", ")}</span>
@@ -891,7 +996,71 @@ async function loadClips(camera) {
       list.appendChild(li);
     }
   } catch (e) {
+    if (req !== pg.req) return;
+    pg.busy = false;
+    renderClipsPager(camera);
     list.innerHTML = `<li>Error: ${e.message}</li>`;
+  }
+}
+
+function renderClipsPager(camera) {
+  renderPager(document.getElementById(`clipsPager-${camera}`), state[camera].clipsPg,
+              p => loadClips(camera, p), countLabel(state[camera].clipsPg.total, "clip"));
+}
+
+// --- Paging, shared by Evidence clips and Motion clips -----------------------------------------
+const CLIPS_PAGE_SIZE = 10;
+
+function newPager() { return { page: 1, pages: 1, total: 0, busy: false, req: 0 }; }
+
+function countLabel(n, noun) { return `${n} ${noun}${n === 1 ? "" : "s"}`; }
+
+// A pager action, resolved against where the list is now.
+function pageTarget(pg, page) {
+  return page === "first" ? 1
+    : page === "last" ? "last"
+    : page === "older" ? pg.page + 1
+    : page === "newer" ? Math.max(1, pg.page - 1)
+    : page === "current" ? pg.page
+    : page;
+}
+
+// The page numbers to offer: all of them up to 9 pages, else the first, the last and two
+// either side of the current one, with null marking each gap ("…").
+function pageNumbers(page, pages) {
+  if (pages <= 9) return Array.from({ length: pages }, (_, i) => i + 1);
+  const shown = [...new Set([1, page - 2, page - 1, page, page + 1, page + 2, pages])]
+    .filter(n => n >= 1 && n <= pages).sort((a, b) => a - b);
+  const out = [];
+  shown.forEach((n, i) => { if (i && n - shown[i - 1] > 1) out.push(null); out.push(n); });
+  return out;
+}
+
+function renderPager(pager, pg, go, label) {
+  if (!pager) return;
+  const { page, pages, busy } = pg;
+  pager.classList.toggle("single", pages <= 1);
+  const nums = pager.querySelector(".pg-numbers");
+  nums.innerHTML = "";
+  for (const n of pageNumbers(page, pages)) {
+    if (n === null) {
+      nums.insertAdjacentHTML("beforeend", '<span class="pg-gap">…</span>');
+      continue;
+    }
+    const b = document.createElement("button");
+    b.className = "pg-num" + (n === page ? " pg-current" : "");
+    b.textContent = n;
+    b.disabled = busy || n === page;
+    if (n === page) b.setAttribute("aria-current", "page");
+    b.onclick = () => go(n);
+    nums.appendChild(b);
+  }
+  pager.querySelector(".clips-page-label").textContent = label;
+  for (const [cls, action, off] of [["pg-first", "first", page === 1], ["pg-newer", "newer", page === 1],
+                                    ["pg-older", "older", page === pages], ["pg-last", "last", page === pages]]) {
+    const b = pager.querySelector("." + cls);
+    b.disabled = busy || off;
+    b.onclick = () => go(action);
   }
 }
 
@@ -910,7 +1079,7 @@ async function setClipTier(s3Key, tier, li, camera) {
       return;
     }
     statusEl.textContent = "Done.";
-    loadClips(camera);
+    loadClips(camera, "current");   // stay on the page being viewed
   } catch (e) {
     statusEl.textContent = "Network error: " + e.message;
   }
@@ -933,9 +1102,9 @@ async function deleteClip(s3Key, startTs, when, li, camera) {
       return;
     }
     closeClipPlayer();
-    li.remove();
-    const list = document.getElementById(`clipsList-${camera}`);
-    if (list.children.length === 0) list.innerHTML = "<li>No clips yet.</li>";
+    // Reload the page: it refills from the older clips, the page count and total follow,
+    // and a page that no longer exists comes back as the new last page (loadClips).
+    loadClips(camera, "current");
   } catch (e) {
     statusEl.textContent = "Network error: " + e.message;
   }
@@ -1011,6 +1180,185 @@ function closeClipPlayer() {
   player.load();
   document.getElementById("clipStatus").textContent = "";
   document.getElementById("clipPlayerSection").style.display = "none";
+}
+
+// --- PIR: the switch, the Pi's live status, its local clips (PIR-MQTT-VMS-PI4.md §3.9-§3.11) ---
+// Only cameras whose registry row names a PIR sensor (pirTopic) get the panel, and GET /pir says
+// which: /cameras is a copy of the shared list-cameras and stays identical to it.
+const PIR_POLL_MS = 10000;          // §3.10: about $0.30 a month at 8 h of open page a day
+const PIR_STALE_MS = 10 * 60000;    // two missed 5-minute heartbeats: the Pi's state is unknown
+let pirTimer = null;
+
+// Text from the API (a requester's user name, a reason) goes into the page as text, not markup.
+const escText = v => String(v ?? "").replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
+const timeOf = iso => iso ? new Date(iso).toLocaleTimeString() : "—";
+
+async function pirFetch(path, opts = {}) {
+  const r = await fetch(`${API}${path}`, { ...opts,
+    headers: { Authorization: idToken, "Content-Type": "application/json" } });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+async function initPir() {
+  for (const cam of CAMERAS) {
+    try {
+      const d = await pirFetch(`/pir?camera=${cam.id}`);
+      if (!d.pirTopic) continue;            // no sensor: no panel
+      state[cam.id].pir = d;
+      el(cam.id, "pirSection").hidden = false;
+      el(cam.id, "pirClipsSection").hidden = false;
+      renderPir(cam.id);
+      loadPirClips(cam.id, "first");
+    } catch (e) { /* no panel; the rest of the page doesn't depend on it */ }
+  }
+  if (CAMERAS.some(c => state[c.id].pir)) {
+    document.addEventListener("visibilitychange", syncPirPolling);
+    syncPirPolling();
+  }
+}
+
+// Poll only while the page is visible: a background tab costs nothing.
+function syncPirPolling() {
+  clearInterval(pirTimer);
+  pirTimer = null;
+  if (document.visibilityState !== "visible") return;
+  pollPir();
+  pirTimer = setInterval(pollPir, PIR_POLL_MS);
+}
+
+async function pollPir() {
+  for (const cam of CAMERAS) {
+    const s = state[cam.id];
+    if (!s.pir) continue;
+    try { s.pir = await pirFetch(`/pir?camera=${cam.id}`); s.pirError = null; }
+    catch (e) { s.pirError = e.message; }
+    renderPir(cam.id);
+    if (s.pirPending) loadPirClips(cam.id, "current", true);   // an upload was asked for: show its result
+  }
+}
+
+// §3.10: the Pi's actual state, not just the switch. A report older than 10 minutes means the
+// state is unknown (the Pi is offline, or can't reach AWS), never "fine" -- aws_state.py's rule.
+function renderPir(camera) {
+  const s = state[camera], d = s.pir, st = d.status;
+  const sw = el(camera, "pir");
+  if (sw && !s.pirSaving) sw.checked = !!d.pirRecording;
+  const live = el(camera, "pirLive");
+  const failed = s.pirError ? ` · <span class="clip-codec-warn">refresh failed: ${escText(s.pirError)}</span>` : "";
+  if (!st) {
+    live.innerHTML = `<span class="tier-badge pir-state-unknown">No report</span> The Pi hasn't reported yet.${failed}`;
+    return;
+  }
+  if (Date.now() - new Date(st.updatedAt).getTime() > PIR_STALE_MS) {
+    live.innerHTML = `<span class="tier-badge pir-state-unknown">Unknown</span> No report from the Pi
+      since ${new Date(st.updatedAt).toLocaleString()}.${failed}`;
+    return;
+  }
+  const eff = st.effective || "";
+  const cls = eff === "armed" ? "armed" : eff === "off" ? "off" : "warn";
+  const label = { armed: "Armed", off: "Off", warn: "Not recording" }[cls];
+  const why = cls === "warn" ? " " + escText(eff.replace(/^enabled, but /, "PIR is on, but ")) : "";
+  const switching = !!d.pirRecording !== !!st.pirRecording
+    ? `<br><em>Switching ${d.pirRecording ? "on" : "off"} — the Pi applies it within two minutes.</em>` : "";
+  const ev = st.lastEvent;
+  const sensor = st.picoOnline === false ? "<strong>offline</strong>" : st.picoOnline ? "online" : "unknown";
+  const session = st.session && st.session !== "idle" ? `recording (${escText(st.session)})` : "no recording running";
+  live.innerHTML = `<span class="tier-badge pir-state-${cls}">${label}</span>${why}${switching}
+    <br>Sensor ${sensor} · ${session} · last motion ${ev ? `${timeOf(ev.at)} (${escText(ev.event)})` : "—"}
+    · ${Number(st.sessionsToday || 0)} motion clip(s) today
+    <br><small>Reported by the Pi at ${timeOf(st.updatedAt)}${failed}</small>`;
+}
+
+async function setPirMode(camera, enabled) {
+  const s = state[camera], statusEl = el(camera, "pirStatus");
+  s.pirSaving = true;
+  statusEl.textContent = "Saving…";
+  try {
+    const d = await pirFetch("/pir/mode", { method: "POST", body: JSON.stringify({ camera, enabled }) });
+    s.pir.pirRecording = d.pirRecording;
+    statusEl.textContent = `Saved: PIR recording ${enabled ? "on" : "off"}.`;
+  } catch (e) {
+    el(camera, "pir").checked = !enabled;
+    statusEl.textContent = "Could not save: " + e.message;
+  } finally {
+    s.pirSaving = false;
+    renderPir(camera);
+  }
+}
+
+// §3.11: the Pi's local clip index, a page at a time, newest first -- paged like Evidence
+// clips. A row is on the Pi only, upload requested, in AWS, failed, or deleted on the Pi: the
+// same states the admin page shows. `quiet` reloads without the "Loading…" flash (polling).
+async function loadPirClips(camera, page = "current", quiet = false) {
+  const s = state[camera], pg = s.pirPg, list = el(camera, "pirClipsList");
+  const target = pageTarget(pg, page);
+  const req = pg.req = (pg.req || 0) + 1;
+  if (!quiet) { pg.busy = true; renderPirPager(camera); list.innerHTML = "<li>Loading…</li>"; }
+  let d;
+  try {
+    d = await pirFetch(`/pir/clips?camera=${camera}&limit=${CLIPS_PAGE_SIZE}&page=${target}`);
+  } catch (e) {
+    if (req !== pg.req) return;
+    pg.busy = false;
+    renderPirPager(camera);
+    if (!quiet) list.innerHTML = `<li>Error: ${escText(e.message)}</li>`;
+    return;
+  }
+  if (req !== pg.req) return;
+  Object.assign(pg, { busy: false, page: d.page, pages: d.pages, total: d.total, deleted: d.deleted || 0 });
+  renderPirPager(camera);
+  const wasPending = s.pirPending;
+  s.pirPending = d.clips.some(c => c.uploadRequestedAt && !c.uploadedKey && !c.uploadError && !c.deletedAt);
+  list.innerHTML = d.clips.length ? "" : "<li>No motion clips on the Pi.</li>";
+  for (const c of d.clips) list.appendChild(pirClipRow(camera, c));
+  if (wasPending && !s.pirPending) loadClips(camera, "current");   // an upload finished: it's in Evidence clips now
+}
+
+function renderPirPager(camera) {
+  const pg = state[camera].pirPg;
+  const onPi = pg.total - (pg.deleted || 0);
+  renderPager(el(camera, "pirClipsPager"), pg, p => loadPirClips(camera, p),
+              countLabel(onPi, "clip") + " on the Pi" + (pg.deleted ? ` · ${pg.deleted} recently deleted` : ""));
+}
+
+function pirClipRow(camera, c) {
+  const li = document.createElement("li");
+  const thumb = (c.thumbnails || [])[0];
+  let badge, cls;
+  if (c.deletedAt) { badge = "Deleted on the Pi"; cls = "aws-deleted"; li.className = "pir-clip-deleted"; }
+  else if (c.uploadedKey) { badge = "In AWS"; cls = "aws-done"; }
+  else if (c.uploadError) { badge = c.uploadError === "gone" ? "Failed: no longer on the Pi" : `Failed: ${c.uploadError}`; cls = "aws-failed"; }
+  else if (c.uploadRequestedAt) { badge = "Upload requested"; cls = "aws-requested"; }
+  else { badge = "On the Pi only"; cls = "aws-local"; }
+  const canUpload = !c.deletedAt && !c.uploadedKey && !c.uploadRequestedAt;
+  li.innerHTML = `
+    ${thumb ? `<img class="pir-thumb" alt="" src="data:image/jpeg;base64,${escText(thumb)}">` : `<span class="pir-thumb"></span>`}
+    <span class="clip-meta">${new Date(c.startTs).toLocaleString()}
+      <span class="clip-duration">· ${c.durationSec != null ? formatDuration(Math.round(c.durationSec)) : "?"}${clipCodecHtml(c)}</span>
+      <span class="clip-labels">${c.kept ? "kept on the Pi · " : ""}motion ended by ${escText(c.reason || "?")}${c.requestedBy ? ` · upload requested by ${escText(c.requestedBy)}` : ""}</span>
+    </span>
+    <span class="tier-badge ${cls}">${escText(badge)}</span>
+    ${canUpload ? `<button class="pir-upload-btn">Upload to AWS</button>` : ""}
+    ${c.uploadedKey ? `<button class="play-btn">Play</button>` : ""}
+    <span class="tier-apply-status"></span>`;
+  const up = li.querySelector(".pir-upload-btn");
+  if (up) up.onclick = async () => {
+    const st = li.querySelector(".tier-apply-status");
+    up.disabled = true;
+    st.textContent = "Requesting…";
+    try {
+      await pirFetch("/pir/upload", { method: "POST", body: JSON.stringify({ camera, startTs: c.startTs }) });
+      loadPirClips(camera, "current", true);   // shows "Upload requested"; polling picks up the result
+    } catch (e) {
+      up.disabled = false;
+      st.textContent = "Error: " + e.message;
+    }
+  };
+  const play = li.querySelector(".play-btn");
+  if (play) play.onclick = () => playClip(c.uploadedKey);
+  return li;
 }
 
 document.getElementById("login").style.display = "block";

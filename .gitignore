@@ -9,6 +9,16 @@ vendor/amazon-kinesis-video-streams-producer-sdk-cpp/
 mediamtx/mediamtx
 mediamtx/mediamtx.tar.gz
 
+# Python bytecode -- regenerated whenever the code runs, and specific to one interpreter
+# version, so a tracked copy only ever shows up as a spurious modification.
+__pycache__/
+*.py[co]
+
+# Lambda deployment zips -- packed from the .py beside them at every deploy (CLAUDE.md,
+# "Deploying a Lambda"). The .py is the source; a tracked zip only goes stale, shows up as
+# modified after each deploy, and was easy to misread as "what's deployed" (5 of 12 weren't).
+cloud/lambda/*.zip
+
 # Measurement raw data (keep processed CSVs if you want them tracked; adjust as needed)
 measurements/*.raw
 

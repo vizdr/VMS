@@ -100,13 +100,19 @@ def ensure_path_conf(path: str, conf: dict) -> None:
 
 
 def set_recording(path: str, on: bool, record_path: str = None,
-                  segment_duration: str = "30s", part_duration: str = "1s") -> None:
+                  segment_duration: str = "30s", part_duration: str = "1s",
+                  delete_after: str = "0s") -> None:
     """Arm or disarm recording for one path.
 
-    `recordDeleteAfter: 0s` disables MediaMTX's own cleaner permanently and is deliberate:
-    the outage supervisor owns retention itself. Letting MediaMTX delete would put the
-    captured footage at the mercy of a cleaner tick racing the supervisor -- and the thing
-    it would delete is the footage the whole feature exists to save.
+    `recordDeleteAfter: 0s` disables MediaMTX's own cleaner and is deliberate: the outage
+    supervisor owns retention itself. Letting MediaMTX delete would put the captured footage
+    at the mercy of a cleaner tick racing the supervisor -- and the thing it would delete is
+    the footage the whole feature exists to save.
+
+    The one exception is the PIR ring in RAM (PIR-MQTT-VMS-PI4.md Phase 12): there the
+    supervisor passes a backstop far beyond its own retention, so a dead supervisor can't fill
+    the user's runtime tmpfs. It can't race a capture, because RAM segments leave the ring by
+    copy within one tick (outage_buffer.RAM_BACKSTOP).
     """
     conf = {"record": bool(on)}
     if on:
@@ -115,13 +121,13 @@ def set_recording(path: str, on: bool, record_path: str = None,
             "recordFormat": "fmp4",          # mandatory: mpegts cannot carry LPCM/G711
             "recordSegmentDuration": segment_duration,
             "recordPartDuration": part_duration,
-            "recordDeleteAfter": "0s",
+            "recordDeleteAfter": delete_after,
         })
     patch_path(path, conf)
 
 
 def recording_conf_matches(path: str, on: bool, record_path: str = None,
-                           segment_duration: str = "30s") -> bool:
+                           segment_duration: str = "30s", delete_after: str = "0s") -> bool:
     """Whether the live config already says what we want.
 
     Used by the supervisor's reconcile loop rather than tracking what it last sent:
@@ -143,7 +149,7 @@ def recording_conf_matches(path: str, on: bool, record_path: str = None,
     # 5 s. Compare parsed seconds, and treat empty as zero.
     return (conf.get("recordPath") == record_path
             and conf.get("recordFormat") == "fmp4"
-            and _dur_secs(conf.get("recordDeleteAfter") or "0s") == 0
+            and _dur_secs(conf.get("recordDeleteAfter") or "0s") == _dur_secs(delete_after)
             and _dur_eq(conf.get("recordSegmentDuration"), segment_duration))
 
 

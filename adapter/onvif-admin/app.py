@@ -15,7 +15,9 @@ unauthenticated on this LAN. Not intended to be port-forwarded or exposed beyond
 """
 import asyncio
 import base64
+import json
 import re
+import shutil
 import os
 import subprocess
 import sys
@@ -25,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -34,6 +36,8 @@ import camera_control
 import onvif_discovery
 import usb_camera
 from aws_device_creds import get_session
+from outage_buffer import PIR_DIR, read_registry_cache
+from pir_watcher import HEARTBEAT_FILE as PIR_HEARTBEAT
 
 app = Flask(__name__, static_folder="static")
 
@@ -442,7 +446,16 @@ def register_camera():
 
 @app.get("/api/cameras/<camera_id>/status")
 def stream_status(camera_id):
-    if "Item" not in cameras_table().get_item(Key={"cameraId": camera_id}):
+    # Polled every few seconds per camera, so the ID is checked against the supervisor's local
+    # registry cache, not DynamoDB: this LAN page must keep answering with the internet down.
+    # A lookup per poll hung ~36 s each while DNS was failing (an unresolvable name isn't bound
+    # by urlopen's timeout), and six of them filled the browser's connection pool and froze the
+    # whole page (FoundAndFixed.md #55). DynamoDB only on a Pi without the cache.
+    known = read_registry_cache()
+    if known:
+        if camera_id not in known:
+            return jsonify({"error": "unknown camera"}), 404
+    elif "Item" not in cameras_table().get_item(Key={"cameraId": camera_id}):
         return jsonify({"error": "unknown camera"}), 404
     # Queries systemctl directly rather than tracking "what the last button click did" --
     # this is the actual ground truth (also catches the unit crashing or being stopped
@@ -593,6 +606,226 @@ def set_outage_buffer(camera_id):
         ExpressionAttributeValues={":s": secs},
     )
     return jsonify({"cameraId": camera_id, "outageBufferSec": secs, "appliesOn": "within 60s"})
+
+
+@app.post("/api/cameras/<camera_id>/pir")
+def set_pir_recording(camera_id):
+    """Writes pirRecording, the PIR trigger's on/off switch (PIR-MQTT-VMS-PI4.md §3.8).
+
+    A separate flag, not a fifth recordingMode value, deliberately: the cameras table is
+    shared with the successor project, whose code knows exactly four modes. A new field is
+    invisible to it; a new enum value would reach it (§4.2, data contract rule 2). So this
+    never touches recordingMode -- for cam-01 that stays "manual".
+
+    Switching on needs pirTopic, the capability saying a PIR sensor publishes for this
+    camera; switching off is always allowed. The outage supervisor arms the ring (in RAM since
+    Phase 12) and the PIR watcher starts acting on motion, both within about a minute.
+    """
+    enabled = (request.get_json(force=True, silent=True) or {}).get("pirRecording")
+    if not isinstance(enabled, bool):
+        return jsonify({"error": "pirRecording must be true or false"}), 400
+
+    table = cameras_table()
+    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if enabled and not item.get("pirTopic"):
+        return jsonify({"error": "no PIR sensor configured for this camera (pirTopic)"}), 400
+    if bool(item.get("pirRecording")) == enabled:
+        # Nothing to change -- and no write, so "off" on a camera without a PIR sensor
+        # doesn't plant a pirRecording field in a row the successor also reads.
+        return jsonify({"cameraId": camera_id, "pirRecording": enabled})
+
+    table.update_item(
+        Key={"cameraId": camera_id},
+        UpdateExpression="SET pirRecording = :p",
+        ExpressionAttributeValues={":p": enabled},
+    )
+    return jsonify({"cameraId": camera_id, "pirRecording": enabled})
+
+
+# --- PIR panel and clips (PIR-MQTT-VMS-PI4.md Phases 8, 10) ---------------------------------
+#
+# Read-mostly views over what kvs-pir-watcher writes, plus the two markers this app owns
+# (keep, upload-requested -- one writer per file, §3.6). Clips are served from the stick for
+# the page's <video>; nothing here talks to AWS except the registry fallback for a topic.
+# Cloud upload requests arrive as the uploader's local record of them (cloud-request.json,
+# §3.11), so this page shows them without AWS, and offline.
+
+SESSION_ID_RE = re.compile(r"^cam-\d{2}-\d{8}T\d{6}Z(-\d+)?$")   # no path can escape PIR_DIR
+PIR_STALE_SEC = 30          # three missed 10 s heartbeats: the watcher's view is *unknown*
+
+
+@app.get("/api/pir")
+def pir_status():
+    """The watcher's heartbeat, with its age. Stale means unknown, never "fine" (aws_state.py)."""
+    try:
+        h = json.loads(PIR_HEARTBEAT.read_text())
+    except FileNotFoundError:
+        return jsonify({"available": False, "reason": "no heartbeat file -- is kvs-pir-watcher running?"})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"available": False, "reason": f"unreadable heartbeat ({type(e).__name__})"})
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(h["ts"])).total_seconds()
+    return jsonify({**h, "available": True, "ageSec": round(age, 1), "stale": age > PIR_STALE_SEC})
+
+
+def _pir_base(camera_id):
+    """'home/pico2w-01' for this camera: from the watcher's heartbeat (works offline), else
+    from the registry."""
+    try:
+        topic = json.loads(PIR_HEARTBEAT.read_text())["cameras"][camera_id]["pirTopic"]
+    except Exception:  # noqa: BLE001
+        item = cameras_table().get_item(Key={"cameraId": camera_id}).get("Item") or {}
+        topic = item.get("pirTopic")
+    return topic[:-len("/pir/event")] if topic and topic.endswith("/pir/event") else None
+
+
+@app.post("/api/cameras/<camera_id>/pir/retrigger")
+def pir_retrigger(camera_id):
+    """Send the PIR module's trigger mode to the Pico, as MQTT user vms (the ACL lets vms --
+    and only vms -- write pir/cmd/#). The Pico doesn't report its mode, so the panel shows the
+    last command the watcher saw, and a Pico reboot returns it to retriggerable."""
+    on = (request.get_json(force=True, silent=True) or {}).get("retriggerable")
+    if not isinstance(on, bool):
+        return jsonify({"error": "retriggerable must be true or false"}), 400
+    base = _pir_base(camera_id)
+    if not base:
+        return jsonify({"error": "no PIR sensor configured for this camera (pirTopic)"}), 400
+    import paho.mqtt.publish as publish
+    try:
+        publish.single(f"{base}/pir/cmd/retrigger", "1" if on else "0", qos=1,
+                       hostname=config.get("MQTT_HOST"), port=int(config.get("MQTT_PORT")),
+                       auth={"username": config.get("MQTT_USER"),
+                             "password": Path(config.get("MQTT_PASSWORD_FILE")).read_text().strip()})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"broker: {type(e).__name__}: {e}"}), 502
+    return jsonify({"cameraId": camera_id, "retriggerable": on, "topic": f"{base}/pir/cmd/retrigger"})
+
+
+def _pir_session_dir(sid):
+    if not SESSION_ID_RE.match(sid) or not (PIR_DIR / sid / "state.json").exists():
+        abort(404)
+    return PIR_DIR / sid
+
+
+def _pir_session(sdir):
+    j = json.loads((sdir / "state.json").read_text())
+    def _read(name):
+        try:
+            return json.loads((sdir / name).read_text())
+        except Exception:  # noqa: BLE001
+            return None
+    uploaded, cloud_request = _read("uploaded.json"), _read("cloud-request.json")
+    keys = ("sessionId", "cameraId", "status", "from", "to", "t0", "durationSec", "window",
+            "reason", "sizeBytes", "videoCodec", "error")
+    return {**{k: j.get(k) for k in keys},
+            "hasClip": (sdir / "clip.mp4").exists(), "hasThumb": (sdir / "thumb-1.jpg").exists(),
+            "kept": (sdir / "keep").exists(),
+            "uploadRequested": (sdir / "upload-requested").exists(), "uploaded": uploaded,
+            "cloudRequest": cloud_request}
+
+
+PIR_PAGE_MAX = 50
+
+
+@app.get("/api/pir-clips")
+def pir_clips():
+    """One page of the stick's PIR sessions, newest first -- the same contract as the cloud's
+    list-clips and GET /pir/clips: `limit` per page, `page` 1-based or "last", and `page`,
+    `pages`, `total` in the reply. A page past the end (retention deleted clips meanwhile) is
+    the last page."""
+    try:
+        limit = int(request.args.get("limit", 10))
+        page = request.args.get("page", "1")
+        page = page if page == "last" else int(page)
+    except ValueError:
+        return jsonify({"error": "limit and page must be integers (page may be 'last')"}), 400
+    if not 1 <= limit <= PIR_PAGE_MAX or (page != "last" and page < 1):
+        return jsonify({"error": f"limit must be 1-{PIR_PAGE_MAX}, page at least 1"}), 400
+    found = []
+    for path in PIR_DIR.glob("*/state.json") if PIR_DIR.is_dir() else []:
+        if SESSION_ID_RE.match(path.parent.name):
+            try:
+                found.append((float(json.loads(path.read_text()).get("from") or 0), path.parent))
+            except Exception:  # noqa: BLE001 -- a half-written journal shows up next refresh
+                pass
+    found.sort(key=lambda f: f[0], reverse=True)
+    pages = max(1, -(-len(found) // limit))
+    page = pages if page == "last" else min(page, pages)
+    clips = []
+    for _, sdir in found[(page - 1) * limit: page * limit]:
+        try:
+            clips.append(_pir_session(sdir))
+        except Exception:  # noqa: BLE001 -- deleted or half-written between listing and reading
+            pass
+    return jsonify({"clips": clips, "page": page, "pages": pages, "total": len(found)})
+
+
+@app.get("/api/pir-clips/<sid>/clip.mp4")
+def pir_clip_file(sid):
+    f = _pir_session_dir(sid) / "clip.mp4"
+    if not f.exists():
+        abort(404)
+    # conditional=True answers Range requests with 206 -- a <video> needs that to seek.
+    return send_file(f, mimetype="video/mp4", conditional=True)
+
+
+@app.get("/api/pir-clips/<sid>/thumb-1.jpg")
+def pir_thumb_file(sid):
+    f = _pir_session_dir(sid) / "thumb-1.jpg"
+    if not f.exists():
+        abort(404)
+    return send_file(f, mimetype="image/jpeg", conditional=True)
+
+
+@app.post("/api/pir-clips/<sid>/keep")
+def pir_keep(sid):
+    """The `keep` marker: local retention (14 days, then the disk floor) never deletes it."""
+    keep = (request.get_json(force=True, silent=True) or {}).get("keep")
+    if not isinstance(keep, bool):
+        return jsonify({"error": "keep must be true or false"}), 400
+    marker = _pir_session_dir(sid) / "keep"
+    marker.touch() if keep else marker.unlink(missing_ok=True)
+    return jsonify({"sessionId": sid, "kept": keep})
+
+
+@app.post("/api/pir-clips/<sid>/upload")
+def pir_upload(sid):
+    """Request an upload (or {"cancel": true} withdraw one not yet done). kvs-outage-uploader
+    picks the marker up within 30 s; the local clip stays (D10)."""
+    sdir = _pir_session_dir(sid)
+    s = _pir_session(sdir)
+    marker = sdir / "upload-requested"
+    if (request.get_json(force=True, silent=True) or {}).get("cancel"):
+        if s["uploaded"]:
+            return jsonify({"error": "already in AWS -- delete it in the cloud clip list"}), 409
+        if s["cloudRequest"]:
+            return jsonify({"error": "requested from the cloud page -- the uploader is already on it"}), 409
+        marker.unlink(missing_ok=True)
+        return jsonify({"sessionId": sid, "state": "local only"})
+    if s["uploaded"]:
+        return jsonify({"sessionId": sid, "state": "in AWS", "s3Key": s["uploaded"]["s3Key"]})
+    if s["status"] != "merged" or not s["hasClip"]:
+        return jsonify({"error": f"the clip isn't ready (status {s['status']})"}), 409
+    marker.touch()
+    return jsonify({"sessionId": sid, "state": "requested", "appliesOn": "within 30 s"})
+
+
+@app.delete("/api/pir-clips/<sid>")
+def pir_delete(sid):
+    """Delete the local session. Refused while it is still being recorded or assembled, and
+    while an upload is pending (the uploader may be reading the file). The copy in AWS, if
+    any, stays -- an upload is a copy (D10)."""
+    sdir = _pir_session_dir(sid)
+    s = _pir_session(sdir)
+    if s["status"] not in ("merged", "failed"):
+        return jsonify({"error": f"still {s['status']} -- wait until the clip is assembled"}), 409
+    if s["uploadRequested"] and not s["uploaded"]:
+        return jsonify({"error": "an upload is pending -- cancel it first"}), 409
+    if s["cloudRequest"] and not s["uploaded"]:
+        return jsonify({"error": "an upload requested from the cloud page is pending"}), 409
+    shutil.rmtree(sdir)
+    return jsonify({"deleted": sid, "inAws": (s["uploaded"] or {}).get("s3Key")})
 
 
 @app.post("/api/cameras/<camera_id>/ir")

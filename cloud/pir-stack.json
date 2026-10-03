@@ -1,0 +1,42 @@
+{
+  "region": "eu-central-1",
+  "apiId": "wkq6c6zmb1",
+  "invokeUrl": "https://wkq6c6zmb1.execute-api.eu-central-1.amazonaws.com/prod",
+  "userPoolId": "eu-central-1_jiAd6UD3S",
+  "appClientId": "284r1pa1n9dgdumg1q65n57kcn",
+  "table": "pir-local",
+  "clientBucket": "pir-client-596633517506",
+  "distributionId": "E53AGX9O0GDTV",
+  "pageUrl": "https://d10sy0s307vyid.cloudfront.net",
+  "functions": [
+    "pir-control",
+    "pir-delete-clip",
+    "pir-get-hls-url",
+    "pir-list-cameras",
+    "pir-list-clips",
+    "pir-play-clip",
+    "pir-publish-cmd",
+    "pir-record-clip",
+    "pir-set-camera-audio",
+    "pir-set-camera-mode",
+    "pir-set-camera-outage-buffer",
+    "pir-set-clip-tier"
+  ],
+  "routes": [
+    "GET /cameras",
+    "POST /cameras/mode",
+    "POST /cameras/audio",
+    "POST /cameras/outage-buffer",
+    "POST /cmd",
+    "GET /hls",
+    "GET /clips",
+    "POST /clips/record",
+    "POST /clips/play",
+    "POST /clips/tier",
+    "POST /clips/delete",
+    "GET /pir",
+    "GET /pir/clips",
+    "POST /pir/mode",
+    "POST /pir/upload"
+  ]
+}

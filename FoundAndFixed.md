@@ -31,8 +31,7 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-50 defects, from the first build (2026-08-20) to making the USB camera swappable
-(2026-09-27).
+55 defects, from the first build (2026-08-20) to the PIR trigger's paging (2026-10-03).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -86,6 +85,11 @@ advice (guide §15 "Known traps").
 | 48 | Deploying from this repo overwrote the successor's live Lambda and client | process / deployment | 2026-09-27 | fixed |
 | 49 | Automatic rollback could not roll back — the backup list was read too late | admin GUI | 2026-09-27 | fixed |
 | 50 | MediaMTX reported a path `ready` while no media flowed at all | admin GUI / verification | 2026-09-27 | fixed |
+| 51 | The cam-01 publisher hung silently at boot and stayed `active`, dead, for 7.5 hours | media pipeline / systemd | 2026-10-03 | **open** — restart is a workaround |
+| 52 | The FRITZ!Box drops the Pi's Wi-Fi after bursts of group rekeying, costing every AWS client minutes | network / Wi-Fi | 2026-10-03 | **open** — environmental |
+| 53 | cam-02's H.265 detection clips are 9 s files listed as 45 s | ONVIF clips / successor's path | 2026-10-03 | **open** — the successor's code |
+| 54 | The AWS block missed the IoT endpoint's new address, so test outages "recovered" after 7 s | test tooling | 2026-10-03 | fixed (`awsblock.sh`) |
+| 55 | A DNS failure froze the whole admin page: every camera-status poll waited on AWS | admin GUI | 2026-10-03 | fixed |
 
 ### What they have in common
 
@@ -1223,3 +1227,149 @@ only accept the camera as live when the number has grown. Measured at ~380 KB pe
 cam-01, so the signal is unambiguous. Verified in both directions: a valid change reports
 success in 4.6 s, and the impossible one now fails and rolls back rather than being
 declared fine.
+
+## The PIR trigger (2026-10-03)
+
+### #51 — The cam-01 publisher hung silently at boot and stayed `active`, dead, for 7.5 hours
+
+**Found:** 2026-10-03, starting PIR-MQTT-VMS-PI4.md Phase 5's live test. **Referenced from:**
+CLAUDE.md (the `publish-cam01.sh` gap), PIR-MQTT-VMS-PI4.md Phase 5. **Status: open.**
+
+Before arming the PIR ring, MediaMTX's `cam01` path read `ready: true` since 08:03:23 with
+`bytesReceived` frozen at **83,257** -- about a second of video, at 15:35. The publisher's
+own RTP statistics agreed: `packets-sent=74`, `octets-sent=82383`, `bitrate=0`, unchanged
+for hours. `kvs-camera-publish` reported `active`, `NRestarts=0`; its `gst-launch-1.0` was
+alive at 1.2 % CPU after 7 h 32 min.
+
+The journal shows a normal start: device detected, caps negotiated end to end (v4l2src ->
+v4l2jpegdec -> v4l2convert -> v4l2h264enc -> rtspclientsink), `RECORD` sent at 08:03:21 --
+then nothing. **No warning, no error, no EOS**: the pipeline stopped producing without
+exiting. `dmesg` has no USB or codec errors. Boot timing for the record: the clock jumped
+from the saved 22:11 to 08:03:07 at the first NTP sync, three seconds before the publisher
+started at 08:03:10 (the Pi has no RTC). Whether that matters is unknown.
+
+This is neither of the known cases. CLAUDE.md's documented gap is a *clean exit* that
+`Restart=on-failure` ignores; #46 is a *producer* that hangs on EOS, and `producer_run`
+now watches for that. This publisher neither exited nor saw an EOS, and it has no watchdog
+of any kind. #50 met the same symptom on 2026-09-27 and fixed only the admin GUI's apply
+check, which now demands that `bytesReceived` advance; nothing applies that rule at run
+time.
+
+**Workaround:** `systemctl --user restart kvs-camera-publish`. Verified: `bytesReceived`
+grew at ~130 KB/s (1 Mbit/s, cam-01's bitrate) and a decoded frame showed the live scene.
+
+**Why it matters more now:** the PIR ring (and outage buffering) record whatever MediaMTX
+receives. With a hung publisher the supervisor arms happily and records nothing. The
+planned watcher's ring check (PIR-MQTT-VMS-PI4.md §3.3: newest segment older than two
+segment durations means "ring not recording") will catch it for PIR, but it only reports.
+
+**Still to do:** a run-time watchdog for the publisher that applies #50's rule -- restart it
+when `bytesReceived` stops advancing -- and, if the stall recurs at boot, find its cause.
+
+### #52 — The FRITZ!Box drops the Pi's Wi-Fi after bursts of group rekeying, costing every AWS client minutes
+
+**Found:** 2026-10-03, during PIR-MQTT-VMS-PI4.md's Phase 5 and Phase 7 outage tests.
+**Referenced from:** PIR-MQTT-VMS-PI4.md Phases 5 and 7. **Status: open** -- environmental, not
+this code.
+
+Twice during the day's tests, the network failed minutes *after* a deliberate AWS block had
+been lifted and verified gone. Both times `wpa_supplicant` logged the same sequence:
+
+```
+17:11:14  wlan0: WPA: Group rekeying completed with d4:24:dd:39:32:e7 [GTK=CCMP]   (x4, one per second)
+17:11:18  wlan0: CTRL-EVENT-DISCONNECTED bssid=d4:24:dd:39:32:e7 reason=2
+17:11:18  NetworkManager: dhcp4 (wlan0): restarting ... beginning transaction
+```
+
+`reason=2` is "previous authentication no longer valid": the access point (the FRITZ!Box,
+`d4:24:dd:39:32:e7`) disconnects the Pi after a burst of group-key rekeys. Disconnects since
+boot: **09:51:14, 16:21:18, 17:11:18**, and **22:51:22**, with DNS failing from 22:49:30 (that
+one froze the admin page, #55). The 17:11 one was preceded by DNS failing from 17:09:50
+("Temporary failure in name resolution"), so the link degrades before it drops.
+
+**Effect:**
+- every AWS client loses its connection for ~40 s to ~3 min: `agent.py`'s MQTT session, the
+  supervisor's registry reads, the uploader, and a running KVS producer;
+- the outage supervisor's recovery came 3.7 min after the block was lifted, which stretched
+  that test's outage past its 300 s limit and produced a head/tail pair instead of one clip.
+
+Every client recovered by itself; nothing in the code is wrong. #47 is the earlier Wi-Fi
+finding on this network.
+
+**Options, none applied yet:**
+- **Ethernet**, which `PIR-MQTT-VMS-PI4.md` Phase 0 already names as preferred;
+- the FRITZ!Box's WPA group-key interval and settings;
+- the Pi's `brcmfmac` driver and firmware.
+
+Count further disconnects first (`journalctl | grep CTRL-EVENT-DISCONNECTED`) to see whether
+they follow the rekey interval.
+
+
+### #53 — cam-02's H.265 detection clips are 9 s files listed as 45 s
+
+**Found:** 2026-10-03, during PIR-MQTT-VMS-PI4.md's Phase 11 page regression.
+**Referenced from:** PIR-MQTT-VMS-PI4.md Phase 11. **Status: open** -- not investigated; on the
+ONVIF event path (`ClipToS3Rule` → `clip-to-s3`), which the successor deploys (#48).
+
+Playing cam-02's newest evidence clip, the player reported a duration of 9 s for a clip the list
+shows as 45 s. The file itself agrees with the player, so this is not the page:
+
+```
+clips row  clips/cam-02/2026/09/28/094724.mp4  durationSec 45   labels human   videoCodec h265
+ffprobe    hevc 640x360, format duration 9.000000
+```
+
+The three newest cam-02 clips (2026-09-27/28, all `human`, all H.265) all have `durationSec` 45.
+45 s is exactly `clip-to-s3`'s requested window (event − 12 s … + 33 s), so the row records
+what was asked for, not what `GetClip` delivered. Why only 9 s came back (H.265 fragments,
+the camera's keyframe interval, or something in the successor's codec work) is unknown.
+
+**Next step:** compare an H.264 detection clip from before the codec change, and the
+deployed `clip-to-s3` (`CodeSha256`) with this repository's `cloud/lambda/clip_to_s3.py`.
+Raise it with the successor, since the fix belongs in the code it deploys.
+
+### #54 — The AWS block missed the IoT endpoint's new address, so test outages "recovered" after 7 s
+
+**Found:** 2026-10-03, during PIR-MQTT-VMS-PI4.md's Phase 12 outage regression.
+**Referenced from:** PIR-MQTT-VMS-PI4.md Phase 12. **Status: fixed** in `adapter/bin/awsblock.sh`.
+
+The regression blocked AWS's usual ranges on both address families, as every earlier outage
+test had. The supervisor declared the outage (the agent's MQTT session dropped) and then
+`RECOVERED after 7s -- below 120s minimum, discarding capture`, while KVS was still blocked.
+The IoT data endpoint now resolves to **63.179.34.254**, outside every listed IPv4 range, and
+the supervisor's connectivity probe targets exactly that endpoint
+(`outage_buffer.PROBE_HOST`). The probe succeeded, so the Pi looked online.
+
+**Fix:** `63.176.0.0/12` added to the block. Re-run, the outage held for 288 s and the
+regression passed.
+
+**The rule:** before believing an outage test, check the endpoints the *detector* uses, not only
+the ones the data path uses: `getent ahosts <IOT_DATA_ENDPOINT>` and a `curl` to it on each
+family. AWS moves endpoints between ranges, so a fixed list goes stale silently.
+
+### #55 — A DNS failure froze the whole admin page: every camera-status poll waited on AWS
+
+**Found:** 2026-10-03, while testing the PIR clip pager in the admin page (PIR-MQTT-VMS-PI4.md).
+**Status: fixed** in `adapter/onvif-admin/app.py`.
+
+The pager's buttons stopped working for two minutes, and so did the page's 15 s refresh. The
+server log showed why: `GET /api/cameras/<id>/status` requests hanging ~36 s each and ending in
+500, six at a time, from 22:49:34 to 22:51:20:
+
+```
+urllib.error.URLError: <urlopen error [Errno -3] Temporary failure in name resolution>
+```
+
+The endpoint is polled every few seconds per camera and reads only `systemctl is-active`, but it
+first checked the camera ID against DynamoDB, through the device credentials. DNS was failing
+(the start of a #52 Wi-Fi drop: rekey burst and `reason=2` disconnect at 22:51:22), and a name
+that can't be resolved isn't bounded by `urlopen`'s 10 s timeout. Six hanging polls are the
+browser's whole connection pool for one host, so every other request from the page queued
+behind them. A LAN page is supposed to keep working when the internet doesn't.
+
+**Fix:** the status poll checks the ID against the supervisor's local registry cache
+(`outage_buffer.read_registry_cache()`) and uses DynamoDB only on a Pi without the cache. Status
+answers in 30–50 ms with no AWS call.
+
+**The rule:** an endpoint the page *polls* must not depend on AWS. User actions that write to
+the registry still go to DynamoDB, and fail visibly when it's unreachable.

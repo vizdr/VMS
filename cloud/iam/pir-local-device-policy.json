@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PiWritesStatusAndClipIndex",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/pir-local"
+    },
+    {
+      "Sid": "PiPollsUploadRequests",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": "arn:aws:dynamodb:eu-central-1:596633517506:table/pir-local/index/upload-requests"
+    },
+    {
+      "Sid": "PiChecksItsUploadsStillExist",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::vms-demo-evidence-596633517506",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": "clips/*"
+        }
+      }
+    }
+  ]
+}
