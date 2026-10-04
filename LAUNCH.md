@@ -820,6 +820,7 @@ listener 1883
 allow_anonymous false
 password_file /etc/mosquitto/passwd
 acl_file /etc/mosquitto/acl
+set_tcp_nodelay true
 EOF
 sudo systemctl restart mosquitto
 

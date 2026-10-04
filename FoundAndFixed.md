@@ -31,7 +31,7 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-55 defects, from the first build (2026-08-20) to the PIR trigger's paging (2026-10-03).
+56 defects, from the first build (2026-08-20) to the Pico's Wi‑Fi next to the Pi (2026-10-04).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -90,6 +90,7 @@ advice (guide §15 "Known traps").
 | 53 | cam-02's H.265 detection clips are 9 s files listed as 45 s | ONVIF clips / successor's path | 2026-10-03 | **open** — the successor's code |
 | 54 | The AWS block missed the IoT endpoint's new address, so test outages "recovered" after 7 s | test tooling | 2026-10-03 | fixed (`awsblock.sh`) |
 | 55 | A DNS failure froze the whole admin page: every camera-status poll waited on AWS | admin GUI | 2026-10-03 | fixed |
+| 56 | The Pi 4B's USB 3 stick deafened the Pico's 2.4 GHz Wi‑Fi next to it | hardware / RF | 2026-10-04 | **mitigated** — distance; USB 2 port is the fix |
 
 ### What they have in common
 
@@ -1373,3 +1374,31 @@ answers in 30–50 ms with no AWS call.
 
 **The rule:** an endpoint the page *polls* must not depend on AWS. User actions that write to
 the registry still go to DynamoDB, and fail visibly when it's unreachable.
+
+### #56 — The Pi 4B's USB 3 stick deafened the Pico's 2.4 GHz Wi‑Fi next to it
+
+**Found:** 2026-10-04, on the firmware side, while testing the Pico's new watchdog
+(`PIR-MQTT-VMS-Pico.md` §4.7, in `blink_freertos` and mirrored here).
+**Referenced from:** `PIR-MQTT-VMS-PI4.md` Phase 1, §7, §8; README Hardware.
+**Status: mitigated** by distance; the cure on the Pi side is not applied yet.
+
+The Pico kept losing Wi‑Fi: 35 minutes without network on 2026-10-03 (put down to a loose wire
+then), and connecting and timing out every few minutes that evening (20:24–20:31, seen in the
+broker log while testing the cloud page). The watchdog's first field run reset the Pico after
+4 min without Wi‑Fi, as designed, but it still couldn't join. Its new scan diagnostics showed
+why: **with the Pi 4B close by, the Pico's radio heard 0 networks**, while a PC nearby heard the
+FRITZ!Box's 2.4 GHz at 64 % on channel 11. **With the Pi moved away, the Pico joined at once at
+−68 dBm**, the same signal the PC measured.
+
+The Raspberry Pi 4's USB 3 ports, and what is plugged into them, are a known 2.4 GHz noise
+source. Here that is the ring-buffer stick: `lsusb -t` shows the SanDisk on the USB 3 bus
+(Bus 002, `uas`, 5000M), while the camera is on USB 2 (480M). The Pi's own Wi‑Fi was not hit
+the same way because it runs on 5 GHz (5240 MHz); its drops are #52, a different cause.
+
+**Mitigation in place:** the Pico moved away from the Pi.
+
+**The rule:** keep a 2.4 GHz device ~0.5–1 m from the Pi 4B's USB 3 ports, or move the USB 3
+device to a USB 2 port or onto a shielded extension cable. A USB 2 port is enough for the stick
+now: since `PIR-MQTT-VMS-PI4.md` Phase 12 it receives only finished clips and outage captures
+(~4 MB per 30 s at most), far under USB 2's ~35 MB/s. Phase 12 also cut the stick's traffic
+itself, from a continuous ring to occasional clips.

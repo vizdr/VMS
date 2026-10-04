@@ -1,10 +1,13 @@
 # PIR Motion Sensor → MQTT → VMS: Analysis and Plan (Pi 4B side)
 
-**Status (2026-10-03):** Phases 0, 1 and 3–11 are done, and Phase 12 except its one-week
+**Status (2026-10-04):** Phases 0, 1 and 3–11 are done, and Phase 12 except its one-week
 soak. Phase 2's measurements and Phase 13 are open (§5).
 
 - **Phase 0:** the Mosquitto broker and `paho-mqtt` are installed and verified on the Pi.
-- **Phase 1:** the Pico firmware is running (`blink_freertos`).
+- **Phase 1:** the Pico firmware is running (`blink_freertos`). Revised 2026-10-04: the burst
+  lag is fixed (the Pi now sees events 0.0–0.5 s late, down from 5–74 s), and a watchdog resets
+  the Pico after 4 min without Wi‑Fi (D14). Keep the Pico ~0.5–1 m from the Pi's USB 3 ports
+  (`FoundAndFixed.md` #56).
 - **Phase 2:** the logger `adapter/observe_pir.py` is ready; its measurements are postponed
   until the PIR module's hold time is tuned.
 - **Phase 3:** the PIR switch is in the registry and the admin app.
@@ -42,9 +45,10 @@ of the work lands here, and renamed `PIR-MQTT-VMS-PI4.md` to tell the two copies
 **This copy is authoritative for the Pi 4B / VMS side**: the design (§3), successor
 compatibility (§4) and every phase except Phase 1. The firmware work (Phase 1) belongs to
 `blink_freertos` and is summarised here so the plan reads end to end. Its counterpart there
-is **`PIR-MQTT-VMS-Pico.md`** (prepared 2026-10-03, replacing `PIR-MQTT-VMS.md`). It is
-authoritative for the firmware and for the MQTT interface the Pico publishes, and carries
-everything in this revision that changes what the Pico must do (§3.2, §3.5, §7).
+is **`PIR-MQTT-VMS-Pico.md`**, committed there on 2026-10-04 in place of `PIR-MQTT-VMS.md`
+(kept there as `PIR-MQTT-VMS-OLD.md`). It is authoritative for the firmware and for the MQTT
+interface the Pico publishes. **This repository carries a verbatim mirror of it**, with a
+banner, so the references below resolve here; update the mirror by copying the file again.
 
 **Repositories involved:**
 
@@ -135,6 +139,14 @@ warm-up form of `pir/state`, the separate ISR queue), is in `PIR-MQTT-VMS-Pico.m
 | Time | SNTP from `pool.ntp.org` (`time_task.c`); `aws_iot_task` blocks in `time_wait_synced()` | The local path **must not wait for SNTP**, or it stops working without internet. Every message carries `boot_ms`, which is what the Pi uses to age events (§3.5); UTC `ts` is added only when `time_is_synced()` |
 | Shared lwIP core lock | An AWS TLS **reconnect** runs the mbedTLS handshake inside lwIP | Can delay local publishes during that handshake (estimate: ~1 s). Rare, only on reconnect. With D6 the direct AWS path stays, and §3.5's ageing places delayed events at their true time, so the stall can't shift a clip |
 | JSON payloads | `snprintf` into fixed buffers; the length goes straight to `mqtt_publish()` | Add the `len < 0 || len >= sizeof(buf)` guard to every payload |
+
+**As built (2026-10-03, revised 2026-10-04, `blink_freertos` `f649c85`):** the table above is the
+state *before* Phase 1. The hooks now carry a 64-bit `time_ms` from the ISR; `lwipopts.h` has
+`MEM_SIZE 16000`, `MQTT_OUTPUT_RINGBUF_SIZE 512`, `MQTT_REQ_MAX_IN_FLIGHT 8` and
+`MEMP_NUM_SYS_TIMEOUT 18`; `lan_mqtt_task` disables Nagle and keeps up to 4 events in flight; a
+watchdog supervisor runs at `tskIDLE_PRIORITY + 3`; and the radio's regulatory domain is set
+(Germany by default) so the Pico can follow the FRITZ!Box onto channels 12–13. Details:
+`PIR-MQTT-VMS-Pico.md` §4.3.1, §4.6, §4.7.
 
 ### 2.2 Raspberry Pi 4B (Raspberry Pi OS Trixie): packages
 
@@ -244,7 +256,7 @@ One owner per concern:
 |---|---|---|---|
 | `home/pico2w-01/status` | 1 / **retained**, LWT = `offline` | Pico | `online` / `offline` |
 | `home/pico2w-01/pir/event` | 1 / no | Pico | `{"seq":42,"event":"start","boot_ms":123456,"ts":1759312345123}`; `stop` adds `"duration_ms"`. `boot_ms` is the edge time from the ISR, on the Pico's uptime clock. `ts` only when SNTP has synced |
-| `home/pico2w-01/pir/state` | 1 / **retained** | Pico | `{"motion":true,"changed_ms":…,"count":42,"dropped":0,"boot_ms":…}`. During the sensor's 30 s warm-up: `{"warming_up":true,"boot_ms":…}`. `boot_ms` is the Pico's uptime **at publish**; `dropped` (optional) counts events lost to a full queue on the Pico. Published on connect (before the event queue drains), after each event, and **every 30 s** as a heartbeat |
+| `home/pico2w-01/pir/state` | 1 / **retained** | Pico | `{"motion":true,"changed_ms":…,"count":42,"dropped":0,"boot_ms":…}`. During the sensor's 30 s warm-up: `{"warming_up":true,"boot_ms":…}`. `boot_ms` is the Pico's uptime **at publish**; `dropped` (optional) counts events lost to a full queue on the Pico. Published on connect (before the event queue drains), after each **drained batch** of events (after each event until 2026-10-04), and **every 30 s** as a heartbeat |
 | `home/pico2w-01/pir/cmd/retrigger` | 1 / no | admin app (user `vms`) → Pico | `1` / `0` → `pir_task_set_retrigger()` |
 
 Rules:
@@ -253,11 +265,14 @@ Rules:
   subscriber, so it must never open a session. Otherwise a watcher restart while someone
   stands in the hall would create a phantom clip.
 - **`seq` pairs a start with its stop** and exposes gaps. QoS 1 may deliver a message twice,
-  so consumers deduplicate by `(seq, event)`.
+  and since 2026-10-04 the Pico also resends every event still unacknowledged after a
+  reconnect, so consumers deduplicate by `(seq, event)`. The watcher does: `PirTrigger` keeps
+  the last 512 keys, per Pico boot.
 - **Every message carries `boot_ms`.** It is the Pico's own clock and is how the watcher knows
   how old an event is (§3.5), with or without SNTP. It is **64-bit milliseconds since boot
-  and never wraps**: the Pico widens its 32-bit ISR timestamp, which would otherwise wrap
-  after 49.7 days and look like a reboot (`PIR-MQTT-VMS-Pico.md` §3.3).
+  and never wraps**: since 2026-10-04 the ISR itself takes `time_us_64() / 1000` (before, the
+  Pico widened a 32-bit ISR timestamp, which would otherwise wrap after 49.7 days and look like
+  a reboot; `PIR-MQTT-VMS-Pico.md` §3.3).
 - The retrigger command stays LAN-only. The cloud page switches PIR recording on and off; it
   doesn't send commands to the Pico.
 
@@ -700,6 +715,14 @@ clips.
 - **Size:** thumbnails make a row ~10–30 KB, far under DynamoDB's 400 KB limit. 14 days of
   busy-afternoon clips are a few thousand rows: cents a month in storage and reads.
 - **Row lifetime:** DynamoDB's TTL removes a row one day after its `deletedAt`.
+- **The cloud page hides deleted rows by default** (2026-10-04). `GET /pir/clips` leaves them out
+  unless `deleted=1`, and pages over what it lists; it always reports `onPi` and `deleted`, so
+  the page shows "21 clips on the Pi · 68 recently deleted" with a **show** / **hide** link.
+  Found with 68 deletions from the admin page: their grey rows filled pages 3–9 and pushed the
+  21 real clips to the front pages.
+- **A row past its `ttl` is never listed**, even before DynamoDB removes it: TTL deletion is
+  eventual ("within a few days"). So a deleted clip leaves the cloud list one day after its
+  deletion, as `pir_cloud.DELETED_TTL_SEC` intends.
 
 ---
 
@@ -718,6 +741,7 @@ AWS on 2026-10-03.
 | `cameras` and `clips` tables, evidence bucket, KVS streams | shared data | Both, under the data contract (§4.3) |
 | Cognito pool `kvs-demo-users` | shared | Each project has its own app client |
 | IoT Thing `adapter-01`, device role `KVSAdapterRole`, role alias | shared | Both projects' Pis |
+| `pico2w-` Lambdas, tables `Pico2wTelemetry` and `Pico2wAlarmThresholds`, bucket `pico2w-telemetry-ui-…` | **`blink_freertos`**: the Pico's own telemetry and alarm backend (its direct AWS path, D6) | No. A third project in the same account; a "successor untouched" baseline must expect changes here (`pico2w-set-thresholds` appeared 2026-10-04) |
 
 The live state on 2026-10-03:
 
@@ -846,8 +870,33 @@ Steps:
 
 ### Phase 1: Pico 2 W firmware (`blink_freertos`)
 
-**Status: done** (reported 2026-10-03). The Pi side confirms the contract is met (Phase 2,
-first findings); the hold-time potentiometer is still to be set.
+**Status: done** (reported 2026-10-03), **revised 2026-10-04** (`blink_freertos` `997be7f`,
+`f649c85`). The Pi side confirms the contract is met (Phase 2, first findings); the hold-time
+potentiometer is still to be set (motions still last 0.4–0.8 s).
+
+**The 2026-10-04 revision** (`PIR-MQTT-VMS-Pico.md` §4.6–§4.7) acts on everything the Pi side
+reported in that file's §4.5:
+
+- **Burst lag fixed:** up to 4 events in flight (was one per round trip), Nagle off,
+  `pir/state` once per drained batch, a 48-event outbox. **Measured on the Pi** from 10:41,
+  when the new firmware connected: every event 0.0–0.5 s late (the Pi's resolution) and
+  `dropped` 0, against 5–74 s on 2026-10-03. The Pico logs 24–30 ms from edge to PUBACK.
+- **Delivery until PUBACK:** an event leaves the Pico only once acknowledged, and whatever is
+  unacknowledged is resent in order after a reconnect. Duplicates are dropped on the Pi (§3.2).
+- **Reconnect back-off 1 → 5 s** (was 30 s), so the Pico is back within seconds of the
+  broker's Pi returning from a Wi‑Fi drop (`FoundAndFixed.md` #52).
+- **Watchdog (D14):** a reset after 4 min without Wi‑Fi, or when a monitored task stops checking
+  in; the hardware watchdog catches a hung supervisor, a HardFault or a panic. The Pi sees a
+  reset as `boot_ms` going backwards, which §3.5 already handles.
+- **The cause of the Pico's Wi‑Fi trouble** was found while testing the watchdog: the Pi 4B
+  itself, through its USB 3 port (`FoundAndFixed.md` #56).
+- **On the Pi:** Mosquitto now sets `set_tcp_nodelay true` (Appendix B.5), as the firmware
+  side suggested, so the broker's PUBACKs aren't held back by Nagle either.
+- **Still to check on the board:** a burst of waves, and a broker restart while waving (all
+  events must arrive, in order, after `status` and `pir/state`).
+
+The numbered list below is the original Phase 1 specification. Where the build differs, the
+mirror's §4.3.1 and §4.6 have the final form.
 
 Owned by `blink_freertos`; summarised here. **The full version, with the interface contract,
 is `PIR-MQTT-VMS-Pico.md` §3 and §4.3.** New since the original plan: the `pir/state` fields,
@@ -1739,8 +1788,9 @@ Results:
 phase named.
 
 1. Hardening:
-   - hardware watchdog on the Pico, also covering "no broker connection for N minutes"
-     (`PIR-MQTT-VMS-Pico.md` §4.5, finding 2): *open, firmware*;
+   - hardware watchdog on the Pico: *done* 2026-10-04 (D14). It resets after 4 min without
+     **Wi‑Fi**, deliberately not after a lost broker connection: with the broker's Pi down, a
+     reboot of the Pico wouldn't help;
    - an alert when `pir-state.json` or the cloud status item goes stale: *open*;
    - optional TLS for the broker, but **not on port 8883**: the Pi's nftables output chain
      drops every connection to 8883 (guide §7.3), which would block the Pi's own clients
@@ -1766,10 +1816,11 @@ phase named.
    - `FoundAndFixed.md` entries for every defect found: *done* (#51–#55).
 3. The successor's CLAUDE.md: the data contract, rules 4 and 5b (§4.3): *open*; it needs
    access to that repository.
-4. `blink_freertos`: *open, yours*:
-   - `PIR-MQTT-VMS-Pico.md` committed there in place of `PIR-MQTT-VMS.md`, and kept in step
-     with this file;
-   - MQTT_RASPI_4B_Pico2W.md, README-PIR.md, README.md.
+4. `blink_freertos`: *done* 2026-10-04 (`997be7f`, `f649c85`):
+   - `PIR-MQTT-VMS-Pico.md` committed there in place of `PIR-MQTT-VMS.md`; mirrored here;
+   - MQTT_RASPI_4B_Pico2W.md, README-PIR.md, README.md;
+   - still open there: the one correction in the mirror's banner (a stale stop is applied,
+     not dropped).
 
 ### Dependencies
 
@@ -1778,8 +1829,8 @@ phase named.
   check meets real data.
 - Next on the local side: **Phase 12's soak** (one week, retention at one day), the last
   condition for leaving PIR mode on unattended; then Phase 13. The cloud side is complete.
-  On the Pico side: the firmware's burst throughput (`PIR-MQTT-VMS-Pico.md` §4.5) and the
-  hold-time tuning.
+  On the Pico side: the burst throughput is fixed (2026-10-04); still open are the hold-time
+  tuning and two checks on the board (a burst of waves, a broker restart).
 - Phase 5 ran with the ring on the stick; Phase 12 moved it to RAM (D7).
 - Phase 10 needs Phase 9's table and policy; Phase 11 needs Phases 9 and 10.
 - Phases 9–11 are independent of Phases 4–8 on the AWS side, but the PIR panel only shows real
@@ -1806,6 +1857,7 @@ phase named.
 | D11 | Where live status and the clip index live | `cameras` row · own table | **Decided 2026-10-03: own table `pir-local`** |
 | D12 | Login client for this project's page | the shared app client · own app client | **Decided 2026-10-03: own app client `pir-web`** |
 | D13 | Thumbnails for choosing clips remotely | none · in the index row | **Decided 2026-10-03: in the index row** (1–3 frames, 160×90) |
+| D14 | Should the Pico reset itself after a long network loss (35 min without one, no reboot) | no · yes, after N minutes, with the hardware watchdog | **Decided 2026-10-04 in `blink_freertos`: yes, after 4 min without Wi‑Fi**, plus hung tasks and crashes (`PIR-MQTT-VMS-Pico.md` §4.7) |
 
 ### 6.2 Remote control and the successor
 
@@ -1996,6 +2048,18 @@ phase named.
 | Phase 12 step 3: the one-week soak | **Postponed** (decided 2026-10-03) | PIR mode stays off unattended until it runs |
 | Outage tests block AWS's usual ranges | **Plus 63.176.0.0/12** | The IoT endpoint moved there; the probe saw AWS as reachable (#54) |
 
+### Pico firmware revision, 2026-10-04
+
+| Earlier statement | Status now | Reason |
+|---|---|---|
+| The Pico publishes an event, waits for `ERR_OK`, then the next; `pir/state` after each event | **Up to 4 events in flight, each kept until its PUBACK, resent in order after a reconnect; `pir/state` per drained batch; Nagle off** | §4.5 finding 1 of the Pico doc: up to 74 s behind in a burst. Measured on the Pi afterwards: 0.0–0.5 s |
+| A resend can't happen; duplicates come only from QoS 1 | **Resends after a reconnect are normal** | The watcher already drops duplicates by `(seq, event)` per boot (§3.2); checked in `pir_session.py` |
+| "Hardware watchdog" (Phase 13), to cover a lost broker connection too | **Done as D14:** 4 min without **Wi‑Fi**, hung tasks, crashes | With the broker's Pi down, rebooting the Pico wouldn't help |
+| The Pico's Wi‑Fi drops: wiring (§4.5 finding 2), the FRITZ!Box (#52) | **The Pi 4B's USB 3 port**, next to the Pico | Found 2026-10-04: with the Pi close, the Pico heard no networks at all (`FoundAndFixed.md` #56) |
+| Mosquitto with default socket options | **`set_tcp_nodelay true`** (B.5) | The firmware side's suggestion, for the broker's PUBACKs |
+| Unprefixed AWS resources are the successor's | **Plus `pico2w-`, `blink_freertos`'s own backend** (§4.1) | A third project in the account |
+| The Pico doc lives in this repository until moved | **Committed in `blink_freertos`; mirrored here** with a banner | Decision 2026-10-04: one authoritative copy, references still resolve here |
+
 ### Paging and the admin player, 2026-10-03 (after Phase 12)
 
 | Earlier statement | Status now | Reason |
@@ -2006,6 +2070,7 @@ phase named.
 | The successor's pager: page numbers as raised buttons, hidden on a single page | **Page numbers as links**; the count shows even on one page | Asked for |
 | Admin player: closed only by pressing Play again | **"Stop & close player"** under the video, one player at a time | Asked for, as on the cloud page |
 | Admin status poll checked the camera in DynamoDB | **Against the supervisor's local registry cache** | A DNS failure made each poll hang ~36 s and froze the page (`FoundAndFixed.md` #55) |
+| §3.11: both GUIs show a deleted clip for a day | **The cloud page hides them by default**, with a count and a show/hide link; expired rows never listed (2026-10-04) | 68 deletions filled pages 3–9 with rows nobody could act on; TTL deletion is only eventual |
 
 ---
 
@@ -2126,7 +2191,30 @@ phase named.
   reading 22:11 of the previous evening before it.
 - `/mnt/vms-buffer`: 57 GB ext4, mounted. RAM 3.7 GB, 2.1 GB available. `Linger=yes`.
 
-**`blink_freertos`** (GitHub `vizdr/RasPi_Pico2W_FreeRTOS_AWS`), re-checked 2026-10-03
+**`blink_freertos`, re-checked 2026-10-04** at `f649c85` (commits `997be7f` 10:28 and `f649c85`
+12:06, both 2026-10-04):
+
+- `lan_mqtt_task.c`: `EVENT_WINDOW 4`, `OUTBOX_LEN 48`, `EVENT_QUEUE_LEN 16`, `HEARTBEAT_MS
+  30000`, `KEEP_ALIVE_S 30`, back-off 1 → 5 s, `altcp_nagle_disable()` on connect; events leave
+  the outbox only on their PUBACK and are resent in order after a reconnect; `status` and
+  `pir/state` are fire-and-forget; topics as in §3.2. `lan_mqtt_config.h.example`: broker
+  `192.168.178.53:1883`, user `pico`, client id `pico2w-01`, base `home/pico2w-01`.
+- `watchdog_task.c`: hardware timeout 10 s, fed every 1 s; reset after 4 min without Wi‑Fi;
+  check-in limits `WiFi` 90 s, `pir` 30 s, `LanMqtt` 60 s; reason kept in scratch register 0.
+- `pir.h`/`pir_task.h`: 64-bit `time_ms` from the ISR; `pir_on_motion_start(uint64_t)`,
+  `pir_on_motion_stop(uint64_t, uint32_t)`.
+- `lwipopts.h`: `MEM_SIZE 16000`, `MQTT_OUTPUT_RINGBUF_SIZE 512`, `MQTT_REQ_MAX_IN_FLIGHT 8`,
+  `MEMP_NUM_SYS_TIMEOUT 18`. `wifi_task.c`: country `CYW43_COUNTRY_GERMANY` by default; a scan
+  after each failed join.
+- The Pi side the same day: the new firmware connected at 10:41; events 0.0–0.5 s late,
+  `dropped` 0, motions still 0.4–0.8 s long (hold time untuned). The Pi's own Wi‑Fi is on
+  5 GHz (5240 MHz); the ring-buffer stick is on the USB 3 bus (`lsusb -t`: Bus 002, 5000M).
+  Mosquitto restarted with `set_tcp_nodelay true` at 12:39 while the Pico was offline.
+- The account also holds `blink_freertos`'s backend: `pico2w-store-telemetry`,
+  `pico2w-get-telemetry`, `pico2w-set-thresholds`; tables `Pico2wTelemetry`,
+  `Pico2wAlarmThresholds`.
+
+**`blink_freertos`** (GitHub `vizdr/RasPi_Pico2W_FreeRTOS_AWS`), first checked 2026-10-03
 against `main` as pushed 2026-10-02 09:04 UTC; the full list is in `PIR-MQTT-VMS-Pico.md` §7
 
 - `pir.c/h`, `pir_task.c/h`: driver/service split; hook signatures; `seq` = `motion_count`;
@@ -2362,6 +2450,7 @@ listener 1883
 allow_anonymous false
 password_file /etc/mosquitto/passwd
 acl_file /etc/mosquitto/acl
+set_tcp_nodelay true
 EOF
 sudo systemctl restart mosquitto
 ```
@@ -2372,6 +2461,7 @@ sudo systemctl restart mosquitto
 | `allow_anonymous false` | Every client must log in. Mosquitto 2.x already does this once a listener is defined; the line makes it explicit |
 | `password_file` | Users and password hashes (B.3) |
 | `acl_file` | Topic permissions (B.4) |
+| `set_tcp_nodelay true` | Nagle off on client sockets (a global option). PIR events and the broker's PUBACKs are small packets, and Nagle would hold each behind the previous one's ACK. Suggested by the firmware side with its own Nagle fix (`PIR-MQTT-VMS-Pico.md` §4.6); added on this Pi 2026-10-04 |
 
 - `vms.conf` can stay owned by root, mode 644: the broker reads it as root at startup.
 - **Port 1883 is reachable from the LAN only.** Nothing is forwarded on the FRITZ!Box, so the

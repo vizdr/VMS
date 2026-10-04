@@ -50,7 +50,10 @@ and clip index in the table `pir-local`, with upload requests from the cloud car
 the same uploader (10), this project's own cloud page on its own bucket and distribution
 (11), and the PIR ring and session footage in RAM (12, its one-week soak postponed). Phase 2's
 logger
-`adapter/observe_pir.py` is ready, its measurements postponed. Its §4 is the
+`adapter/observe_pir.py` is ready, its measurements postponed. `PIR-MQTT-VMS-Pico.md` is a
+**verbatim mirror** of the firmware repository's copy (`blink_freertos`, authoritative for the
+Pico and the MQTT interface it publishes): never edit it here, copy it from there again. The
+PI4 plan's §4 is the
 compatibility contract with the successor, which is going ONVIF-only; read it before
 touching anything shared in AWS. `Demo-AWS-Video-MCh-15.md` and `COSTS-1.3.md` are superseded earlier revisions of the
 guide and the cost model. `NETWORK.md` is companion reference material — MediaMTX's role,
@@ -131,7 +134,8 @@ and `cloud-request.json`. The watcher mirrors the clips into `pir-local` through
 > **This AWS account is shared with the successor repo (`VideoSafeZone`).** Since 2026-10-03
 > this repository has its **own copies** of every function its page uses, named `pir-<name>`,
 > behind its own API `pir-api` (`PIR-MQTT-VMS-PI4.md` §3.9, Phase 9). **The unprefixed
-> functions are the successor's: never deploy them from here.** Doing that once silently
+> functions are the successor's** (and `pico2w-*` belong to the Pico firmware's own backend in
+> `blink_freertos`): **never deploy them from here.** Doing that once silently
 > replaced the successor's `record-clip` and client (`FoundAndFixed.md` #48). The one shared
 > function this project still relies on is `clip-to-s3`, on cam-02's ONVIF event path (§4.4).
 
@@ -437,7 +441,8 @@ control where applicable. Since Phase 11 it is this project's own page, on `pir-
 with a PIR sensor (from `GET /pir`) also get the PIR switch, the Pi's live status and the
 "Motion clips on the Pi" list with Upload to AWS, and Evidence clips badge `pir` clips. Both
 lists page by 10 with the successor's pager (page numbers styled as links, the count always
-shown); `list_clips.py` carries the successor's paging line for line, so `pir-list-clips` and the
+shown); motion clips deleted on the Pi are hidden behind a "show" link and never listed once
+their `ttl` has passed; `list_clips.py` carries the successor's paging line for line, so `pir-list-clips` and the
 shared `list-clips` answer every request identically. Clips
 still on the Pi can't be played from the cloud (no inbound connections); an upload makes
 them playable.

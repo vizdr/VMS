@@ -1,17 +1,33 @@
 # PIR Motion Sensor → MQTT → VMS: Analysis and Plan (Pico 2 W side)
 
+> **Mirror — edit it in `blink_freertos`, not here.** This is a verbatim copy of
+> `PIR-MQTT-VMS-Pico.md` from [`blink_freertos`](https://github.com/vizdr/RasPi_Pico2W_FreeRTOS_AWS/blob/main/PIR-MQTT-VMS-Pico.md)
+> (commit `f649c85`, 2026-10-04), which is authoritative for the firmware and the MQTT
+> interface the Pico publishes. It is mirrored so that `PIR-MQTT-VMS-PI4.md`'s references resolve
+> in this repository; to update it, copy the file from there again. Section numbers below are
+> that file's.
+>
+> **One correction to make there** (the error came from the VMS side, 2026-10-03): §4.5 says a
+> stop arriving 74.1 s late "would have been dropped" by the Pi. It wouldn't: a **stale stop is
+> still applied** and closes its session at its event time; only a **stale start** is dropped
+> (`PIR-MQTT-VMS-PI4.md` §3.5, `adapter/pir_session.py`). The shorter "drops events older than
+> 60 s" in §3.3 and §7 means the same rule.
+
 **Status:** Phase 1 (the firmware) is done, reported 2026-10-03. The Pi side confirms it: the
 Pico's traffic meets the interface contract in §3 (VMS Phase 2, first findings). One setting is
 still open: the PIR module's hold-time potentiometer is at minimum (T_hold < 0.5 s) and needs
-turning up to about 3–5 s. Real events now produce clips on the Pi (VMS Phase 6), and that
-exposed two firmware findings, in §4.5 · **Written:** 2026-10-02 ·
-**Revised:** 2026-10-03, with the Pi-side decisions that affect the Pico, and the firmware
-facts re-checked against this repository (`main`, pushed 2026-10-02 09:04 UTC)
+turning up to about 3–5 s. Real events produced clips on the Pi (VMS Phase 6), and that exposed
+two firmware findings (§4.5). **Fixed 2026-10-04 (§4.6): finding 1 (publishing too slow in a
+burst), plus the parts of VMS FoundAndFixed #52 and #54 that apply here. Built and
+compile-checked; not yet run on the board.** **Finding 2: decided (D14) and implemented 2026-10-04 (§4.7), not yet run on the board** ·
+**Written:** 2026-10-02 · **Revised:** 2026-10-03, with the Pi-side decisions that affect the
+Pico, and the firmware facts re-checked against this repository (`main`, pushed 2026-10-02
+09:04 UTC); 2026-10-04, §4.5 merged from the VMS copy and §4.6 added
 
 **Where this file comes from.** The plan was first written here as `PIR-MQTT-VMS.md`. It was
 then copied to the VMS repository and developed there as `PIR-MQTT-VMS-PI4.md`, which is
 **authoritative for the Raspberry Pi 4B side**: the broker, recording, the GUIs and AWS.
-**This file replaces `PIR-MQTT-VMS.md` here and is authoritative for the firmware (Phase 1)
+**This file replaces `PIR-MQTT-VMS.md` (kept for reference as `PIR-MQTT-VMS-OLD.md`) here and is authoritative for the firmware (Phase 1)
 and for the MQTT interface the Pico publishes (§3).** The Pi side is summarised only as far
 as the Pico depends on it. References of the form *VMS §3.5* point into
 `PIR-MQTT-VMS-PI4.md`.
@@ -88,7 +104,7 @@ Re-checked against this repository on 2026-10-03 (§7).
 | Item | Current state (file) | Consequence |
 |---|---|---|
 | PIR driver | `pir.c/h`: raw GPIO IRQ on the shared `IO_IRQ_BANK0` (`gpio_add_raw_irq_handler`, coexists with CYW43), level-based edge handling, S1 mode pin on GPIO 13 | Done. Nothing to change |
-| Edge timestamp | `pir.c:37`: `to_ms_since_boot(get_absolute_time())`, a **32-bit** millisecond counter that wraps after **49.7 days** | The Pi treats `boot_ms` going backwards as a Pico reboot. Payloads therefore carry a **64-bit** `boot_ms` (§3.3), widened in `lan_mqtt_task`, not in the ISR |
+| Edge timestamp | `pir.c:37`: `to_ms_since_boot(get_absolute_time())`, a **32-bit** millisecond counter that wraps after **49.7 days** | The Pi treats `boot_ms` going backwards as a Pico reboot. Payloads therefore carry a **64-bit** `boot_ms` (§3.3). *Since 2026-10-04 the ISR itself takes 64-bit `time_us_64() / 1000`, kept 64-bit end to end; first it was widened in `lan_mqtt_task`* |
 | PIR service | `pir_task.c/h`: ISR→task queue (`PIR_QUEUE_LEN 8`), 30 s warm-up, 1 s level resync (`PIR_RESYNC_MS`), `pir_status_t {motion, motion_count, last_change_ms}`, weak hooks | Hooks need a **timestamp parameter**. Today they are `pir_on_motion_start(void)` and `pir_on_motion_stop(duration_ms)`; `pir_apply()` already has `time_ms` |
 | Warm-up | `pir_get_status()` returns **false** while the sensor warms up (30 s after boot) | The on-connect `pir/state` publish needs a warm-up variant (§3.2) |
 | Resync path | If an edge is missed, the 1 s poll applies the new level with the poll time | Such an event is up to ~1 s late. Harmless: the Pi's clip cut is keyframe-rounded to 2 s anyway |
@@ -145,9 +161,9 @@ Field meanings:
 |---|---|---|
 | `seq` | `motion_count` | A start and its stop share it. It exposes gaps |
 | `event` | hook | `start` or `stop` |
-| `boot_ms` in `pir/event` | the ISR timestamp, widened to 64 bit | When the edge happened, on the Pico's clock |
+| `boot_ms` in `pir/event` | the ISR timestamp (64-bit) | When the edge happened, on the Pico's clock |
 | `boot_ms` in `pir/state` | `time_us_64() / 1000` at publish | When the state was published, on the Pico's clock |
-| `changed_ms` | `last_change_ms`, widened | When the last start or stop happened |
+| `changed_ms` | `last_change_ms` (64-bit) | When the last start or stop happened |
 | `count` | `motion_count` | Starts since boot |
 | `dropped` | the LAN queue's drop counter | Events lost because the queue was full (optional; the Pi shows it if present) |
 | `duration_ms` | hook | Length of the motion that just ended |
@@ -156,7 +172,8 @@ Field meanings:
 **When `pir/state` is published:**
 
 1. on connect, **before** any queued event (it is the Pi's first clock reference, §3.3);
-2. after each event;
+2. after each **drained batch** of events, i.e. once every queued event has been acknowledged
+   (changed 2026-10-04 from "after each event", §4.6);
 3. **every 30 s** as a heartbeat, even when nothing moves.
 
 ### 3.3 Timestamps: `boot_ms`
@@ -170,11 +187,11 @@ keep five rules:
    stream it goes backwards only at a reboot, which is how the Pi detects one. The Pi never
    uses events for that: a queued event's `boot_ms` is older than the latest state's by
    design (rule 2).
-   - Keep the hooks and the ISR on the cheap 32-bit value.
-   - Widen it in `lan_mqtt_task` when building the payload:
-     `ev64 = now64 − (uint32_t)(now32 − ev32)`, with `now64 = time_us_64() / 1000` and
-     `now32 = (uint32_t)now64`, taken together.
-   - This is exact for any event younger than 49.7 days.
+   - The ISR stamps each edge with `time_us_64() / 1000`, and that 64-bit value travels
+     unchanged through the queue, the hooks, `pir_status_t` and the outbox into the payload.
+   - Not the SDK's `to_ms_since_boot()`: it is 32-bit and wraps after 49.7 days.
+   - *Until 2026-10-04 the hooks carried the 32-bit value and `lan_mqtt_task` widened it with
+     `now64 − (uint32_t)(now32 − ev32)`; replaced to remove that step (§6).*
 2. **An event's `boot_ms` is the edge time from the ISR**, never the publish time. A queued or
    retried event keeps its original value.
 3. **`pir/state`'s `boot_ms` is the publish time.** That is what makes it a clock reference.
@@ -188,9 +205,16 @@ keep five rules:
 ### 3.4 Delivery
 
 - **QoS 1 everywhere.**
-- **Retry, never drop.** An event stays in the queue until `mqtt_publish()` returned
-  `ERR_OK` (§4, Phase 1).
-- **Publish in queue order.** The Pi pairs starts and stops by `seq`.
+- **Retry, never drop.** An event stays in the Pico's outbox until **its PUBACK has
+  arrived**, and is sent again after a reconnect (§4, Phase 1). `mqtt_publish()` returning
+  `ERR_OK` is not enough: it only means "queued in lwIP's output ring", and on a disconnect
+  lwIP's `mqtt_close()` deletes every request still waiting for a PUBACK without calling its
+  callback, and never retransmits.
+- **Up to 4 events in flight** (since 2026-10-04, §4.6; before, one at a time). The broker
+  acknowledges QoS 1 publishes in the order it received them (MQTT 3.1.1 §4.6), so the
+  acknowledged events are always the oldest.
+- **Publish in queue order,** also when resending after a reconnect. The Pi pairs starts and
+  stops by `seq`.
 - **Duplicates are fine**: the Pi deduplicates by `(seq, event)`.
 - **Old events still go out.** An event the Pi will drop as too old (> 60 s) is still worth
   sending, because the Pi counts it and it shows up in the statistics. Don't discard on the
@@ -233,7 +257,7 @@ Phase numbers are shared with the VMS copy.
 | Phase | Owner | What | Pico involvement |
 |---|---|---|---|
 | 0 | VMS | Network and broker, **done 2026-10-03** | A fixed address for the Pico; the `pico` broker user (§4.2) |
-| **1** | **this repository** | **Firmware, done 2026-10-03** | **All of it (§4.3)** |
+| **1** | **this repository** | **Firmware, done 2026-10-03; §4.5 fixes 2026-10-04** | **All of it (§4.3, §4.6)** |
 | 2 | VMS | Observation: log the Pico's topics for an afternoon and a night | The Pico runs normally; part of the run is in single-trigger mode, via `pir/cmd/retrigger = 0` |
 | 3–8 | VMS | Registry switch, session logic, ring recording, watcher, uploads, local GUI | None. A Pico running Phase 1 is the input |
 | 9–11 | VMS | VMS-only cloud resources, status in the cloud, VMS's cloud page | None |
@@ -270,8 +294,8 @@ Phase numbers are shared with the VMS copy.
 1. **Hooks with timestamps:**
 
    ```c
-   void pir_on_motion_start(uint32_t time_ms);
-   void pir_on_motion_stop(uint32_t time_ms, uint32_t duration_ms);
+   void pir_on_motion_start(uint64_t time_ms);   // 64-bit since 2026-10-04 (§3.3)
+   void pir_on_motion_stop(uint64_t time_ms, uint32_t duration_ms);
    ```
 
    - Pass `time_ms` through from `pir_apply()`, which already has it.
@@ -297,10 +321,12 @@ Phase numbers are shared with the VMS copy.
        task. This queue is separate from `pir_task`'s own ISR queue (`PIR_QUEUE_LEN 8`);
      - `seq` = `motion_count`, read with `pir_get_status()` in the hook (a start and its stop
        share it);
-     - loop: `xQueuePeek()` → widen `time_ms` to 64-bit (§3.3) → build the payload →
-       `mqtt_publish()` → `xQueueReceive()` only after `ERR_OK`. On `ERR_MEM`, back off
-       ~50 ms and retry;
-     - after each event, republish the retained `pir/state`.
+     - loop: `xQueuePeek()` → build the payload from the 64-bit `time_ms` (§3.3) →
+       `mqtt_publish()` → wait for **that publish's PUBACK** → `xQueueReceive()`. On
+       `ERR_MEM`, back off ~50 ms and retry; on a disconnect or a missing PUBACK the event
+       stays at the head and is sent again (§3.4);
+     - after each event, republish the retained `pir/state` (since 2026-10-04: after each
+       drained batch, §4.6).
    - **Heartbeat:** republish `pir/state` every 30 s.
    - **Plumbing:**
      - every lwIP call between `cyw43_arch_lwip_begin()` / `cyw43_arch_lwip_end()`;
@@ -328,8 +354,8 @@ Phase numbers are shared with the VMS copy.
    - right after boot, `pir/state` arrives in its warm-up form, and the normal form after the
      30 s warm-up;
    - `pir/state` arrives every 30 s with a growing `boot_ms`;
-   - **widening near the wrap:** a unit test of the widening helper with `now32` just after
-     the 32-bit wrap and `ev32` just before it gives the right 64-bit value;
+   - ~~widening near the wrap: a unit test of the widening helper~~ (no longer applies: the
+     timestamps are 64-bit from the ISR on, so there is nothing to widen);
    - with the broker stopped for a minute, waves are queued, and after reconnect they arrive
      in order with their original `boot_ms`, after `status` and `pir/state`;
    - powering off the Pico yields `offline` after ~45 s;
@@ -337,9 +363,47 @@ Phase numbers are shared with the VMS copy.
    - AWS telemetry still arrives every 10 s;
    - a publish with wrong credentials is refused at connect.
 
+### 4.3.1 Phase 1: as implemented (2026-10-03)
+
+| Item | Where |
+|---|---|
+| Hooks with timestamps | `pir_task.h/.c`; README-PIR.md §1 and §5 |
+| LAN MQTT task | `lan_mqtt_task.c/h`; started in `main.c` at `tskIDLE_PRIORITY + 2`, 1024-word stack; added to `CMakeLists.txt` |
+| 64-bit `boot_ms` | First `boot_time.h` (`boot_ms_widen()`) with `tests/boot_time_test.c`; **removed 2026-10-04**: the ISR takes a 64-bit timestamp |
+| Configuration | `lan_mqtt_config.h.example` (committed); `lan_mqtt_config.h` gitignored |
+| lwIP | `lwipopts.h`: `MEM_SIZE 16000`, `MQTT_OUTPUT_RINGBUF_SIZE 512`, `MEMP_NUM_SYS_TIMEOUT 18` |
+
+Details the plan didn't fix, decided while implementing:
+
+- **Stop-and-wait delivery** (§3.4): the PUBACK wait is bounded by lwIP's own request timeout
+  plus margin (`MQTT_REQ_TIMEOUT` 30 s + 10 s). A disconnect wakes the waiting task at once.
+  *Replaced 2026-10-04 by a window of 4 (§4.6).*
+- **`status` and `pir/state` are fire-and-forget** (QoS 1, retained, no PUBACK wait). Both are
+  republished often, so one lost to a full output ring is replaced by the next.
+- **An idle session checks the connection every 1 s** while waiting for events, so a dropped
+  connection is noticed and reconnected promptly instead of at the next heartbeat.
+- **Reconnect back-off:** 1 s doubling to 30 s (*5 s since 2026-10-04, §4.6*), reset after a
+  successful connect. A refused
+  or timed-out connect calls `mqtt_disconnect()` first, or the next `mqtt_client_connect()`
+  would return `ERR_ISCONN`.
+- **Retrigger command:** payload `1` or `0` (first byte); anything else is ignored.
+- **Wait for Wi‑Fi before the first lwIP call.** Found on the first debug run: a HardFault
+  (precise BusFault, `BFAR = 0xF0000004`) in `cyw43_thread_enter()`. `lan_mqtt_task` (priority
+  +2) ran before `wifi_task` (+1) had called `cyw43_arch_init()`, so `cyw43_arch_lwip_begin()`
+  dereferenced the still-NULL async context. The task now calls `wifi_wait_connected()` before
+  creating its MQTT client, as `aws_iot_task` does.
+- **Cost:** +12 KB static RAM (the larger lwIP heap; 213 KB of 520 KB in use), +4.3 KB flash.
+
+Checks done: the firmware builds with no warnings; `lan_mqtt_task.c` and `pir_task.c` are clean
+under `-Wall -Wextra`; `tests/boot_time_test.c` passes all 8 cases, including events just before
+and across the 32-bit wrap (helper and test removed 2026-10-04); the linked image has the strong
+hook overrides. **All other §4.3
+checks need the board and the broker.**
+
 ### 4.4 Phase 13: the Pico's part
 
-- **Hardening:** hardware watchdog on the Pico.
+- **Hardening:** hardware watchdog on the Pico. **Done 2026-10-04 (§4.7)**, together with the
+  reset on a long network loss (D14).
 - **This repository's docs:**
   - README-PIR.md: the new hook signatures, and the LAN MQTT task in the design section;
   - README.md;
@@ -382,6 +446,117 @@ Phase numbers are shared with the VMS copy.
   hardware watchdog (Phase 13) should also cover "no broker connection for N minutes", not
   only a hung task.
 
+### 4.6 Fixes, 2026-10-04: §4.5 and VMS FoundAndFixed #51–#55
+
+**Finding 1, publishing too slow in a burst.** The old loop sent one event, waited for its
+PUBACK, republished `pir/state`, and only then sent the next event. lwIP's MQTT client leaves
+Nagle's algorithm on, so that next event also waited for the TCP ACK of the `pir/state`
+before it. Per motion that is 4 publishes, each paying at least a round trip, and any delayed
+ACK on either side added on top. Fixed in `lan_mqtt_task.c`:
+
+- **Nagle off** on the LAN connection (`altcp_nagle_disable()` once the broker accepts).
+- **Up to 4 events in flight** instead of 1. An event still leaves the outbox only on its own
+  PUBACK, and after a reconnect everything unacknowledged is resent in order (§3.4).
+  `MQTT_REQ_MAX_IN_FLIGHT` raised from 4 to 8 in `lwipopts.h` to make room.
+- **`pir/state` once per drained batch** instead of after every event (§3.2): about half the
+  messages in a burst.
+- **A 48-entry outbox** behind the 16-entry hand-off queue. It also fills while Wi‑Fi or the
+  broker is down; before, only the 16-entry queue buffered then.
+- **Measurable on the Pico:** each acknowledged event now logs
+  `[lan_mqtt] sent start #12, 35 ms after the edge`, i.e. edge to PUBACK: the Pi's lateness
+  plus one LAN round trip.
+- **Also worth setting on the Pi** (VMS side, not done here): `set_tcp_nodelay true` in
+  Mosquitto's configuration. The broker's PUBACKs are small packets too, and Mosquitto leaves
+  Nagle on by default.
+
+**Finding 2, 35 minutes without network.** Decided as D14 and implemented in §4.7. `wifi_task` was rejoining throughout (the LED shows its
+state), so look for repeated `wifi_task: connect failed (err=…)` lines on the serial console if
+it happens again; that tells a radio stuck after a power glitch from an access point refusing
+the Pico.
+
+**VMS FoundAndFixed #51–#55, as they apply to the Pico:**
+
+| # | Pi-side defect | Relevant here? | Action |
+|---|---|---|---|
+| 51 | cam‑01 publisher hung for 7.5 h, `active` but sending nothing; the Pi's clock jumped at its first NTP sync (no RTC) | **The lesson, yes**: a task can be alive and useless. **The clock jump, no**: the Pico times events by `boot_ms`; `ts` is only added after SNTP and only for logs | The watchdog's task check-ins (§4.7) |
+| 52 | The FRITZ!Box drops the Pi's Wi‑Fi after group-rekey bursts (`reason=2`), for 40 s to 3 min | **Yes.** The broker lives on the Pi, so every such drop cuts the Pico's session. The Pico is on the same access point and may see the same drops itself | **Reconnect back-off capped at 5 s** (was 30 s): the Pico is back within seconds of the broker, and its queued events stay inside the Pi's 60 s staleness limit as far as possible. The larger outbox keeps more events through the gap |
+| 53 | cam‑02 H.265 clips 9 s long, listed as 45 s | No (camera and cloud) | None |
+| 54 | The IoT endpoint moved to `63.179.34.254`, outside every listed range | **Yes**: it is the endpoint `aws_iot_task` uses. The Pico re-resolves it on every reconnect, which is right, but a lookup that **timed out** reused the previous lookup's success and connected to its, possibly stale, address | **Fixed** in `aws_iot_task.c`: the result flag is reset before each lookup, and success requires the callback to have actually fired |
+| 55 | A DNS failure froze the admin page, because a polled LAN endpoint waited on AWS | **Checked, already holds**: the LAN path uses the broker's literal IP (no DNS), never waits for SNTP, and shares nothing with the AWS task but lwIP's lock, which DNS lookups don't hold while waiting | None |
+
+**Checks done:** the firmware builds with no warnings; `lan_mqtt_task.c` and `aws_iot_task.c`
+are clean under `-Wall -Wextra`; +1.4 KB static RAM (the outbox). **On the board, 2026-10-04:**
+eight motions that happened before Wi‑Fi came up were buffered and delivered in order at once
+after `[lan_mqtt] connected`; live events then arrived **24–30 ms after the edge** (the Pi had
+measured 5–74 s before the fix). The broker-restart check is still open. **To check on the board:**
+a burst of waves (all events arrive, `… ms after the edge` stays small, no growth); the broker
+stopped for a minute while waving, then started (all events arrive in order, after `status`
+and `pir/state`); and the §4.3 checks again.
+
+### 4.7 Watchdog, 2026-10-04 (D14)
+
+`watchdog_task.c/h`, a supervisor at `tskIDLE_PRIORITY + 3` (above every application task, below
+the CYW43 worker at +4), started in `main.c`. The RP2350 watchdog counts at most ~16.7 s, too
+short to express "4 minutes" itself, so the supervisor decides and the hardware is the backstop.
+
+| Condition | Action |
+|---|---|
+| Wi‑Fi down for **4 min** in a row (`wifi_is_connected()` false; boot counts as down until the first join) | Reset. After a reset `cyw43_arch_init()` power-cycles the radio (`WL_REG_ON`), which a stuck radio needs and `wifi_task`'s rejoining can't do |
+| A monitored task hasn't checked in within its limit: `WiFi` 90 s, `pir` 30 s, `LanMqtt` 60 s | Reset (a hung task) |
+| The supervisor itself stops feeding the hardware watchdog for 10 s | The hardware resets the chip |
+
+- **Monitored from the first check-in on,** so the PIR's 30 s warm-up needs no special case.
+  `aws_iot_task` isn't monitored: it legitimately blocks for as long as there is no internet.
+- **The reason survives the reset** in watchdog scratch register 0 (registers 4–7 are the SDK's)
+  and is printed after the reboot, e.g. `[watchdog] previous reset: Wi-Fi down for 240 s`. The Pi
+  sees the reboot through `boot_ms` going backwards in `pir/state` (§3.3).
+- **Crashes now recover:** a HardFault, `panic()` or failed `configASSERT` used to stop the Pico
+  for good without a debugger; now the hardware watchdog reboots it after 10 s. Under the
+  debugger the watchdog pauses while the core is halted (`pause_on_debug`), so a fault can still
+  be inspected.
+- **`-DWATCHDOG_ENABLED=0`** keeps the checks and messages but never resets, e.g. for a long
+  debugging session with the core running.
+- **Cost:** +1.3 KB flash, a 512-word stack.
+
+**To check on the board:** switch the access point off (or move the Pico out of range) for more
+than 4 min: `[watchdog] Wi-Fi down for 240 s`, a reboot, then
+`[watchdog] previous reset: Wi-Fi down for 240 s`; with the access point on, no reset in a long
+run.
+
+**First field run, 2026-10-04:** the reset worked as designed (`Wi-Fi down for 240 s`, reset,
+reported after the reboot), but the Pico still couldn't join afterwards: `connect status:
+joining`, then `err=-2` (timeout), while the FRITZ!Box's 2.4 GHz radio was up on channel 11
+(WPA2, visible from another machine). That log can't say why, because the SDK reports
+"joining" both for an access point it can't find and for one that doesn't answer. So
+`wifi_task.c` now:
+
+- **diagnoses a failed join:** it names the error (timeout / wrong password / refused), stops
+  the join and scans, then prints one of: the SSID is visible (with RSSI, channel and auth
+  mode); it is missing among N other networks (off, out of range, or a channel the country
+  setting excludes); or **no networks are heard at all**, which points at the Pico's power
+  supply or wiring, as in §4.5 finding 2;
+- **sets the radio's country** (`WIFI_COUNTRY`, default `CYW43_COUNTRY_GERMANY`, override in
+  `wifi_credentials.h`). The default "worldwide" leaves out channels 12 and 13, which a
+  FRITZ!Box may pick on automatic channel selection.
+
+The first diagnosis (country DE active) read `join failed: association refused or not answered`,
+then a scan that heard **one** network, not the FRITZ!Box, while a PC nearby heard four,
+including the FRITZ!Box's 2.4 GHz at 64 % on channel 11. Earlier attempts also reached `no ip`
+and then dropped (`link down`). Nothing in the firmware touches the radio's pins (GPIO 23–25,
+29). So the Pico's radio link is weak or disturbed: antenna surroundings, supply, or the
+access point itself (VMS FoundAndFixed #52 shows the same FRITZ!Box dropping the Pi). The scan
+now runs at boot too, lists every network with its RSSI, and the RSSI is logged on every
+successful connect, so a change of position, wiring or power can be measured.
+
+**Cause found, 2026-10-04: the Raspberry Pi 4B next to the Pico.** With the Pi 4B close by, the
+scan heard **0 networks** at all. With the Pi moved away, the Pico joined at once at
+**RSSI −68 dBm**, the same signal a PC nearby measured. The Pi 4B is a known 2.4 GHz noise
+source, above all through its USB 3.0 ports and the devices on them (here VMS's USB stick for
+the ring buffer, and possibly the camera). The Pi's own Wi‑Fi uses 5 GHz, which is why it was
+not affected the same way. **Rule: keep the Pico at least ~0.5–1 m from the Pi 4B's USB 3
+ports**, or move the USB 3 devices to USB 2 ports or onto a shielded extension cable. Worth an
+entry in VMS `FoundAndFixed.md`, since it concerns the Pi's hardware.
+
 ---
 
 ## 5. Decisions that affect the Pico
@@ -391,6 +566,7 @@ Phase numbers are shared with the VMS copy.
 | D6 | AWS path of the Pico: keep the direct TLS telemetry path, or route through a Mosquitto bridge on the Pi | **Decided 2026-10-03: keep direct** | `aws_iot_task` stays as it is. The ~1 s stall of local publishes during an AWS TLS reconnect stays too; it doesn't affect recording (§3.3) |
 | D4 | What happens when presence outlasts the 180 s clip cap, or continues after a session ends | **Open**, decided after Phase 2 | If the Pi opens continuation sessions, it reads the **retained `pir/state.motion`**. That is one more reason to keep `pir/state` accurate and retained |
 | D2 | Only PIR sessions count as "recording runs" | Decided | None |
+| D14 | Should the Pico reset itself when its network is gone for long (§4.5 finding 2: 35 min without network, no reboot)? | **Decided 2026-10-04: yes, after 4 min without Wi‑Fi, with the hardware watchdog** (option (b), N = 4 min) | Implemented in `watchdog_task.c/h` (§4.7) |
 | others | D1, D3, D5, D7–D13, and the remote-control choices (A2, B3, C2, option (b)) | Decided or open in VMS | None; all on the Pi or in AWS (VMS §6) |
 
 ---
@@ -411,7 +587,7 @@ Phase numbers are shared with the VMS copy.
 | MQTT_RASPI_4B_Pico2W.md: "turn off Wi‑Fi power save on the Pico" | **Already done** | `wifi_task.c:54` |
 | MQTT_RASPI_4B_Pico2W.md: "SNTP optional" | **Refined** | SNTP exists, but the local path must not depend on it |
 
-### This revision (2026-10-03)
+### Revision 2026-10-03
 
 | Earlier statement | Status now | Reason |
 |---|---|---|
@@ -426,9 +602,20 @@ Phase numbers are shared with the VMS copy.
 | Fixed IPv4 for the boards, listed like an option | **Required** | The broker address is compiled into the Pico |
 | D6 open | **Decided:** keep the direct AWS path | VMS decision, 2026-10-03 |
 | "`boot_ms` goes backwards only at a reboot, which is how the Pi detects one" | **Refined:** only in the `pir/state` stream; events are never used to detect a reboot | Found testing VMS's Phase 2 observer: a late event's older `boot_ms` was taken for a reboot. No change to the firmware; rules 2–4 already give the Pi what it needs |
-| (new) Burst throughput | **Too slow:** about one motion delivered every ~2 s in a 1 s burst; lag grew to 17 s | Seen on the Pi in VMS Phase 6 (§4.5); to fix in `lan_mqtt_task` |
-| (new) Network loss without reboot | **35 min, loose wiring;** `dropped` reached 225 | §4.5; the watchdog should also cover a lost broker connection |
 | The Pi records clips from KVS | **Changed:** the Pi records locally from a ring buffer; selected clips are uploaded; there is remote control from VMS's own cloud page | No effect on the firmware |
+| "An event stays in the queue until `mqtt_publish()` returned `ERR_OK`" | **Changed:** until its PUBACK; stop-and-wait | Found implementing Phase 1: lwIP's `mqtt_close()` → `mqtt_clear_requests()` frees un-acknowledged requests without calling their callbacks and never retransmits, so dequeuing on `ERR_OK` loses an event in flight at a disconnect. A PUBACK lost on the way back now gives a duplicate, which the Pi already drops |
+
+### Revision 2026-10-04
+
+| Earlier statement | Status now | Reason |
+|---|---|---|
+| Events go out stop-and-wait, one at a time | **Changed:** up to 4 in flight, still removed only on their own PUBACK, resent in order after a reconnect; Nagle off | §4.5 finding 1: one round trip per message, plus Nagle, fell up to 74 s behind |
+| `pir/state` after each event | **Changed:** after each drained batch | Half the traffic in a burst; suggested by the Pi side (§4.5) |
+| Reconnect back-off 1 s → 30 s | **Changed:** 1 s → 5 s | VMS FoundAndFixed #52: the broker's Pi drops off Wi‑Fi for 40 s–3 min; the Pi drops events older than 60 s |
+| `resolve_endpoint()` in `aws_iot_task.c` | **Fixed:** a timed-out lookup no longer reuses the previous success | VMS FoundAndFixed #54: the AWS endpoint does move |
+| §4.5 existed only in the VMS copy of this file | **Merged** here | This copy is authoritative for the firmware |
+| PIR timestamps 32-bit in the ISR, hooks and queues; widened to 64-bit in `lan_mqtt_task` (`boot_time.h`) | **Changed:** 64-bit from the ISR on (`time_us_64() / 1000`); hooks are `pir_on_motion_start(uint64_t)`, `pir_on_motion_stop(uint64_t, uint32_t)`; `pir_status_t.last_change_ms` is 64-bit; `boot_time.h` and its test removed | Simpler: nothing to widen. The SDK computes the 64-bit value in `to_ms_since_boot()` anyway before truncating, so the ISR costs the same. Durations stay 32-bit |
+| D14 open | **Decided and implemented:** reset after 4 min without Wi‑Fi, with a hardware watchdog that also covers hung tasks and crashes (§4.7) | Decision 2026-10-04 |
 
 ---
 
@@ -477,6 +664,13 @@ Phase numbers are shared with the VMS copy.
 - `mqtt.c`: `mqtt_client_new()` uses `mem_calloc`; the cyclic timer uses `sys_timeout`.
 - `opt.h`: `MEMP_NUM_TCP_PCB 5`.
 - `cyw43.h`: `CYW43_DEFAULT_PM` = `CYW43_PERFORMANCE_PM` (PM2).
+
+**VMS `FoundAndFixed.md`** #51–#55 (2026-10-03) and the VMS copy of this file (§4.5), read
+2026-10-04 at VMS commit `1334eba`.
+
+**lwIP** (re-checked 2026-10-04): `mqtt.c` never disables Nagle (`altcp_nagle_disable()` is
+available in `altcp.h`); `mqtt_close()` → `mqtt_clear_requests()` frees pending requests
+without calling their callbacks; the default `MQTT_REQ_MAX_IN_FLIGHT` is 4.
 
 **The Pi side**, from VMS `PIR-MQTT-VMS-PI4.md`, 2026-10-03
 

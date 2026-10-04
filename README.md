@@ -177,7 +177,8 @@ than playback** throughout the media path; and **two copies of one fact always d
 | Raspberry Pi 4B | **4 GB** (what this was built on; 8 GB makes the SDK build easier) |
 | Storage | SD card for the OS, plus a **USB stick** if you want outage buffering (57 GB here) |
 | `cam-01` | Any UVC USB webcam (built on an AVerMedia PW310 — MJPG only, so it must be transcoded) |
-| `cam-02` | Any ONVIF/RTSP camera that emits H.264 (tested: a Hikvision-derived rebrand) |
+| `cam-02` | Any ONVIF/RTSP camera that emits H.264 or H.265 (tested: a Hikvision-derived rebrand) |
+| PIR sensor (optional) | A Raspberry Pi Pico 2 W with a PIR module, publishing to a broker on the Pi ([`PIR-MQTT-VMS-PI4.md`](PIR-MQTT-VMS-PI4.md)). **Keep it ~0.5–1 m from the Pi's USB 3 ports**: next to them its 2.4 GHz Wi‑Fi heard no networks at all ([`FoundAndFixed.md`](FoundAndFixed.md) #56) |
 | Network | Wired or Wi-Fi; **no router configuration at all** |
 | OS | Raspberry Pi OS (Debian trixie), 64-bit |
 
@@ -408,6 +409,7 @@ produced a nonexistent unit that `systemctl` silently no-op'd against.
 | [`AUDIO.md`](AUDIO.md) | Optional audio: design, the two silent bugs, withdrawn claims |
 | [`OUTAGE.md`](OUTAGE.md) | Durable outage buffering: design, measurements, open questions |
 | [`PIR-MQTT-VMS-PI4.md`](PIR-MQTT-VMS-PI4.md) | **Plan, largely built:** a PIR motion sensor (Pico 2 W, local MQTT) as a recording trigger for the USB camera, recorded locally and uploaded on request; this project's own cloud resources; the compatibility contract with the successor project. Done so far: the local broker (Phase 0; Appendix B is the Mosquitto setup manual), the Pico firmware (Phase 1), the PIR switch in the admin GUI (Phase 3) the session logic with its replay tool (Phase 4) ring recording for PIR in the outage supervisor (Phase 5), the watcher that turns motion into local clips on the USB stick (Phase 6), uploading clips requested on the LAN to the shared clip list (Phase 7), the admin page's PIR panel and clip list (Phase 8), this project's own `pir-` cloud resources (Phase 9), the Pi's live PIR status and local clip index in the cloud, with uploads requested from there (Phase 10), this project's own cloud page (Phase 11), and the ring buffer and session footage in RAM (Phase 12). Next: Phase 12's one-week soak, before PIR mode is left on unattended |
+| [`PIR-MQTT-VMS-Pico.md`](PIR-MQTT-VMS-Pico.md) | The Pico 2 W side of the PIR plan: firmware and the MQTT interface it publishes. **A mirror** of the copy in [`blink_freertos`](https://github.com/vizdr/RasPi_Pico2W_FreeRTOS_AWS), which is authoritative |
 | [`OUTBOUND-CLOUD.md`](OUTBOUND-CLOUD.md) | The outbound-only architectural thesis |
 | [`NETWORK.md`](NETWORK.md) | Planning notes: MediaMTX's role, how WS-Discovery works, VLAN options, H.264 vs H.265. Reasoning, not a runbook — its banner marks what has moved on, and its codec section is superseded by guide §21 |
 | [`measurements/`](measurements/) | Raw recorded results, including [`codec-phase0.md`](measurements/codec-phase0.md) — the H.264/H.265 evidence (encode capability, KVS behaviour, browser matrix) |
