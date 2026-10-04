@@ -101,11 +101,19 @@ with a backup, and rolls back automatically if video does not return.
 </p>
 
 <p align="center">
-  <img src="USB-cam-01.png" width="900">
+  <img src="USB-cam-PIR.png" width="900">
+</p>
+
+<p align="center">
+  <img src="PIR-Clips.png" width="900">
 </p>
 
 <p align="center">
   <img src="ONVIF-cam-02.png" width="900">
+</p>
+
+<p align="center">
+  <img src="Pico-FreeRTOS.png" width="900">
 </p>
 
 ---
