@@ -15,8 +15,9 @@ URLs carry camera credentials, and used when AWS is unreachable -- cameras must 
 without the cloud; recording through an outage is what the outage buffer exists for.
 
 It never removes a path. A path the registry doesn't list (cam01, which its own publisher
-feeds; anything added by hand) is left alone. It adds missing paths and fixes a source that
-changed. An unchanged path is not touched at all, because patching `source` makes MediaMTX
+feeds; anything added by hand) is left alone; an unregistered camera's path is removed by the
+admin GUI's Unregister, and this then leaves it out. It adds missing paths and fixes a source
+that changed. An unchanged path is not touched at all, because patching `source` makes MediaMTX
 recreate the path and disconnect its readers, a running KVS producer included.
 
 Usage:  sync_mediamtx_paths.py [--dry-run]
@@ -59,8 +60,10 @@ def fetch_registry():
     cfg = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
     items = get_session().resource("dynamodb", config=cfg).Table("cameras").scan()["Items"]
     keep = ("mode", "rtspUrl", "onvifHost", "onvifPort", "onvifEndpointRef")  # the last three: rematch_cameras.py
+    # An unregistered camera gets no path, and stays out of the cache, so an offline start
+    # doesn't bring it back either.
     return [{"cameraId": i["cameraId"], **{k: (int(i[k]) if k == "onvifPort" else i[k]) for k in keep if k in i}}
-            for i in items]
+            for i in items if not camera_control.is_unregistered(i)]
 
 
 def save_cache(cameras):

@@ -47,9 +47,26 @@ def unit_name(camera_id: str) -> str:
     return f"kvs-{path}.service"
 
 
+def is_unregistered(row: dict) -> bool:
+    # A camera unregistered in the admin GUI keeps its registry row, KVS stream and clips, so
+    # Re-register can bring it back as it was; `unregisteredAt` (when) is the only mark. Every
+    # reader that acts on cameras skips such a row: both GUIs, the outage supervisor and so the
+    # PIR watcher, the event watcher, the MediaMTX path sync, and agent.py's Start.
+    return bool(row.get("unregisteredAt"))
+
+
 def set_stream(camera_id: str, on: bool):
     action = "start" if on else "stop"
     subprocess.run(["sudo", "systemctl", action, unit_name(camera_id)], check=False)
+
+
+def set_boot_start(camera_id: str, on: bool):
+    # enable/disable without --now: whether the producer runs right now is set_stream's job.
+    # Unregister disables so an unregistered camera's producer doesn't start at boot and loop
+    # against the MediaMTX path that no longer exists.
+    action = "enable" if on else "disable"
+    subprocess.run(["sudo", "systemctl", action, unit_name(camera_id)],
+                   check=False, capture_output=True)
 
 
 def get_stream_status(camera_id: str) -> str:

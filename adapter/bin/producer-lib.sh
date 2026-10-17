@@ -23,10 +23,23 @@ PRODUCER_FATAL_PATTERNS=(
 # ingest fine and never play back (MissingCodecPrivateData) -- the same ingest-vs-playback
 # trap as FoundAndFixed.md #16. The h264 chain is token for token what every producer ran
 # before H.265 existed.
+#
+# `h265timestamper` gives every frame a DTS. Some cameras' H.265 leaves h265parse with
+# `dts: none`, and kvssink silently drops any buffer flagged HEADER without a valid DTS
+# (gstkvssink.cpp, "Dropping frame with flag: 17920") -- that is every keyframe, so no
+# fragment ever starts and PutMedia starves with 599s while the unit stays active
+# (FoundAndFixed.md #57). The element computes DTS from PTS and the SPS reorder depth, so
+# it is also right for a stream that has B-frames.
+#
+# `identity single-segment=true` after it: the timestamper shifts every timestamp by 1000 h
+# (and its segment by the same, so running time is unchanged), and kvssink reads raw buffer
+# timestamps. Alone that is harmless; next to an audio track, which stays near zero, KVS gets
+# two clocks 1000 h apart and refuses audio frames in bursts (0x30000005, FoundAndFixed.md
+# #58). Re-stamping to running time puts video on the audio's clock, as H.264 always was.
 video_depay_chain() {
   case "$1" in
     h264) echo "rtph264depay ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au" ;;
-    h265) echo "rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au" ;;
+    h265) echo "rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au ! h265timestamper ! identity single-segment=true" ;;
     *)    echo "producer-lib: unsupported video codec '$1'" >&2; return 1 ;;
   esac
 }

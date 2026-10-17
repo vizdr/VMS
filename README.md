@@ -73,9 +73,9 @@ either GUI controls exactly that process.
 | **Live view** | Cloud HLS via KVS, Cognito-authenticated, served over HTTPS through CloudFront |
 | **Evidence clips** | Manual recording, plus detection-triggered clips; browse, play, re-tier (Standard / IA / Deep Archive) and delete from the browser |
 | **ONVIF detection** | Motion, cell-grid motion and human-shape detection drive automatic clip capture |
-| **ONVIF device control** | IR-cut filter (day/night) from either GUI; WS-Discovery + one-click camera registration from a local admin app |
+| **ONVIF device control** | IR-cut filter (day/night) from either GUI; WS-Discovery + one-click camera registration from a local admin app, and Unregister, which hides a camera from both GUIs until a rescan re-registers it |
 | **Swappable USB camera** | The webcam is detected, not hardcoded. The admin GUI scans it, shows what it can actually do, and applies a new configuration — with a backup, and an automatic rollback if video does not come back — guide §22 |
-| **H.264 or H.265** | Passthrough cameras stream whichever their encoder is set to; producers read the codec off the wire, and clips spanning a switch are split rather than lost — guide §21 |
+| **H.264 or H.265** | Passthrough cameras stream whichever their encoder is set to, switchable per camera from the local admin GUI over ONVIF Media2; producers read the codec off the wire, and clips spanning a switch are split rather than lost — guide §21 |
 | **Optional audio** | Per-camera, off by default, for both cameras — [`AUDIO.md`](AUDIO.md) |
 | **Durable outage buffering** | Records to a USB stick while AWS is unreachable and backfills on recovery — [`OUTAGE.md`](OUTAGE.md) |
 | **PIR motion trigger** | A Pico 2 W's PIR sensor, over a local MQTT broker, triggers local clips of the USB camera, recorded from a ring in RAM; clips you choose are copied to AWS, from either GUI — [`PIR-MQTT-VMS-PI4.md`](PIR-MQTT-VMS-PI4.md) |
@@ -381,6 +381,7 @@ adapter/            on-device Python and pipelines
   outage_buffer.py    outage supervisor (arming, capture, retention)
   outage_uploader.py  merge + backfill to S3
   mediamtx_api.py     MediaMTX control-API helper
+  onvif_media2.py     ONVIF Media2 over raw SOAP: switch a camera between H.264/H.265 (guide §21.5)
   usb_camera.py       USB camera scan: formats, controls, microphone (guide §22.3)
   onvif-admin/        local Flask GUI
   bin/                GStreamer pipelines + operator tools

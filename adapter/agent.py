@@ -41,6 +41,11 @@ def on_message(topic, payload, **kwargs):
     cam_item = get_cameras_table().get_item(Key={"cameraId": camera}).get("Item")
     if not cam_item:
         return
+    # An unregistered camera is hidden from both GUIs, but the successor's page still lists it
+    # (the registry is shared) and can send Start: refuse everything but Stop.
+    if camera_control.is_unregistered(cam_item) and cmd != "stop":
+        print(f"agent: ignoring {cmd!r} for unregistered {camera}", flush=True)
+        return
 
     if cmd in ("start", "stop"):
         camera_control.set_stream(camera, cmd == "start")

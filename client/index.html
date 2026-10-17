@@ -596,7 +596,7 @@ async function login() {
       errorEl.textContent = "Could not load camera list: " + (cdata.error || cr.status);
       return;
     }
-    CAMERAS = cdata.cameras;
+    CAMERAS = await registeredCameras(cdata.cameras);
 
     document.getElementById("login").style.display = "none";
     document.getElementById("app").style.display = "block";
@@ -1208,10 +1208,22 @@ async function pirFetch(path, opts = {}) {
   return data;
 }
 
+// Cameras unregistered in the admin GUI are left out of the page. /cameras can't say which: it is
+// a copy of the shared list-cameras and stays identical to it, so GET /pir, already asked once per
+// camera for the PIR panel, does. Its answers are kept for initPir(). A camera whose /pir fails is
+// shown, as before this existed.
+let pirFirst = {};
+
+async function registeredCameras(cameras) {
+  const answers = await Promise.all(cameras.map(c => pirFetch(`/pir?camera=${c.id}`).catch(() => null)));
+  pirFirst = Object.fromEntries(cameras.map((c, i) => [c.id, answers[i]]));
+  return cameras.filter(c => !(pirFirst[c.id] && pirFirst[c.id].unregistered));
+}
+
 async function initPir() {
   for (const cam of CAMERAS) {
     try {
-      const d = await pirFetch(`/pir?camera=${cam.id}`);
+      const d = pirFirst[cam.id] || await pirFetch(`/pir?camera=${cam.id}`);
       if (!d.pirTopic) continue;            // no sensor: no panel
       state[cam.id].pir = d;
       el(cam.id, "pirSection").hidden = false;

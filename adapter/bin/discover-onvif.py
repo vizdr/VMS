@@ -52,6 +52,10 @@ def main():
                 print(f"  Profile: {details['profile']}")
                 print(f"  Stream:  {details['stream_uri']}")
                 print(f"  IR ctl:  {details['has_ir_control']}")
+                a = details.get("audio")
+                print(f"  Audio:   {a['encoding']} {a['sampleRateKHz']} kHz{'' if a['supported'] else ' (not supported by the producer)'}" if a else "  Audio:   none")
+                for st in details.get("streams", []):
+                    print(f"  Stream {st['name']}: {st['encoding']} {st['width']}x{st['height']} @{(st['fps'] or 0):g} fps, can do {st['fpsChoices']} -- {st['uri']}")
             except Exception as e:
                 print(f"  Enrichment failed: {e}")
         print()

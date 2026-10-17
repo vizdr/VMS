@@ -10,8 +10,12 @@ camera_setup cam01                      # sets CAM, or exits: no camera, or ambi
 : "${V4L2_MODE_CTRLS:=auto_exposure=1,exposure_dynamic_framerate=0,white_balance_automatic=0,focus_automatic_continuous=0}"
 : "${V4L2_VALUE_CTRLS:=exposure_time_absolute=250,white_balance_temperature=4600,focus_absolute=120}"
 
+# Microphone gain in dB, MIC_GAIN_DB in the config file (admin GUI, "mic level"). Unset leaves
+# the device's own setting alone, which is what every start did before this existed.
+: "${MIC_GAIN_DB:=}"
+
 if [ "${1:-}" = "--print-config" ]; then
-  printf 'V4L2_MODE_CTRLS=%s\nV4L2_VALUE_CTRLS=%s\n' "$V4L2_MODE_CTRLS" "$V4L2_VALUE_CTRLS"
+  printf 'V4L2_MODE_CTRLS=%s\nV4L2_VALUE_CTRLS=%s\nMIC_GAIN_DB=%s\n' "$V4L2_MODE_CTRLS" "$V4L2_VALUE_CTRLS" "$MIC_GAIN_DB"
   exit 0
 fi
 
@@ -51,6 +55,20 @@ IFS=, read -ra MODES  <<< "$V4L2_MODE_CTRLS"
 IFS=, read -ra VALUES <<< "$V4L2_VALUE_CTRLS"
 apply_ctrls modes  "${MODES[@]}"
 apply_ctrls values "${VALUES[@]}"
+
+# The microphone gain is a mixer control on the camera's own ALSA card, not a v4l2 one. A
+# camera without a microphone, or one whose mixer has no capture volume, is skipped, like a
+# missing v4l2 control.
+if [ -n "$MIC_GAIN_DB" ]; then
+  mic_card="$(alsa_card_for_video "$CAM" || true)"; mic_card="${mic_card#hw:CARD=}"; mic_card="${mic_card%%,*}"
+  mic_ctrl="$( [ -n "$mic_card" ] && mic_capture_control "$mic_card" || true)"
+  if [ -n "$mic_ctrl" ] && amixer -c "$mic_card" -q sset "$mic_ctrl" -- "${MIC_GAIN_DB}dB" 2>/dev/null; then
+    echo "camera-init: microphone gain ${MIC_GAIN_DB} dB ($mic_card/$mic_ctrl)"
+  else
+    echo "camera-init: microphone gain ${MIC_GAIN_DB} dB not applied (no capture volume on ${mic_card:-no microphone})" >&2
+    rejected=$((rejected+1))
+  fi
+fi
 
 # A rejected value is a configuration error, not a transient one, so it does NOT fail the
 # unit: Restart=on-failure (FoundAndFixed.md #42) would then retry it for ever. A camera

@@ -2,8 +2,9 @@
 
 Behind pir-api, which only this repository deploys (the successor never sees it):
 
-  GET  /pir?camera=cam-01                  the switch (cameras.pirRecording, pirTopic) and the
-                                           Pi's status item from pir-local
+  GET  /pir?camera=cam-01                  the switch (cameras.pirRecording, pirTopic), the
+                                           Pi's status item from pir-local, and whether the
+                                           camera is unregistered (the page hides it)
   GET  /pir/clips?camera=cam-01[&page=N|last][&limit=10][&deleted=1]
                                            the Pi's local clip index, newest first, paged
                                            like list-clips (page, pages, total); clips
@@ -82,6 +83,10 @@ def get_pir(camera):
         "pirTopic": item.get("pirTopic"),
         "pirRecording": bool(item.get("pirRecording")),
         "status": status,                 # None until the Pi reports (Phase 10)
+        # Set by the admin GUI's Unregister. Reported here, not by /cameras, which is a copy of
+        # the shared list-cameras and stays identical to it; this page is the one that filters
+        # (data contract rule 4).
+        "unregistered": bool(item.get("unregisteredAt")),
     })
 
 

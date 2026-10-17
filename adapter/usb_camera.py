@@ -341,3 +341,52 @@ def registry_snapshot(result=None):
 if __name__ == "__main__":
     json.dump(scan(), sys.stdout, indent=2)
     print()
+
+
+# --- microphone gain ---------------------------------------------------------------------------
+#
+# A hardware control of the webcam's own ALSA card ("Mic Capture Volume" on the PW310, -12..+12
+# dB). Live like a v4l2 control, saved as MIC_GAIN_DB in cam01.env, reapplied by camera-init.sh.
+
+def _mic_card_and_control():
+    """(card id, simple control name) of cam-01's microphone gain, or (None, None). Detection
+    and the capability rule are detect-hw.sh's, so camera-init.sh and this agree."""
+    out = _run(["bash", "-c", f'source "{DETECT_HW}" >/dev/null 2>&1; camera_setup cam01 >/dev/null 2>&1 || exit 0; '
+                'c="$(alsa_card_for_video "$CAM")" || exit 0; c="${c#hw:CARD=}"; c="${c%%,*}"; '
+                'printf "%s\n%s\n" "$c" "$(mic_capture_control "$c")"'],
+               timeout=20)
+    parts = out.splitlines()
+    card = parts[0].strip() if parts else ""
+    ctrl = parts[1].strip() if len(parts) > 1 else ""
+    return (card or None), (ctrl or None)
+
+
+def mic_gain():
+    """{"card", "control", "minDb", "maxDb", "stepDb", "gainDb"} or {"available": False, ...}."""
+    card, ctrl = _mic_card_and_control()
+    if not card or not ctrl:
+        return {"available": False, "reason": "no microphone gain on this camera" if card else "no microphone"}
+    sget = _run(["amixer", "-c", card, "sget", ctrl])
+    cget = _run(["amixer", "-c", card, "cget", f"name={ctrl} Capture Volume"])
+    lim = re.search(r"Limits: Capture (-?\d+) - (-?\d+)", sget)
+    cur = re.search(r"Capture -?\d+ \[\d+%\] \[(-?[\d.]+)dB\]", sget)
+    rng = re.search(r"dBminmax-min=(-?[\d.]+)dB,max=(-?[\d.]+)dB", cget)
+    if not (lim and cur and rng):
+        return {"available": False, "reason": f"{card}/{ctrl} reports no dB scale"}
+    lo, hi = int(lim.group(1)), int(lim.group(2))
+    min_db, max_db = float(rng.group(1)), float(rng.group(2))
+    return {"available": True, "card": card, "control": ctrl, "minDb": min_db, "maxDb": max_db,
+            "stepDb": round((max_db - min_db) / max(hi - lo, 1), 2), "gainDb": float(cur.group(1))}
+
+
+def set_mic_gain(db):
+    """Set the gain live; returns mic_gain() read back (the driver rounds to its steps)."""
+    now = mic_gain()
+    if not now["available"]:
+        raise ValueError(now["reason"])
+    db = float(db)
+    if not now["minDb"] <= db <= now["maxDb"]:
+        raise ValueError(f"gain must be between {now['minDb']:g} and {now['maxDb']:g} dB")
+    _run(["amixer", "-c", now["card"], "-q", "sset", now["control"], "--", f"{db:g}dB"])
+    return mic_gain()
+

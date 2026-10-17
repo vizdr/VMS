@@ -286,11 +286,18 @@ top-level `let`/`const` variables, so read state from the DOM. This Firefox deco
 `cam-01` is a USB webcam (MJPG-only) that must be transcoded; `cam-02` (and any camera
 added later) is a real ONVIF/RTSP IP camera that passes through untouched.
 
-**Passthrough means the camera's codec, and that can be H.264 or H.265.** A passthrough
+**Passthrough means the camera's codec, and that can be H.264 or H.265.** It is switched on the
+camera, from the admin GUI's **video** selector (`adapter/onvif_media2.py`, guide §21.5). A passthrough
 producer does not assume: `adapter/bin/stream-codec.py <cameraId>` asks MediaMTX which
 video track it is actually receiving and prints `VIDEO_CODEC=h264|h265`, and
 `video_depay_chain` in `producer-lib.sh` turns that into the depayloader chain
-(`rtph265depay ! h265parse ! video/x-h265,stream-format=hvc1` vs the H.264 `avc` form).
+(`rtph265depay ! h265parse ! video/x-h265,stream-format=hvc1 ! h265timestamper ! identity single-segment=true` vs the H.264
+`avc` form; the timestamper exists because kvssink silently drops every H.265 keyframe without a
+DTS, `FoundAndFixed.md` #57, and the `identity` undoes its 1000 h timestamp offset, which beside an
+audio track made KVS refuse audio frames, #58).
+The same call prints `AUDIO_TRACK` (`pcma`/`pcmu`/none): the G.711 law, which ONVIF can't tell
+and the template producer `stream-channel.sh` needs for its audio branch (cam-02 is A-law, cam-03
+mu-law).
 The wire is the authority because a camera's encoder is changed *on the camera*, so any
 registry field can be stale — the registry's `videoCodecActive` is written *from* this
 reading, not consulted for it. `stream-format=hvc1`, not byte-stream, for the same reason
@@ -317,7 +324,8 @@ though the hardware control's own default is High, and Baseline broke browser (b
 `ffmpeg`) playback.
 
 **Audio is optional, per-camera, and off by default** (guide §18). Two registry flags gate
-it — `audioCapable` (hardware fact, set at registration) and `audioEnabled` (user choice,
+it — `audioCapable` (hardware fact; for an ONVIF camera found at discovery and written by
+Register/Re-register, `FoundAndFixed.md` #59) and `audioEnabled` (user choice,
 set from either GUI) — and the producer scripts read them once at startup via
 `adapter/bin/camera-audio.py`. The setting therefore applies on the camera's **next
 Start**, which is deliberate: KVS rejects a stream whose fragments change from video-only
@@ -376,14 +384,13 @@ a failure and additionally watches its output for "the source closed the session
 killing a pipeline that hangs instead of exiting. Both halves exist because a producer that
 loses its source otherwise stays `active` while uploading nothing — see `FoundAndFixed.md`
 #44 and #46 before simplifying it back to an `exec`. The units carry
-`RuntimeDirectory=vms-producer` for that watchdog's pipe. **`publish-cam01.sh` is the
-exception and still uses `exec`** — it is the publisher, not a producer, but it has the
-same exposure (MediaMTX restarts → clean EOS → exit 0 → `Restart=on-failure` ignores it),
-and the successor has not converted it either. Known gap, not an oversight. It can also
-**hang without exiting**: on 2026-10-03 it stalled a second after starting at boot and stayed
-`active`, sending nothing, for 7.5 hours, with no error and no EOS (`FoundAndFixed.md` #51,
-open; `systemctl --user restart kvs-camera-publish` recovers it). Check `bytesReceived`
-advancing before trusting cam-01. **This is the layer Start/Stop buttons (in either GUI) actually
+`RuntimeDirectory=vms-producer` for that watchdog's pipe. **`publish-cam01.sh`, the
+publisher, has its own watchdog, `publish_run`**, because it can **hang without exiting**:
+twice so far (`FoundAndFixed.md` #51, at boot and after an hour of normal running) it stopped
+sending with no error and no EOS and stayed `active`. `publish_run` restarts it when MediaMTX's
+`bytesReceived` for `cam01` hasn't moved for 30 s, and turns any end of the pipeline, a clean
+EOS included, into exit 1 for `Restart=on-failure`. The cause of the hang is still unknown, so
+a stall now costs ~40 s of cam-01 and leaves a `bytesReceived stuck` line in its journal. **This is the layer Start/Stop buttons (in either GUI) actually
 control** — toggling it does not affect MediaMTX or the camera's own feed, which keep
 running regardless. This is a common point of confusion: the "local preview" (MediaMTX
 HLS) and the "KVS push" (cloud) are independent signals.
@@ -413,6 +420,16 @@ The switch is **deliberately a separate field, not a `recordingMode` value**: th
 shared with the successor, whose code knows exactly four modes, and a new field is
 invisible to it where a fifth mode would not be (`PIR-MQTT-VMS-PI4.md` §4.2–§4.3).
 The outage supervisor arms the ring on `pirRecording` and the PIR watcher acts on motion (§3.6).
+
+**A row with `unregisteredAt` is a camera unregistered in the admin GUI**, hidden but kept: the
+row, KVS stream, clips and settings stay, so Re-register (from Discover) restores it. Unregister
+also stops and disables its producer and deletes its MediaMTX path. Every reader that acts on
+cameras must skip such a row through `camera_control.is_unregistered()`. Today those are both
+GUIs, the supervisor's registry cache (and so the PIR watcher, the uploader and the status
+poll), the event watcher, `sync_mediamtx_paths.py` and `agent.py` (everything except Stop).
+New code that reads the table joins that list. The cloud page learns the mark from
+`GET /pir`, because `/cameras` stays identical to the shared `list-cameras`. The successor's
+page still shows the camera (guide §16.2, `PIR-MQTT-VMS-PI4.md` §4.2).
 
 Credential storage in that table is phased: currently a plain `onvifPassword` attribute
 (Phase 1); a planned Phase 2 moves it to an SSM Parameter Store `SecureString` referenced
@@ -456,8 +473,10 @@ instance via the input-validated `adapter/bin/provision-camera.sh`, creates the 
 stream, writes the `cameras` row), re-registration for an already-known camera (updates
 MediaMTX's path + the registry row, but deliberately never touches systemd for `cam-01`/
 `cam-02` — they predate the `kvs-cam@` template, and re-provisioning them would start a
-second, conflicting producer), and local control (Start/Stop, IR mode, a live
-`systemctl is-active`-backed status column, and the local-HLS preview mentioned above). For
+second, conflicting producer), **unregistration** of an ONVIF camera (`POST
+/api/cameras/<id>/unregister`, see the registry section above), and local control (Start/Stop,
+IR mode, a live `systemctl is-active`-backed status column, and the local-HLS preview mentioned
+above). For
 cameras with a PIR sensor it also has a "PIR trigger" switch (`POST /api/cameras/<id>/pir`,
 which writes only `pirRecording`, and writes nothing when nothing changes), a **PIR sensor**
 panel (section 5: the Pico's state, recent events with their lateness, the retrigger mode) and
@@ -467,6 +486,20 @@ the watcher's heartbeat and the session folders, with no AWS call except the upl
 Anything the page *polls* must not depend on AWS: the camera-status poll checks IDs against the
 supervisor's registry cache, because a DynamoDB lookup per poll froze the page during a DNS
 failure (`FoundAndFixed.md` #55).
+
+Each camera also has a **video** selector, H.264 or H.265 (`GET`/`POST /api/cameras/<id>/codec`,
+guide §21.5). It switches the encoder behind the camera's registered stream over ONVIF
+**Media2**, by raw SOAP in `adapter/onvif_media2.py` (the `onvif` library has Media1 only, which
+can't name H.265). **Done means MediaMTX receives the new codec**, never the camera's read-back:
+cam-03 reported H264 2880×1620 while it sent H.265 2560×1440. It writes `videoCodec`,
+`videoCodecCaps`, `videoEncoderToken`, `videoCodecProbe` with the successor's meanings and
+never `videoCodecDefault`. cam-01 shows H.264 only: the Pi has no H.265 encoder.
+Next to it, **stream** (main/sub) and **fps** (10/15/20/25, each only where the stream's encoder
+accepts it) selectors (`GET`/`POST /api/cameras/<id>/stream`, guide §21.6): a stream switch
+repoints rtspUrl and the MediaMTX path at the other profile, proved by MediaMTX reconnecting; a
+frame rate is set on the encoder with the keyframe interval kept in seconds and proved by
+counting frames on the wire. The registration form offers the same, preselecting 10 fps; a camera
+already registered keeps its rate until changed.
 
 It also scans the Pi's **own USB bus** (`GET /api/usb-cameras` → `adapter/usb_camera.py`,
 guide §22): formats, resolutions, frame rates, v4l2 controls and the microphone on the
@@ -486,6 +519,8 @@ client.
 Each control has **Set now** (writes it live while streaming; lost on the next start,
 because `camera-init.sh` reapplies the file) and is saved by Apply. Every write is read
 back, since the driver clamps instead of refusing. Guide §22.7.
+The microphone has a **mic level** slider in cam-01's row: the webcam's ALSA capture gain, set
+live and saved as `MIC_GAIN_DB` in one move, reapplied by `camera-init.sh` (guide §22.8).
 
 Naming quirk both share: the camera identifier is hyphenated (`cam-01`, used for the KVS
 stream name, DynamoDB key, S3 key prefix, and every API field) but the MediaMTX path name

@@ -29,6 +29,50 @@ AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/camera-audio.py cam-01 || true)"
 eval "${AUDIO_ENV}"
 
+# cam-01's microphone reaches MediaMTX only through the publisher (publish-cam01.sh), a
+# long-running user unit that reads the same flag once, at *its* start. Start restarts this
+# producer, not the publisher, so a flag switched since then left the two disagreeing: audio
+# on here with no audio track in MediaMTX made this pipeline wait on an audio pad forever,
+# and kvssink, collecting across its pads, stalled the video with it (FoundAndFixed.md #61).
+# So Start brings the publisher in line first. Same user (the unit's User=), lingering is on,
+# so its user manager is reachable. Off is reconciled too: off must stop the capture, which
+# the outage and PIR rings would otherwise record.
+cam01_audio() {   # "down" while the path isn't ready, else the audio codec MediaMTX receives or "none"
+  "${VMS_HOME}/venv-adapter/bin/python3" - <<EOF 2>/dev/null || echo down
+import sys; sys.path.insert(0, "${VMS_HOME}/adapter")
+import mediamtx_api as m
+s = m.get_path_state("cam01") or {}
+a = m.path_audio_track("cam01")
+print("down" if not s.get("ready") else (a["codec"] if a else "none"))
+EOF
+}
+want=$([ "${AUDIO:-off}" = "on" ] && echo mic || echo none)
+have="$(cam01_audio)"
+mismatch=no
+if [ "${have}" != "down" ]; then
+  if [ "${want}" = mic ] && [ "${have}" = none ]; then mismatch=yes; fi
+  if [ "${want}" = none ] && [ "${have}" != none ]; then mismatch=yes; fi
+fi
+if [ "${mismatch}" = yes ]; then
+  echo "stream-cam01: audio is ${AUDIO:-off} but MediaMTX receives audio '${have}' -- restarting kvs-camera-publish to match"
+  XDG_RUNTIME_DIR="/run/user/$(id -u)" systemctl --user restart kvs-camera-publish.service \
+    || echo "stream-cam01: could not restart kvs-camera-publish" >&2
+  for _ in $(seq 1 30); do
+    sleep 1
+    have="$(cam01_audio)"
+    if [ "${have}" = "down" ]; then continue; fi
+    if [ "${want}" = none ] || [ "${have}" != none ]; then break; fi
+  done
+fi
+if [ "${AUDIO:-off}" = "on" ] && { [ "${have}" = none ] || [ "${have}" = down ]; }; then
+  echo "stream-cam01: audio is on, but MediaMTX receives no audio from the publisher -- video only" >&2
+  AUDIO=off
+fi
+
+# With audio, the video gets a real DTS: h264parse leaves the Pi encoder's frames at `dts: none`,
+# kvssink then invents last_dts + 40 ms per video frame, and two video frames in a row (66.7 ms
+# apart) overtook the next 64 ms audio frame, which KVS refused (FoundAndFixed.md #62).
+# h264timestamper computes DTS from PTS; identity undoes its 1000 h offset, as in the H.265 chain.
 if [ "${AUDIO:-off}" = "on" ]; then
   echo "stream-cam01: audio ENABLED (LPCM from MediaMTX -> AAC 16kHz)"
   # The pads must be split by `application/x-rtp,media=...`; linking them bare lets audio
@@ -43,7 +87,8 @@ if [ "${AUDIO:-off}" = "on" ]; then
     rtspsrc location="rtsp://127.0.0.1:8554/cam01" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
     ! rtph264depay ! h264parse config-interval=-1 \
-    ! video/x-h264,stream-format=avc,alignment=au ! queue ! kvs.video_0 \
+    ! video/x-h264,stream-format=avc,alignment=au ! h264timestamper ! identity single-segment=true \
+    ! queue ! kvs.video_0 \
     src. ! application/x-rtp,media=audio ! queue \
     ! rtpL16depay ! audioconvert \
     ! voaacenc bitrate=32000 ! aacparse \

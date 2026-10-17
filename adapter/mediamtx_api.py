@@ -68,6 +68,48 @@ def path_video_codec(path: str) -> str | None:
     return None
 
 
+def path_video_track(path: str) -> dict | None:
+    """{"codec": "h264"|"h265", "width", "height"} of the video MediaMTX is receiving on
+    `path`, or None -- path_video_codec() plus the picture size, for the admin GUI's codec
+    switch, which shows what actually arrives and keeps the size across a switch."""
+    try:
+        state = get_path_state(path)
+    except requests.RequestException:
+        return None
+    if not state or not state.get("ready"):
+        return None
+    for track in state.get("tracks2") or []:
+        if track.get("codec") in ("H264", "H265"):
+            props = track.get("codecProps") or {}
+            return {"codec": track["codec"].lower(), "width": props.get("width"),
+                    "height": props.get("height")}
+    return None
+
+
+def path_audio_track(path: str) -> dict | None:
+    """{"codec": "pcma"|"pcmu"|<other, lowercased>, "sampleRate", "channels"} of the audio
+    MediaMTX is receiving on `path`, or None (no audio track, or the path is not ready).
+
+    G.711 is split by law because the producer needs a different depayloader for each, and
+    ONVIF can't say which: its enum is just "G711". The wire can -- cam-02 sends A-law,
+    cam-03 mu-law."""
+    try:
+        state = get_path_state(path)
+    except requests.RequestException:
+        return None
+    if not state or not state.get("ready"):
+        return None
+    for track in state.get("tracks2") or []:
+        codec = track.get("codec") or ""
+        props = track.get("codecProps") or {}
+        if codec != "G711" and "sampleRate" not in props:
+            continue                      # a video track: only audio tracks carry a rate
+        name =("pcmu" if props.get("muLaw") else "pcma") if codec == "G711" else codec.lower()
+        return {"codec": name, "sampleRate": props.get("sampleRate"),
+                "channels": props.get("channelCount")}
+    return None
+
+
 def patch_path(path: str, conf: dict) -> None:
     """Merge `conf` into a path's configuration.
 
@@ -84,6 +126,17 @@ def add_path(path: str, conf: dict) -> None:
     r = requests.post(f"{API}/v3/config/paths/add/{path}", json=conf, timeout=TIMEOUT)
     if not r.ok:
         raise MediaMTXError(f"add {path}: {r.status_code} {r.text}")
+
+
+def delete_path(path: str) -> None:
+    """Remove a path's configuration; a path that has none is already gone, not an error.
+
+    DELETE, not POST: MediaMTX answers POST on this route with "404 page not found", which
+    once left an orphan path behind every failed registration (FoundAndFixed.md #36).
+    """
+    r = requests.delete(f"{API}/v3/config/paths/delete/{path}", timeout=TIMEOUT)
+    if r.status_code != 404 and not r.ok:
+        raise MediaMTXError(f"delete {path}: {r.status_code} {r.text}")
 
 
 def ensure_path_conf(path: str, conf: dict) -> None:
@@ -134,10 +187,14 @@ def recording_conf_matches(path: str, on: bool, record_path: str = None,
     MediaMTX does NOT persist API config changes to mediamtx.yml, so a restart silently
     reverts every armed path. Comparing against reality catches that within one tick;
     remembering what we sent would not.
+
+    A path with no configuration of its own records nothing (`pathDefaults` has `record: false`),
+    so it already matches "off". Answering False there made the supervisor *create* the path
+    just to disarm it, which resurrected the path of a camera unregistered a moment earlier.
     """
     conf = get_path_conf(path)
     if conf is None:
-        return False
+        return not on
     if bool(conf.get("record")) != bool(on):
         return False
     if not on:

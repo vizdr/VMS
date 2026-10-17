@@ -154,10 +154,15 @@ def disk_ok() -> tuple[bool, str]:
 # --- registry -------------------------------------------------------------------------
 
 def _normalise(cams: dict) -> dict:
-    """{cameraId: {"outageBufferSec": int, "pirRecording": bool, "pirTopic": str|None}}.
+    """{cameraId: {"outageBufferSec": int, "pirRecording": bool, "pirTopic": str|None,
+    "mode": str|None}}.
 
     pirTopic is carried for kvs-pir-watcher, which reads this cache instead of calling AWS,
-    so local PIR recording keeps working with the internet down.
+    so local PIR recording keeps working with the internet down. mode tells the arming loop
+    which paths it may create (only a publisher's, see there).
+
+    An unregistered camera is left out, so it is disarmed here, dropped by the PIR watcher
+    and the uploader, and unknown to the admin GUI's status poll -- all through this one cache.
 
     Caches written before the PIR switch existed hold {cameraId: outageBufferSec}; a
     supervisor restarting with AWS unreachable must still read those.
@@ -166,9 +171,12 @@ def _normalise(cams: dict) -> dict:
     for cam, row in cams.items():
         if not isinstance(row, dict):
             row = {"outageBufferSec": row}
+        if camera_control.is_unregistered(row):
+            continue
         out[cam] = {"outageBufferSec": int(row.get("outageBufferSec") or 0),
                     "pirRecording": bool(row.get("pirRecording")),
-                    "pirTopic": row.get("pirTopic") or None}
+                    "pirTopic": row.get("pirTopic") or None,
+                    "mode": row.get("mode")}
     return out
 
 
@@ -756,6 +764,7 @@ def main():
     latch = ProducerLatch()
     armed: set[str] = set()
     armed_for: dict[str, str] = {}       # cam -> "outage", "pir" or "outage+pir"
+    no_path: set[str] = set()            # network cameras waiting for their path, logged once
     capture: Capture | None = None
     pir_state = {"done": set(), "warned": set(), "last": {}, "through": {}}
     ram_was_good = None
@@ -840,6 +849,18 @@ def main():
                 try:
                     if not mediamtx_api.recording_conf_matches(
                             path, should, record_path, SEGMENT_DURATION, delete_after):
+                        # A network camera's path comes from registration and
+                        # sync_mediamtx_paths.py, never from here: ensure_path_conf would add an
+                        # empty publisher path, e.g. for a camera unregistered within the last
+                        # minute, still armed until the registry refresh drops it.
+                        if (should and registry.get(cam, {}).get("mode") == "passthrough"
+                                and mediamtx_api.get_path_conf(path) is None):
+                            if cam not in no_path:
+                                log(f"{cam}: no MediaMTX path -- not arming until it exists")
+                                no_path.add(cam)
+                            armed.discard(cam)
+                            armed_for.pop(cam, None)
+                            continue
                         mediamtx_api.ensure_path_conf(path, {})
                         mediamtx_api.set_recording(path, should, record_path, SEGMENT_DURATION,
                                                    delete_after=delete_after)
@@ -848,6 +869,7 @@ def main():
                                else f" ({why or space_why or 'not wanted'})"))
                     elif should and armed_for.get(cam) != want[cam]:
                         log(f"{cam}: recording stays armed, now for {want[cam]}")
+                    no_path.discard(cam)
                     if should:
                         armed.add(cam)
                         armed_for[cam] = want[cam]

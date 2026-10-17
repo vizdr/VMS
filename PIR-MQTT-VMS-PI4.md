@@ -761,6 +761,7 @@ The live state on 2026-10-03:
 | `PirLocal` inline policy | device role `KVSAdapterRole` | The successor's Pi gains access to `pir-local`, which it never uses | **Safe**, slightly wider privileges (§4.4) |
 | PIR status and upload requests | HTTPS with the device certificate | Don't touch the shared `adapter-01` MQTT connection | **Safe** |
 | Unprefixed Lambdas, `kvs-demo-api`, root page, IoT policy | none | Not modified; this repository stops deploying them | **Safe** |
+| `unregisteredAt` on a camera's row (Unregister in the admin GUI, 2026-10-17; guide §16.2) | `cameras` table | Invisible: `list-cameras` returns a fixed set of fields. The successor's page keeps listing the camera, and its Start reaches this Pi's `agent.py`, which refuses it. The row is never deleted, so nothing the successor reads disappears | **Safe.** A new field, set and removed field by field (rules 1–2); the hiding happens in this project's readers and page (rule 4) |
 
 ### 4.3 The data contract
 
@@ -796,6 +797,10 @@ CLAUDE.md as well.
   grant on the new topic.
 - **cam‑01 stays visible in the successor's page,** because the registry is shared, and its
   PIR clips show there with the label `pir`.
+- **An unregistered camera stays visible in the successor's page too,** for the same reason.
+  This Pi ignores it whichever page sends a command, and so does everything else here. Code on
+  the successor's own Pi that acts on the registry doesn't know `unregisteredAt`, though, and
+  treats the camera as registered.
 - **The contract needs both sides.** Rule 4 and rule 5b are outside this repository's
   control.
 

@@ -50,6 +50,7 @@ validate() {                      # $1 = file to check
       V4L2_MODE_CTRLS|V4L2_VALUE_CTRLS)
                         [[ "$value" =~ ^([a-z0-9_]+=-?[0-9]+(,[a-z0-9_]+=-?[0-9]+)*)?$ ]] || die "line $n: bad $key" ;;
       AUDIO_CARD)       [[ "$value" =~ ^(hw:CARD=[A-Za-z0-9_]+,DEV=[0-9]+)?$ ]] || die "line $n: bad AUDIO_CARD" ;;
+      MIC_GAIN_DB)      [[ "$value" =~ ^(-?[0-9]{1,2}(\.[0-9]{1,2})?)?$ ]] || die "line $n: bad MIC_GAIN_DB" ;;
       # Provenance, so a backup can be offered as "AVerMedia PW310 -- 27 Sep 11:02" rather
       # than as a timestamp. Nothing reads these as settings. Spaces are allowed because
       # load_env_file parses KEY=VALUE itself and exports the value literally -- the file

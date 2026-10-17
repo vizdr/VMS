@@ -8,6 +8,8 @@ import os
 import sys
 
 from onvif import ONVIFCamera
+
+import onvif_media2
 from wsdiscovery.discovery import ThreadedWSDiscovery as WSDiscovery
 from wsdiscovery import QName
 
@@ -16,6 +18,11 @@ VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path
 WSDL_DIR = os.path.join(VMS_HOME, "venv-adapter", "lib",
     f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages", "onvif", "wsdl")
 NVT_TYPE = QName("http://www.onvif.org/ver10/network/wsdl", "NetworkVideoTransmitter")
+# Audio encodings the producers can take (stream-channel.sh: G.711 of either law -> AAC). Media1
+# names G711, G726 and AAC; a camera with another one is shown, but not registered audio-capable,
+# because audioCapable lets the user switch audio on, and a producer waiting on an audio pad it
+# can't decode stalls the video too (guide §18).
+AUDIO_SUPPORTED = {"G711"}
 
 
 def scan(timeout: int = 4):
@@ -29,10 +36,20 @@ def scan(timeout: int = 4):
         wsd.stop()
 
 
+def _audio(profile) -> dict | None:
+    """The microphone a Media1 profile streams, from its audio encoder, or None. ONVIF can't
+    say A-law or mu-law ("G711" covers both); the producer reads that from the wire."""
+    a = getattr(profile, "AudioEncoderConfiguration", None)
+    if not a or not a.Encoding:
+        return None
+    return {"encoding": a.Encoding, "sampleRateKHz": a.SampleRate, "bitrateKbps": a.Bitrate,
+            "supported": a.Encoding in AUDIO_SUPPORTED}
+
+
 async def enrich(xaddr: str, user: str, password: str) -> dict:
     """Authenticated second stage: turns a bare XAddrs into device info + a real RTSP
-    stream URI, and reports whether the device exposes IR-cut control (so the caller can
-    set hasIrControl without a second round trip)."""
+    stream URI, and reports whether the device exposes IR-cut control and a microphone (so the
+    caller can set hasIrControl and audioCapable without a second round trip)."""
     host = xaddr.split("://")[1].split("/")[0].split(":")[0]
     addr_port = xaddr.split("://")[1].split("/")[0]
     port = int(addr_port.split(":")[1]) if ":" in addr_port else 80
@@ -74,8 +91,26 @@ async def enrich(xaddr: str, user: str, password: str) -> dict:
         "profile": profiles[0].Name if profiles else None,
         "stream_uri": stream_uri,
         "has_ir_control": has_ir_control,
+        "audio": _audio(profiles[0]) if profiles else None,
+        "audio_by_profile": {p.token: _audio(p) for p in profiles},
     }
 
 
 def enrich_sync(xaddr: str, user: str, password: str) -> dict:
-    return asyncio.run(enrich(xaddr, user, password))
+    """enrich(), plus the camera's streams over Media2 (onvif_media2.streams: size, codec, frame
+    rate and the frame rates it accepts), each with its microphone -- what the registration form
+    offers. A camera without Media2 still enriches, with an empty stream list."""
+    details = asyncio.run(enrich(xaddr, user, password))
+    by_profile = details.pop("audio_by_profile")
+    try:
+        found = onvif_media2.streams(onvif_media2.Media2(details["host"], details["port"],
+                                                         user, password))
+    except Exception as e:  # noqa: BLE001 -- the rest of the card is still worth showing
+        details["streams"], details["streamsError"] = [], f"{type(e).__name__}: {e}"
+        return details
+    details["streams"] = [
+        {"name": x["name"], "uri": x["streamUri"], "encoding": x["encoding"],
+         "width": x["width"], "height": x["height"], "fps": x["fps"],
+         "fpsChoices": x["fpsChoices"], "audio": by_profile.get(x["token"], details["audio"])}
+        for x in found]
+    return details

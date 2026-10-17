@@ -205,6 +205,27 @@ endif()
 
 **Proof:** `grep -n -A1 'UNIX AND NOT APPLE' "$F"` shows the block where you put it.
 
+Patch 4 — whole-millisecond timestamps in kvssink (`FoundAndFixed.md` #62). Without it every
+camera recording audio loses audio frames to `0x30000005`. In
+`$KVS_SDK/src/gstreamer/gstkvssink.cpp`, straight before `put_frame_status = put_frame(data, ...`:
+
+```cpp
+        {
+            const uint64_t unit = (uint64_t) kvssink->timecode_scale_milliseconds * 1000000ULL;
+            if (unit > 0 && GST_BUFFER_DTS_IS_VALID(buf) && GST_BUFFER_PTS_IS_VALID(buf)) {
+                const int64_t offset = (int64_t) buf->pts - (int64_t) buf->dts;
+                const int64_t half = (int64_t) unit / 2;
+                const int64_t offset_units = (offset >= 0 ? offset + half : offset - half) / (int64_t) unit;
+                buf->dts -= buf->dts % unit;
+                buf->pts = (uint64_t) ((int64_t) buf->dts + offset_units * (int64_t) unit);
+            }
+        }
+```
+
+**Proof:** `grep -n "VMS patch 4" "$KVS_SDK/src/gstreamer/gstkvssink.cpp"`. Rebuilding only the
+plugin later: `make src/gstreamer/gstkvssink.o` while producers run, then stop them and
+`make gstkvssink`. Linking over a loaded plugin can crash a running producer.
+
 **Stage 2 — compile:**
 
 ```bash
@@ -977,9 +998,24 @@ HEVC; Firefox and Edge need Microsoft's HEVC Video Extensions on Windows. The cl
 detects this and says so rather than spinning, so "the camera is broken" and "this browser
 has no HEVC decoder" stay distinguishable.
 
-**The codec cannot be changed from this repository** — set it in the camera's own web UI,
-then restart that camera's producer (Stop/Start in either GUI) so it re-reads the wire.
-Guide §21.4 lists what else was left behind with the switching code.
+**To change a camera's codec,** use the **video** selector in the local admin GUI's settings
+column (guide §21.5). It switches the camera's encoder over ONVIF Media2 and reports done only
+once MediaMTX receives the new codec (~6 s without video); a running producer follows by
+itself. From the shell, the same thing:
+
+```bash
+curl -s http://127.0.0.1:8080/api/cameras/cam-03/codec                 # options, wire, camera's claim
+curl -s -X POST -H 'Content-Type: application/json' \
+     -d '{"videoCodec":"h264"}' http://127.0.0.1:8080/api/cameras/cam-03/codec
+```
+
+A codec changed in the camera's own web UI is followed too, on the producer's next restart
+(Stop/Start in either GUI), but the registry's `videoCodec` then goes stale until the selector
+is used once.
+
+If an H.265 producer is `active` but nothing persists, look for
+`Dropping frame with flag: 17920` in its journal: that is keyframes without a DTS, the reason
+the H.265 chain ends in `h265timestamper` (`FoundAndFixed.md` #57).
 
 ### If the camera has audio enabled (guide §18)
 

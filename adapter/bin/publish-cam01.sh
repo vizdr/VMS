@@ -110,6 +110,48 @@ if [ $(( audio_frame_ms * 100 )) -lt $(( video_frame_ms * 95 )) ]; then
        "reject audio (guide 18.3). Use AUDIO_RATE <= $(( 1024 * CAM_FPS_OUT ))." >&2
 fi
 
+# Run the publisher, and never let it sit there doing nothing (FoundAndFixed.md #51).
+#
+# gst-launch has stopped producing without exiting twice -- a second after boot, and after
+# an hour of normal running -- with no error, no EOS, and the unit `active`. Nothing in its
+# own output marks the moment, so the watchdog reads the one signal that does: MediaMTX's
+# bytesReceived for the path, the rule #50 put into the admin GUI's apply check. No advance
+# for PUBLISH_STALL_SEC kills the pipeline. Any end of the pipeline, a clean EOS included,
+# exits non-zero so Restart=on-failure brings it back -- the clean-exit gap that #44 closed
+# for the producers. An unreachable API is "unknown", not "stalled", and never kills.
+#
+# Not `exec`, so this shell stays the unit's main process; a Stop signals the whole cgroup,
+# which takes gst-launch with it (the same reasoning as producer_run in producer-lib.sh).
+PUBLISH_CHECK_SEC=10
+PUBLISH_STALL_SEC=30
+publish_run() {
+  gst-launch-1.0 "$@" &
+  local pid=$! last= now stalled=0
+  while sleep "${PUBLISH_CHECK_SEC}"; do
+    kill -0 "$pid" 2>/dev/null || break
+    now="$(curl -s --max-time 3 http://127.0.0.1:9997/v3/paths/get/cam01 \
+           | sed -n 's/.*"bytesReceived":\([0-9]*\).*/\1/p')"
+    [ -n "$now" ] || continue
+    if [ "$now" = "$last" ]; then
+      stalled=$(( stalled + PUBLISH_CHECK_SEC ))
+      if [ "$stalled" -ge "$PUBLISH_STALL_SEC" ]; then
+        echo "publish-cam01: MediaMTX bytesReceived stuck at ${now} for ${stalled}s --" \
+             "the pipeline hung (FoundAndFixed.md #51); killing it" >&2
+        # SIGKILL: a pipeline wedged this way has no reason to honour a clean shutdown.
+        kill -9 "$pid" 2>/dev/null
+        break
+      fi
+    else
+      stalled=0
+    fi
+    last="$now"
+  done
+  local rc=0
+  wait "$pid" 2>/dev/null || rc=$?
+  echo "publish-cam01: pipeline ended (status ${rc}) -- exiting non-zero so systemd restarts it" >&2
+  exit 1
+}
+
 VIDEO_CHAIN="v4l2src device=$CAM ! \
   ${CAPS} ! \
   ${DECODE}videorate drop-only=true ! video/x-raw,framerate=${CAM_FPS_OUT}/1 ! \
@@ -120,7 +162,7 @@ VIDEO_CHAIN="v4l2src device=$CAM ! \
 
 if [ "${AUDIO:-off}" = "on" ]; then
   echo "publish-cam01: audio ENABLED (${AUDIO_DEV} -> LPCM $((AUDIO_RATE/1000))kHz mono)"
-  exec gst-launch-1.0 -v \
+  publish_run -v \
     ${VIDEO_CHAIN} ! queue ! rtsp.sink_0 \
     alsasrc device="${AUDIO_DEV}" provide-clock=false do-timestamp=true \
     ! audioconvert ! audioresample \
@@ -134,6 +176,6 @@ fi
 echo "publish-cam01: audio disabled (video only)"
 # The same VIDEO_CHAIN as the audio branch, not a second literal copy of it: the two used
 # to be written out separately, which is two pipelines free to drift apart.
-exec gst-launch-1.0 -v \
+publish_run -v \
   ${VIDEO_CHAIN} ! \
   rtspclientsink location=rtsp://127.0.0.1:8554/cam01 protocols=tcp

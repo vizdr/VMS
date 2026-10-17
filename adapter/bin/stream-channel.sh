@@ -16,26 +16,67 @@ source "${VMS_HOME}/adapter/bin/adapter-config.sh"   # AWS_REGION, THING_NAME, I
 source "${VMS_HOME}/adapter/bin/producer-lib.sh"     # producer_run
 CERTS="${VMS_HOME}/certs"
 
-# Video-only, but the audio pad is still linked -- to a fakesink. A GUI-registered ONVIF
-# camera very often has a G.711 track that MediaMTX re-serves, and an rtspsrc pad nobody
-# links can abort the whole pipeline with "streaming stopped, reason not-linked (-1)"
-# depending on which pad is exposed first (FoundAndFixed.md #43). This matters more here
-# than for cam-01/cam-02, because the camera behind this unit is unknown at write time.
-# The branch is inert if the source has no audio track.
 # Resolved from what MediaMTX actually receives, not assumed: a GUI-registered camera is
 # whatever the operator plugged in, and H.265 is common on exactly these cameras. See
-# stream-cam02.sh for why a missing source is a deliberate failure here.
+# stream-cam02.sh for why a missing source is a deliberate failure here. The same call reports
+# the audio track (AUDIO_TRACK), whose G.711 law ONVIF can't tell: cam-02 is A-law, cam-03 mu-law.
 VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/stream-codec.py "${CAMERA_ID}")" \
   || { echo "stream-channel(${CAMERA_ID}): no H.264/H.265 video from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
 eval "${VIDEO_ENV}"
 VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
-echo "stream-channel(${CAMERA_ID}): video ${VIDEO_CODEC}"
 
+# Whether to record audio: the registry's audioCapable (found at discovery) and audioEnabled
+# (the user's switch), read once at start like stream-cam02.sh -- see camera-audio.py for why a
+# change waits for the next Start. `|| true`: an unreadable registry means video-only, never no
+# producer.
+AUDIO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
+             ${VMS_HOME}/adapter/bin/camera-audio.py "${CAMERA_ID}" || true)"
+eval "${AUDIO_ENV}"
+
+case "${AUDIO_TRACK:-none}" in
+  pcma) AUDIO_DEPAY="rtppcmadepay ! alawdec" ;;
+  pcmu) AUDIO_DEPAY="rtppcmudepay ! mulawdec" ;;
+  *)    AUDIO_DEPAY="" ;;
+esac
+if [ "${AUDIO:-off}" = "on" ] && [ -z "${AUDIO_DEPAY}" ]; then
+  # Never start an audio branch that can't deliver: kvssink collects across its pads, so an
+  # audio pad that never gets a buffer stalls the video as well (guide §18).
+  echo "stream-channel(${CAMERA_ID}): audio is on, but MediaMTX receives ${AUDIO_TRACK:-no audio}, not G.711 -- video only" >&2
+  AUDIO=off
+fi
+
+KVSSINK="kvssink name=kvs stream-name=${CAMERA_ID} aws-region=${AWS_REGION} \
+  iot-certificate=iot-certificate,endpoint=${IOT_CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=${IOT_ROLE_ALIAS},iot-thing-name=${THING_NAME}"
+
+if [ "${AUDIO:-off}" = "on" ]; then
+  # stream-cam02.sh's chain, with the depayloader chosen by law; its comments carry the reasons
+  # (AAC because KVS playback refuses G.711, raw not adts, no resampling up). 8 kHz AAC frames
+  # are 128 ms, longer than one video frame at 10-25 fps, which is guide §18.3's rule. Measured
+  # with zero rejects at 15 fps (cam-02) and 20 fps (cam-03, FoundAndFixed.md #58); 25 fps with
+  # audio is unmeasured -- count 0x30000005 rejects there.
+  echo "stream-channel(${CAMERA_ID}): audio ENABLED (${AUDIO_TRACK} -> AAC 8kHz), video ${VIDEO_CODEC}"
+  producer_run stream-channel -v \
+    rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 name=src \
+    src. ! application/x-rtp,media=video ! queue \
+    ! ${VIDEO_CHAIN} ! queue ! kvs.video_0 \
+    src. ! application/x-rtp,media=audio ! queue \
+    ! ${AUDIO_DEPAY} ! audioconvert \
+    ! audio/x-raw,rate=8000,channels=1 \
+    ! voaacenc bitrate=32000 ! aacparse \
+    ! audio/mpeg,mpegversion=4,stream-format=raw ! queue ! kvs.audio_0 \
+    ${KVSSINK}
+fi
+
+# Video-only, but the audio pad is still linked -- to a fakesink. A GUI-registered ONVIF
+# camera very often has a G.711 track that MediaMTX re-serves, and an rtspsrc pad nobody
+# links can abort the whole pipeline with "streaming stopped, reason not-linked (-1)"
+# depending on which pad is exposed first (FoundAndFixed.md #43). The branch is inert if the
+# source has no audio track.
+echo "stream-channel(${CAMERA_ID}): audio disabled (video only), video ${VIDEO_CODEC}"
 producer_run stream-channel -v \
   rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 name=src \
   src. ! application/x-rtp,media=video ! queue \
   ! ${VIDEO_CHAIN} \
-  ! kvssink stream-name="${CAMERA_ID}" aws-region="${AWS_REGION}" \
-      iot-certificate="iot-certificate,endpoint=${IOT_CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=${IOT_ROLE_ALIAS},iot-thing-name=${THING_NAME}" \
+  ! ${KVSSINK} \
   src. ! application/x-rtp,media=audio ! queue ! fakesink sync=false async=false

@@ -33,7 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 import camera_control
+import mediamtx_api
 import onvif_discovery
+import onvif_media2
 import usb_camera
 from aws_device_creds import get_session
 from outage_buffer import PIR_DIR, read_registry_cache
@@ -206,6 +208,67 @@ def usb_set_control():
         return jsonify({"error": str(e)}), 500
 
 
+@app.get("/api/usb-cameras/mic-gain")
+def usb_get_mic_gain():
+    """The webcam microphone's gain: range, step and current value (usb_camera.mic_gain)."""
+    try:
+        out = usb_camera.mic_gain()
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
+    return jsonify({**out, "savedDb": _config_value("MIC_GAIN_DB")})
+
+
+@app.post("/api/usb-cameras/mic-gain")
+def usb_set_mic_gain():
+    """Set the microphone gain {"gainDb": -6} live and save it in cam01.env as MIC_GAIN_DB.
+
+    Both at once, unlike the video controls' Set now / Apply: a gain is a mixer setting that
+    needs no restart and can't break video, so there is nothing to try before keeping. The file
+    goes through configure-camera.sh like every other edit (validated, previous one backed up),
+    and camera-init.sh reapplies it at every start. Recordings and clips carry the new level from
+    now on; the browser's own player volume only changes what one listener hears.
+    """
+    db = (request.get_json(force=True, silent=True) or {}).get("gainDb")
+    if not isinstance(db, (int, float)) or isinstance(db, bool):
+        return jsonify({"error": "gainDb must be a number"}), 400
+    try:
+        out = usb_camera.set_mic_gain(db)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        _save_config_value("MIC_GAIN_DB", f"{out['gainDb']:g}")
+        out["saved"] = True
+    except Exception as e:  # noqa: BLE001 -- set live already; say why it won't survive a restart
+        out["saved"], out["saveError"] = False, str(e)
+    return jsonify(out)
+
+
+def _config_value(key, path="cam01"):
+    try:
+        for line in open(os.path.join(usb_camera.CONFIG_DIR, f"{path}.env")):
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip()
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def _save_config_value(key, value, path="cam01"):
+    """Set one KEY=VALUE in the camera's config file, every other line kept, through the
+    privileged helper (validation, backup, atomic write)."""
+    try:
+        lines = open(os.path.join(usb_camera.CONFIG_DIR, f"{path}.env")).read().splitlines()
+    except FileNotFoundError:
+        lines = [f"# {path}: written by the admin GUI"]
+    lines = [l for l in lines if not l.startswith(key + "=")] + [f"{key}={value}"]
+    with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+        f.write("\n".join(lines) + "\n")
+    try:
+        _sudo_configure("apply", path, f.name)
+    finally:
+        os.unlink(f.name)
+
+
 @app.post("/api/usb-cameras/sync-registry")
 def usb_sync_registry():
     """Record the attached camera's capabilities in the registry, on demand."""
@@ -318,6 +381,8 @@ def list_cameras():
         # so this is always derivable -- send it rather than have the page re-implement
         # the naming convention itself.
         i["mediamtxPath"] = camera_control.mediamtx_path_name(i["cameraId"])
+    # Unregistered cameras too, with their unregisteredAt: the page leaves them out of the
+    # table and needs them only to offer Re-register on a matching discovered device.
     return jsonify({"cameras": sorted(items, key=lambda c: c["cameraId"])})
 
 
@@ -329,11 +394,20 @@ def register_camera():
     user, password = body.get("user"), body.get("password")
     stream_uri = body.get("streamUri")
     has_ir_control = bool(body.get("hasIrControl"))
+    # Found at discovery (onvif_discovery: a G.711 microphone on the profile). Absent means
+    # "not known" -- the scan couldn't log in -- and a re-registration then leaves the stored
+    # value alone. audioEnabled is never set here: recording audio stays the user's choice.
+    audio_capable = body.get("audioCapable")
+    fps = body.get("fps")             # the form preselects onvif_media2.DEFAULT_FPS
 
     if not CAMERA_ID_RE.match(camera_id):
         return jsonify({"error": "cameraId must look like 'cam-03'"}), 400
     if not all([host, user, password, stream_uri]):
         return jsonify({"error": "host, user, password, and streamUri are required"}), 400
+    if audio_capable is not None and not isinstance(audio_capable, bool):
+        return jsonify({"error": "audioCapable must be true or false"}), 400
+    if fps is not None and fps not in onvif_media2.FPS_CHOICES:
+        return jsonify({"error": f"fps must be one of {list(onvif_media2.FPS_CHOICES)}"}), 400
 
     table = cameras_table()
     existing = table.get_item(Key={"cameraId": camera_id}).get("Item")
@@ -351,6 +425,14 @@ def register_camera():
         # refresh -- editing a path's config doesn't care which unit is feeding it.
         if existing.get("mode") != "passthrough" or not existing.get("onvifHost"):
             return jsonify({"error": f"'{camera_id}' exists but isn't a re-registerable ONVIF camera"}), 409
+        # Re-registering an unregistered camera also brings it back: its path is added again
+        # (Unregister deleted it), the mark is removed, and a kvs-cam@ instance is enabled
+        # again, as provisioning left it -- enabled, not started (see unregister_camera).
+        reactivate = camera_control.is_unregistered(existing)
+        # The form offers the stream URIs the camera reports, which usually lack the credentials
+        # a registered URI may carry (cam-02's ?username=..&password=..): keep those.
+        stream_uri = onvif_media2.with_credentials(stream_uri, existing.get("rtspUrl"))
+        fps_result = _registration_fps(host, port, user, password, stream_uri, fps)
 
         # Only patch when the source actually changed. MediaMTX decides whether a config
         # update can be applied in place or needs the path closed and recreated
@@ -362,33 +444,39 @@ def register_camera():
         #
         # `rtspTransport`, not `sourceProtocol`: the latter is a deprecated alias that
         # MediaMTX still accepts but may drop. Both were verified live to apply in place
-        # when the value is unchanged.
-        current = requests.get(
-            f"{MEDIAMTX_API}/v3/config/paths/get/{mediamtx_path}", timeout=5
-        )
-        unchanged = current.ok and current.json().get("source") == stream_uri
+        # when the value is unchanged. A path with no configuration (an unregistered camera's,
+        # or one a MediaMTX restart dropped) is added rather than patched: a patch 404s.
+        want = {"source": stream_uri, "rtspTransport": "tcp"}
+        try:
+            conf = mediamtx_api.get_path_conf(mediamtx_path)
+            if conf is None:
+                mediamtx_api.add_path(mediamtx_path, want)
+            elif conf.get("source") != stream_uri:
+                mediamtx_api.patch_path(mediamtx_path, want)
+        except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
+            return jsonify({"error": f"MediaMTX path update failed: {e}"}), 502
 
-        if not unchanged:
-            r = requests.patch(
-                f"{MEDIAMTX_API}/v3/config/paths/patch/{mediamtx_path}",
-                json={"source": stream_uri, "rtspTransport": "tcp"},
-                timeout=5,
-            )
-            if not r.ok:
-                return jsonify({"error": f"MediaMTX path update failed: {r.status_code} {r.text}"}), 502
+        # REMOVE is a no-op on a row without the mark, so every re-registration can carry it.
+        sets = ("hasIrControl = :ir, onvifHost = :h, onvifPort = :p, onvifUser = :u, "
+                "onvifPassword = :pw, rtspUrl = :uri, updatedAt = :t")
+        values = {":ir": has_ir_control, ":h": host, ":p": port, ":u": user, ":pw": password,
+                  ":uri": stream_uri, ":t": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        if audio_capable is not None:
+            sets += ", audioCapable = :ac"
+            values[":ac"] = audio_capable
+        table.update_item(Key={"cameraId": camera_id},
+                          UpdateExpression=f"SET {sets} REMOVE unregisteredAt",
+                          ExpressionAttributeValues=values)
+        if reactivate and camera_control.unit_name(camera_id).startswith("kvs-cam@"):
+            camera_control.set_boot_start(camera_id, True)
+        _refresh_path_cache()
+        return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"],
+                        "updated": True, "reactivated": reactivate, "fps": fps_result}), 200
 
-        table.update_item(
-            Key={"cameraId": camera_id},
-            UpdateExpression=(
-                "SET hasIrControl = :ir, onvifHost = :h, onvifPort = :p, "
-                "onvifUser = :u, onvifPassword = :pw, rtspUrl = :uri, updatedAt = :t"
-            ),
-            ExpressionAttributeValues={
-                ":ir": has_ir_control, ":h": host, ":p": port, ":u": user, ":pw": password,
-                ":uri": stream_uri, ":t": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
-        )
-        return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"], "updated": True}), 200
+    # 0. The frame rate, on the camera, before MediaMTX ever connects: a change can restart the
+    #    camera's RTSP session, which costs nothing yet. Not fatal -- a camera without Media2
+    #    keeps its own rate, and the response says so.
+    fps_result = _registration_fps(host, port, user, password, stream_uri, fps)
 
     # 1. MediaMTX path, live via its local API -- no YAML edit, no restart, so the
     #    other already-running cameras are undisturbed.
@@ -438,10 +526,95 @@ def register_camera():
         "onvifUser": user,
         "onvifPassword": password,
         "rtspUrl": stream_uri,
+        "audioCapable": bool(audio_capable),
         "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
 
-    return jsonify({"cameraId": camera_id, "kvsStreamArn": stream_arn, "updated": False}), 201
+    _refresh_path_cache()
+    return jsonify({"cameraId": camera_id, "kvsStreamArn": stream_arn, "updated": False,
+                    "fps": fps_result}), 201
+
+
+def _set_camera_fps(client, stream_uri, fps):
+    """Set the frame rate of the encoder behind `stream_uri`, keeping the keyframe interval in
+    seconds (onvif_media2.fps_config). Returns the camera's read-back, which is only its claim;
+    callers that need proof measure the wire (_verify_fps)."""
+    prof = onvif_media2.stream_profile(client, stream_uri)
+    cfg = client.encoder_config(prof["encoderToken"])
+    now = onvif_media2.summarize(cfg)
+    opts = client.encoder_options(prof["encoderToken"]).get(now["encoding"]) or {}
+    if fps not in onvif_media2.fps_choices(opts, (now["width"], now["height"])):
+        raise onvif_media2.OnvifError(f"this stream's encoder doesn't offer {fps} fps")
+    if now["frameRate"] != fps:
+        client.set_encoder_config(onvif_media2.fps_config(cfg, opts, fps))
+    return onvif_media2.summarize(client.encoder_config(prof["encoderToken"]))
+
+
+def _registration_fps(host, port, user, password, stream_uri, fps):
+    """The registration form's frame rate applied to the camera, or None when none was asked.
+    Never fails the registration: the camera's read-back or the reason goes in the response."""
+    if fps is None:
+        return None
+    try:
+        got = _set_camera_fps(onvif_media2.Media2(host, port, user, password), stream_uri, fps)
+        return {"asked": fps, "configured": got["frameRate"], "govLength": got["govLength"]}
+    except Exception as e:  # noqa: BLE001
+        return {"asked": fps, "error": f"{type(e).__name__}: {e}"}
+
+
+def _refresh_path_cache():
+    """Rewrite sync_mediamtx_paths.py's offline copy of the registry now, through its own
+    code, so a MediaMTX start without AWS sets up the paths as of this change rather than as
+    of the last start. Best effort: the next online MediaMTX start rewrites it anyway."""
+    try:
+        import sync_mediamtx_paths
+        sync_mediamtx_paths.load_cameras()
+    except Exception as e:  # noqa: BLE001
+        print(f"path cache not refreshed: {type(e).__name__}: {e}", flush=True)
+
+
+@app.post("/api/cameras/<camera_id>/unregister")
+def unregister_camera(camera_id):
+    """Hide a camera from both GUIs and stop everything that acts on it, keeping what it has.
+
+    The row stays: the registry is shared with the successor, so rows are updated field by
+    field (PIR-MQTT-VMS-PI4.md §4.3, rule 1). So do the KVS stream, the clips and every
+    setting, which is what lets Re-register (Discover, then the button on the matching device)
+    bring the camera back as it was. Three things change:
+      1. unregisteredAt is set, the mark every reader skips (camera_control.is_unregistered);
+      2. the producer is stopped and disabled: it costs nothing and doesn't start at boot;
+      3. the MediaMTX path is deleted, so the Pi stops pulling the camera's stream.
+    The registry goes first: with AWS unreachable nothing has changed yet, and the cloud page
+    couldn't learn of it anyway.
+
+    ONVIF cameras only, because Re-register finds a camera by discovery, which can't see the
+    USB camera.
+    """
+    table = cameras_table()
+    item = table.get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if item.get("mode") != "passthrough" or not item.get("onvifHost"):
+        return jsonify({"error": f"only ONVIF cameras can be unregistered: Re-register finds "
+                                 f"them again by discovery, which can't see '{camera_id}'"}), 409
+    if camera_control.is_unregistered(item):
+        return jsonify({"cameraId": camera_id, "unregisteredAt": item["unregisteredAt"]})
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    table.update_item(
+        Key={"cameraId": camera_id},
+        UpdateExpression="SET unregisteredAt = :t, updatedAt = :t",
+        ExpressionAttributeValues={":t": now},
+    )
+    camera_control.set_stream(camera_id, False)
+    camera_control.set_boot_start(camera_id, False)
+    result = {"cameraId": camera_id, "unregisteredAt": now}
+    try:
+        mediamtx_api.delete_path(camera_control.mediamtx_path_name(camera_id))
+    except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
+        result["warning"] = f"MediaMTX path not removed ({e}); it goes at the next MediaMTX restart"
+    _refresh_path_cache()
+    return jsonify(result)
 
 
 @app.get("/api/cameras/<camera_id>/status")
@@ -606,6 +779,347 @@ def set_outage_buffer(camera_id):
         ExpressionAttributeValues={":s": secs},
     )
     return jsonify({"cameraId": camera_id, "outageBufferSec": secs, "appliesOn": "within 60s"})
+
+
+# --- Video codec (guide §21) ------------------------------------------------------------------
+#
+# The codec is a property of the camera, so switching it means switching the camera's own
+# encoder over ONVIF Media2 (adapter/onvif_media2.py); nothing on the Pi transcodes. Everything
+# downstream follows by itself: the camera drops RTSP, MediaMTX reconnects with the new track,
+# the producer's watchdog restarts it on the matching chain, and stream-codec.py records
+# videoCodecActive and the KVS MediaType. Measured on cam-03: ~6 s without video either way.
+#
+# cam-01 is encoded by the Pi, which has no H.265 encoder (guide §21.1), so it is shown, not
+# offered.
+
+CODEC_VERIFY_SEC = 45     # the camera's reconnect, plus one failed attempt on a half-ready SDP
+
+
+def _camera_item_quick(camera_id):
+    """The registry row, on short timeouts. The codec routes need the ONVIF password, which the
+    local cache deliberately doesn't hold; they run once per page load, never from a poll
+    (FoundAndFixed.md #55)."""
+    from botocore.config import Config
+    quick = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
+    table = get_session(REGION).resource("dynamodb", config=quick).Table("cameras")
+    return table.get_item(Key={"cameraId": camera_id}).get("Item")
+
+
+def _codec_options(opts):
+    return {c: ({"available": True, "encodedBy": "camera"} if e in opts else
+                {"available": False, "reason": "the camera's encoder doesn't offer it"})
+            for c, e in onvif_media2.ENCODING.items()}
+
+
+@app.get("/api/cameras/<camera_id>/codec")
+def get_codec(camera_id):
+    """What the camera can send, what it is set to, and what MediaMTX actually receives.
+
+    Read-only. `wire` is the truth and `configured` only the camera's claim: cam-03 claimed
+    H264 2880x1620 while it sent H.265 2560x1440, so the page shows both when they differ.
+    """
+    try:
+        item = _camera_item_quick(camera_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    out = {"cameraId": camera_id, "chosen": item.get("videoCodec"),
+           "wire": mediamtx_api.path_video_track(camera_control.mediamtx_path_name(camera_id))}
+    if not item.get("onvifHost"):
+        return jsonify({**out, "switchable": False, "configured": "h264", "options": {
+            "h264": {"available": True, "encodedBy": "pi-hw"},
+            "h265": {"available": False, "reason": "encoded on the Pi, which has no H.265 "
+                                                   "encoder (guide §21.1)"}}})
+    try:
+        cam = onvif_media2.for_camera(item)
+        prof = onvif_media2.stream_profile(cam, item.get("rtspUrl"))
+        settings = onvif_media2.summarize(cam.encoder_config(prof["encoderToken"]))
+        options = _codec_options(cam.encoder_options(prof["encoderToken"]))
+    except onvif_media2.OnvifError as e:
+        return jsonify({**out, "error": str(e)}), 502
+    return jsonify({**out, "options": options,
+                    "switchable": sum(o["available"] for o in options.values()) > 1,
+                    "configured": onvif_media2.CODEC.get(settings["encoding"], settings["encoding"]),
+                    "settings": settings, "encoderToken": prof["encoderToken"]})
+
+
+def _wait_for_wire(path, codec, budget=CODEC_VERIFY_SEC):
+    """The video track once MediaMTX receives `codec` on `path`, or None after `budget`."""
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        track = mediamtx_api.path_video_track(path)
+        if track and track["codec"] == codec:
+            return track
+        time.sleep(0.5)
+    return None
+
+
+def _record_codec(camera_id, codec, opts, encoder_token):
+    """Write the choice to the registry, field by field. Best effort: the camera has already
+    switched, and the producer records what it streams on its own (videoCodecActive).
+
+    Same fields and values the successor writes (PIR-MQTT-VMS-PI4.md §4.3 rule 2, read by
+    list_cameras.py): videoCodec is the admin's choice -- the cloud page labels the camera and
+    warns a browser without HEVC from it -- and videoCodecCaps says who encodes each codec.
+    videoCodecDefault is the successor's and is not touched.
+    """
+    caps = {c: ("camera" if e in opts else "none") for c, e in onvif_media2.ENCODING.items()}
+    try:
+        from botocore.config import Config
+        quick = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
+        get_session(REGION).resource("dynamodb", config=quick).Table("cameras").update_item(
+            Key={"cameraId": camera_id},
+            UpdateExpression=("SET videoCodec = :c, videoCodecCaps = :caps, "
+                              "videoEncoderToken = :t, videoCodecProbe = :p"),
+            ExpressionAttributeValues={":c": codec, ":caps": caps, ":t": encoder_token,
+                                       ":p": "media2"})
+        return {"recorded": True}
+    except Exception as e:  # noqa: BLE001
+        return {"recorded": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+@app.post("/api/cameras/<camera_id>/codec")
+def set_codec(camera_id):
+    """Switch the camera's encoder to {"videoCodec": "h264"|"h265"}, and prove it.
+
+    Done means MediaMTX receives the new codec, not that the camera said yes: a camera's
+    read-back can disagree with its stream (get_codec). Every other encoder setting is kept
+    where the new codec allows it, and the picture size is taken from the wire rather than
+    from the camera's possibly stale configuration (onvif_media2.plan_config). If the wire
+    already carries the codec, the camera is not touched at all -- no reason to cost ~6 s of
+    video.
+
+    Not rolled back on failure, unlike the USB apply: either codec is a working stream, so a
+    camera that is slow to come back is reported, not reverted into a second interruption.
+    """
+    target = (request.get_json(force=True, silent=True) or {}).get("videoCodec")
+    if target not in onvif_media2.ENCODING:
+        return jsonify({"error": f"videoCodec must be one of {sorted(onvif_media2.ENCODING)}"}), 400
+    try:
+        item = _camera_item_quick(camera_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if not item.get("onvifHost"):
+        return jsonify({"error": "this camera is encoded on the Pi, which has no H.265 "
+                                 "encoder -- it stays H.264 (guide §21.1)"}), 400
+
+    path = camera_control.mediamtx_path_name(camera_id)
+    t0 = time.monotonic()
+    try:
+        cam = onvif_media2.for_camera(item)
+        prof = onvif_media2.stream_profile(cam, item.get("rtspUrl"))
+        cfg = cam.encoder_config(prof["encoderToken"])
+        opts = cam.encoder_options(prof["encoderToken"])
+        encoding = onvif_media2.ENCODING[target]
+        if encoding not in opts:
+            return jsonify({"error": f"the camera's encoder doesn't offer {encoding}"}), 409
+        wire = mediamtx_api.path_video_track(path)
+        unchanged = bool(wire and wire["codec"] == target)
+        if not unchanged:
+            size = (wire["width"], wire["height"]) if wire else None
+            cam.set_encoder_config(onvif_media2.plan_config(cfg, opts, encoding, size))
+        settings = onvif_media2.summarize(cam.encoder_config(prof["encoderToken"]))
+    except onvif_media2.OnvifError as e:
+        return jsonify({"error": str(e)}), 502
+
+    if not unchanged:
+        wire = _wait_for_wire(path, target)
+        if not wire:
+            now = mediamtx_api.path_video_track(path)
+            return jsonify({
+                "error": f"the camera accepted {encoding} (it reads back "
+                         f"{settings['encoding']}), but after {CODEC_VERIFY_SEC} s MediaMTX "
+                         f"receives {now['codec'].upper() if now else 'no video'}",
+                "settings": settings}), 504
+    return jsonify({"cameraId": camera_id, "videoCodec": target, "unchanged": unchanged,
+                    "wire": wire, "settings": settings,
+                    "tookSec": round(time.monotonic() - t0, 1),
+                    "registry": _record_codec(camera_id, target, opts, prof["encoderToken"])})
+
+
+# --- stream and frame rate (guide §21.6) -------------------------------------------------------
+#
+# Which of the camera's streams this system pulls (main or sub) and at what frame rate. Like the
+# codec, both are properties of the camera and stay LAN-side. Done means the wire: MediaMTX
+# receives the other stream, or the frames arrive at the new rate -- never the camera's read-back.
+
+FPS_TOLERANCE = 0.15       # cam-03 sends 19.8 fps at a 20 fps limit; a camera capping lower is reported
+FPS_MEASURE_SEC = 4
+FPS_VERIFY_SEC = 30
+
+
+def _measure_fps(path, seconds=FPS_MEASURE_SEC):
+    """Frames per second MediaMTX re-serves on `path`, from the timestamps of `seconds` of video
+    packets. One reader for a few seconds; None when nothing usable arrives."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time", "-of", "csv=p=0",
+             "-read_intervals", f"%+{seconds}", f"rtsp://127.0.0.1:8554/{path}"],
+            capture_output=True, text=True, timeout=seconds + 10)
+    except subprocess.TimeoutExpired:
+        return None
+    ts = []
+    for line in r.stdout.split():
+        try:
+            ts.append(float(line.strip(",")))
+        except ValueError:
+            pass                          # "N/A": the first packets before RTCP sync
+    ts.sort()
+    if len(ts) < 3 or ts[-1] <= ts[0]:
+        return None
+    return round((len(ts) - 1) / (ts[-1] - ts[0]), 1)
+
+
+def _fps_ok(measured, fps):
+    return measured is not None and abs(measured - fps) <= FPS_TOLERANCE * fps
+
+
+def _verify_fps(path, fps, budget=FPS_VERIFY_SEC):
+    """Measure until the wire shows `fps` or the budget runs out; the last measurement either
+    way. A camera may apply the rate in place or restart its RTSP session first."""
+    deadline = time.monotonic() + budget
+    measured = None
+    while time.monotonic() < deadline:
+        if (mediamtx_api.get_path_state(path) or {}).get("ready"):
+            measured = _measure_fps(path)
+            if _fps_ok(measured, fps):
+                return measured
+        time.sleep(2)
+    return measured
+
+
+def _wait_for_new_session(path, ready_before, budget=CODEC_VERIFY_SEC):
+    """The video track once MediaMTX has reconnected to the path's (new) source -- readyTime
+    differs from `ready_before` -- or None after `budget`."""
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        state = mediamtx_api.get_path_state(path) or {}
+        if state.get("ready") and state.get("readyTime") != ready_before:
+            track = mediamtx_api.path_video_track(path)
+            if track:
+                return track
+        time.sleep(0.5)
+    return None
+
+
+def _stream_view(x):
+    return {k: x[k] for k in ("name", "encoding", "width", "height", "fps", "govLength", "fpsChoices")}
+
+
+@app.get("/api/cameras/<camera_id>/stream")
+def get_stream_choice(camera_id):
+    """The camera's streams, which one this system pulls, and the frame rates each accepts.
+    Read-only, once per table load (FoundAndFixed.md #55); fps here is the camera's setting."""
+    try:
+        item = _camera_item_quick(camera_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if not item.get("onvifHost"):
+        return jsonify({"switchable": False,
+                        "reason": "the USB camera's frame rate is set in section 4 (cam01.env)"})
+    try:
+        found = onvif_media2.streams(onvif_media2.for_camera(item))
+    except onvif_media2.OnvifError as e:
+        return jsonify({"error": str(e)}), 502
+    current = next((x["name"] for x in found
+                    if onvif_media2.same_stream(x["streamUri"], item.get("rtspUrl"))), None)
+    return jsonify({"cameraId": camera_id, "switchable": True, "current": current,
+                    "streams": [_stream_view(x) for x in found],
+                    "wire": mediamtx_api.path_video_track(camera_control.mediamtx_path_name(camera_id))})
+
+
+@app.post("/api/cameras/<camera_id>/stream")
+def set_stream_choice(camera_id):
+    """Switch to {"stream": "main"|"sub"} and/or set {"fps": 10|15|20|25}, and prove it.
+
+    A stream switch points the MediaMTX path at the other profile's URI (credentials carried
+    over, onvif_media2.with_credentials) and writes rtspUrl first, because a MediaMTX restart
+    rebuilds the path from the registry. MediaMTX reconnecting with video is the proof; the
+    producer follows on its own, like after a codec switch. The frame rate is then set on the
+    encoder of the stream now pulled, keyframe interval kept in seconds, and proved by counting
+    frames on the wire. A camera that sends fewer than asked is reported, not rolled back.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    want_stream, want_fps = body.get("stream"), body.get("fps")
+    if want_stream is None and want_fps is None:
+        return jsonify({"error": "give stream and/or fps"}), 400
+    if want_fps is not None and want_fps not in onvif_media2.FPS_CHOICES:
+        return jsonify({"error": f"fps must be one of {list(onvif_media2.FPS_CHOICES)}"}), 400
+    try:
+        item = _camera_item_quick(camera_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if not item.get("onvifHost"):
+        return jsonify({"error": "the USB camera's frame rate is set in section 4 (cam01.env)"}), 400
+    if camera_control.is_unregistered(item):
+        return jsonify({"error": f"'{camera_id}' is unregistered: Re-register it first"}), 409
+
+    path = camera_control.mediamtx_path_name(camera_id)
+    t0 = time.monotonic()
+    out = {"cameraId": camera_id}
+    try:
+        cam = onvif_media2.for_camera(item)
+        found = onvif_media2.streams(cam)
+        target = next((x for x in found
+                       if onvif_media2.same_stream(x["streamUri"], item.get("rtspUrl"))), None)
+        if target is None:
+            return jsonify({"error": "none of the camera's streams is the registered one -- "
+                                     "re-register the camera"}), 502
+
+        if want_stream and want_stream != target["name"]:
+            new = next((x for x in found if x["name"] == want_stream), None)
+            if new is None:
+                return jsonify({"error": f"the camera has no '{want_stream}' stream"}), 400
+            new_uri = onvif_media2.with_credentials(new["streamUri"], item["rtspUrl"])
+            ready_before = (mediamtx_api.get_path_state(path) or {}).get("readyTime")
+            table = cameras_table()
+            table.update_item(Key={"cameraId": camera_id},
+                              UpdateExpression="SET rtspUrl = :u, updatedAt = :t",
+                              ExpressionAttributeValues={":u": new_uri, ":t": datetime.now(
+                                  timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+            try:
+                mediamtx_api.patch_path(path, {"source": new_uri, "rtspTransport": "tcp"})
+            except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
+                table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET rtspUrl = :u",
+                                  ExpressionAttributeValues={":u": item["rtspUrl"]})
+                return jsonify({"error": f"MediaMTX path update failed: {e}"}), 502
+            _refresh_path_cache()
+            wire = _wait_for_new_session(path, ready_before)
+            if not wire:
+                return jsonify({"error": f"switched to the {want_stream} stream, but after "
+                                         f"{CODEC_VERIFY_SEC} s MediaMTX receives no video from it"}), 504
+            # videoCodec etc. with the successor's meanings: the codec now delivered is the new
+            # stream's, which can differ (cam-03: main H.265, sub H.264).
+            out["registry"] = _record_codec(camera_id, wire["codec"],
+                                            cam.encoder_options(new["encoderToken"]), new["encoderToken"])
+            out["stream"], out["wire"] = new["name"], wire
+            target, item = new, {**item, "rtspUrl": new_uri}
+
+        if want_fps is not None:
+            settings = _set_camera_fps(cam, item["rtspUrl"], want_fps)
+            measured = _verify_fps(path, want_fps)
+            out["fps"] = {"asked": want_fps, "measured": measured,
+                          "configured": settings["frameRate"], "govLength": settings["govLength"]}
+            if not _fps_ok(measured, want_fps):
+                out["warning"] = (f"the camera accepted {want_fps} fps, but MediaMTX receives "
+                                  + (f"{measured} fps" if measured else "no countable video"))
+    except onvif_media2.OnvifError as e:
+        return jsonify({"error": str(e), **out}), 502
+
+    fps_now = (out.get("fps") or {}).get("measured") or target["fps"] or 0
+    if item.get("audioCapable") and item.get("audioEnabled") and fps_now >= 24:
+        out["note"] = ("audio at 25 fps is unmeasured (guide §18.3, measured at 15 and 20): "
+                       "count 0x30000005 rejects after the next Start")
+    out["tookSec"] = round(time.monotonic() - t0, 1)
+    return jsonify(out)
 
 
 @app.post("/api/cameras/<camera_id>/pir")
@@ -847,8 +1361,11 @@ def set_ir(camera_id):
 def stream_action(camera_id, action):
     if action not in ("start", "stop"):
         return jsonify({"error": "action must be 'start' or 'stop'"}), 400
-    if "Item" not in cameras_table().get_item(Key={"cameraId": camera_id}):
+    item = cameras_table().get_item(Key={"cameraId": camera_id}).get("Item")
+    if not item:
         return jsonify({"error": "unknown camera"}), 404
+    if action == "start" and camera_control.is_unregistered(item):
+        return jsonify({"error": f"'{camera_id}' is unregistered: Re-register it first"}), 409
     camera_control.set_stream(camera_id, action == "start")
     return jsonify({"cameraId": camera_id, "action": action})
 

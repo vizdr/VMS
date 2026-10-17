@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 from aws_device_creds import get_session
+from camera_control import is_unregistered
 
 # $VMS_HOME if set, otherwise the repo root (this file lives in adapter/).
 VMS_HOME = os.environ.get("VMS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -103,11 +104,11 @@ class ClipGate:
 
 
 def load_cameras():
-    """Registry rows for cameras whose recordingMode is a detection mode."""
+    """Registry rows for cameras whose recordingMode is a detection mode, unless unregistered."""
     items = get_session(REGION).resource("dynamodb").Table("cameras").scan()["Items"]
     return {
         i["cameraId"]: i for i in items
-        if i.get("recordingMode") in MODE_TOPICS and i.get("onvifHost")
+        if i.get("recordingMode") in MODE_TOPICS and i.get("onvifHost") and not is_unregistered(i)
     }
 
 

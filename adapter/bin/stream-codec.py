@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Print the video codec a camera's MediaMTX path is actually receiving, shell-sourceable:
 
-    eval "$(stream-codec.py cam-02)"      # sets VIDEO_CODEC=h264|h265
+    eval "$(stream-codec.py cam-02)"      # sets VIDEO_CODEC=h264|h265, AUDIO_TRACK
+
+AUDIO_TRACK is the audio MediaMTX receives on the same path: pcma or pcmu (G.711 by law, which
+ONVIF can't tell apart and the depayloader must), another codec's name, or "none". The audio
+choice itself stays the registry's (camera-audio.py); this only says what is there to take.
 
 The producer builds its depayloader from this, not from the registry. A camera's codec is
 set on the camera itself (admin GUI -> onvif_media2.py), so what MediaMTX receives is the
@@ -99,6 +103,8 @@ def main() -> int:
         print(f"stream-codec.py: AWS slow -- not waiting to record {codec}; next start retries",
               file=sys.stderr)
     print(f"VIDEO_CODEC={codec}")
+    audio = mediamtx_api.path_audio_track(path)
+    print(f"AUDIO_TRACK={audio['codec'] if audio else 'none'}")
     return 0
 
 

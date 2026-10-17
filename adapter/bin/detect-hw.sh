@@ -54,6 +54,19 @@ alsa_card_for_video() {
   return 1
 }
 
+# The microphone's capture-volume mixer control on ALSA card id $1 ("Webcam"), as a simple
+# control name for `amixer sset` ("Mic"), or nothing. Found by capability, not by name: what a
+# webcam calls its microphone gain is the vendor's choice.
+mic_capture_control() {
+  local name
+  while IFS= read -r name; do
+    if amixer -c "$1" sget "$name" 2>/dev/null | grep -q "Capabilities:.*cvolume"; then
+      echo "$name"; return 0
+    fi
+  done < <(amixer -c "$1" scontrols 2>/dev/null | sed -n "s/^Simple mixer control '\(.*\)',0$/\1/p")
+  return 1
+}
+
 # Mountpoint of the outage-buffer stick, found by the filesystem label README §6 gives it.
 buffer_mount() {
   findmnt -n -o TARGET -S LABEL=vms-buffer 2>/dev/null

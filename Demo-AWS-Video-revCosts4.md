@@ -2282,7 +2282,41 @@ against the registry by ONVIF host and, for a match, offers "Re-register" instea
 "Register" — which updates the MediaMTX path's source and the registry row (credentials,
 stream URI) but deliberately does **not** touch systemd, since `cam-01`/`cam-02` predate
 the `kvs-cam@.service` template and re-running the provisioning script against them would
-start a second, conflicting producer rather than updating the first.
+start a second, conflicting producer rather than updating the first. A path with no
+configuration (MediaMTX restarted without the registry, or the camera was unregistered) is
+added rather than patched, since a patch on a missing path answers 404.
+
+**Unregistering a camera** (2026-10-17) hides it from both GUIs without deleting anything.
+Unregister in the Control column (ONVIF cameras only) does three things in this order:
+1. It sets `unregisteredAt` on the camera's row.
+2. It stops and **disables** the producer, so it neither costs money nor starts at boot
+   against a path that's gone.
+3. It deletes the MediaMTX path, so the Pi stops pulling the camera's video.
+
+The row, the KVS stream, the clips and every setting stay. Re-register restores the camera
+as it was. You get there from Discover: a device at an unregistered camera's address is
+labelled "Unregistered: was cam-03", and its form re-registers that ID. Re-register adds the
+path back, removes the mark, and enables a `kvs-cam@` instance again without starting it.
+A camera that moved to another address isn't matched by host, so the scan result names it,
+and typing its ID into the new device's form re-registers it there.
+
+It is a soft mark, not a deleted row, because the table is shared with the successor:
+rows change field by field, and a new field is invisible to code that doesn't know it
+(`PIR-MQTT-VMS-PI4.md` §4.3). Hiding it is therefore each reader's job, through one helper
+(`camera_control.is_unregistered`):
+- the admin GUI and this project's cloud page, which learns the mark from `GET /pir`,
+  because `/cameras` stays identical to the shared `list-cameras`;
+- the outage supervisor's registry cache, and through it the PIR watcher, the uploader and
+  the admin status poll;
+- the event watcher and `sync_mediamtx_paths.py`;
+- `agent.py`, which refuses everything except Stop. The successor's page still lists the
+  camera, and its Start would otherwise reach this Pi.
+
+Two supervisor details keep the deleted path from coming back during the up-to-60 s before
+its registry refresh drops the camera:
+- disarming a path that has no configuration is now a no-op instead of creating the path;
+- the supervisor never creates a network camera's path, which only registration and the sync
+  do.
 
 **What's still genuinely missing**, and the honest remainder of the gap-analysis row: none
 of this is triggered automatically. If a camera's IP changes (no DHCP reservation), its
@@ -3232,6 +3266,15 @@ the rejects:**
 journalctl -u kvs-cam01.service --since "-60 s" | grep -c 0x30000005   # want 0
 ```
 
+**The mechanism above is corrected (2026-10-17).** The audio buffers reach kvssink with a DTS
+of their own; it is the **video** from `h264parse` that arrives at `dts: none`, and kvssink invents
+`last_dts + 40 ms` per video frame. With audio frames shorter than the video interval, two video
+frames in a row overtake the next audio frame, which is refused. That is why the measured rule
+holds. A second, independent cause hit every audio camera: the SDK merges tracks by PTS rounded
+to 1 ms and then checks DTS at 100 ns. Both are fixed (SDK patch 4, LAUNCH.md A3; a real video
+DTS on cam-01), and with them the rule is no longer what keeps rejects at zero
+(`FoundAndFixed.md` #62).
+
 ### 18.4 The two pipelines as built
 
 Both split the RTP pads by `application/x-rtp,media=...`. Linking the branches bare lets
@@ -3320,12 +3363,19 @@ firmware's ONVIF fields as unreliable generally.
 ### 18.7 Turning it on
 
 Audio is a **per-camera registry flag, off by default**, not a pipeline edit. `cameras`
-carries `audioCapable` (hardware fact, written at registration) and `audioEnabled` (the
-user's choice); both must be true. The control is in both GUIs, and both write the one
-registry row:
+carries `audioCapable` (hardware fact) and `audioEnabled` (the user's choice); both must be
+true. For an ONVIF camera `audioCapable` is **found at discovery**: the admin GUI's scan reads
+the microphone from the camera's profile, shows it on the device card ("Microphone · G.711
+8 kHz"), and Register or Re-register writes it. G.711 only, since that is what the producers
+decode; another codec is shown but not registered as capable. Before 2026-10-17 nothing wrote
+it for an ONVIF camera (`FoundAndFixed.md` #59). The control is in both GUIs, and both write the
+one registry row:
 
 - cloud client — "Record audio with video" per camera panel → `POST /cameras/audio`
 - local admin — "with audio" in the Recording cell → `POST /api/cameras/<id>/audio`
+
+cam-01's **recording level** is the webcam microphone's own gain, the "mic level" slider next to
+it (§22.8).
 
 **The change applies on the camera's next Start, and that is deliberate.** The producer
 reads the flag once at launch (`adapter/bin/camera-audio.py`) because KVS refuses a stream
@@ -3842,11 +3892,11 @@ A passthrough camera's codec is whatever the camera itself is set to, and the pi
 follows it. `cam-02` has been sending H.265 since 2026-09-26; `cam-01` is H.264 and cannot
 be anything else. Nothing on the Pi transcodes video in either direction.
 
-**This repository has the pipeline and the cloud half of the feature, not the switch.**
-Ported from the successor repository (`VideoSafeZone`) on 2026-09-27, together with the
-evidence file `measurements/codec-phase0.md` — commands, numbers and the browser matrix —
-which this section does not repeat. §21.4 lists precisely what was left behind and what
-that costs.
+**This repository has the pipeline, the cloud half of the feature and, since 2026-10-17, the
+switch** (§21.5). The pipeline and cloud half were ported from the successor repository
+(`VideoSafeZone`) on 2026-09-27, together with the evidence file
+`measurements/codec-phase0.md` — commands, numbers and the browser matrix — which this section
+does not repeat. §21.4 lists what is still left behind.
 
 ### 21.1 Where the encoding happens decides what can be offered
 
@@ -3882,7 +3932,7 @@ which video track is actually arriving, printing `VIDEO_CODEC=h264|h265`.
 
 ```text
 h264: rtph264depay ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au
-h265: rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au
+h265: rtph265depay ! h265parse config-interval=-1 ! video/x-h265,stream-format=hvc1,alignment=au ! h265timestamper ! identity single-segment=true
 ```
 
 Three properties of this are load-bearing:
@@ -3897,6 +3947,15 @@ Three properties of this are load-bearing:
   stream would ingest happily and never play back. This is the same ingest-versus-playback
   asymmetry §18.1 describes for audio, and the reason H.265 was verified at
   `GetHLSStreamingSessionURL` and on a decoded frame, never at `PutMedia`.
+- **Every H.265 frame needs a DTS.** kvssink drops any buffer flagged HEADER without a valid
+  DTS, which is every keyframe, and some cameras' H.265 leaves `h265parse` without one.
+  `h265timestamper` computes it. Without it the producer stays `active`, connected and
+  sending nothing (`FoundAndFixed.md` #57).
+- **…and the timestamper's clock has to be undone.** It shifts every timestamp by 1000 h
+  (and its segment with it), which kvssink, reading raw buffer timestamps, passes on. Alone
+  that is harmless; beside an audio track KVS refuses audio frames in bursts. `identity
+  single-segment=true` re-stamps video to running time, the audio's clock (`FoundAndFixed.md`
+  #58).
 - **No source is a deliberate hard failure.** `stream-codec.py` waits up to 30 s and then
   exits 1, so the unit fails and systemd retries — what a dead source has always meant for
   a producer.
@@ -3945,18 +4004,16 @@ indistinguishable from a broken camera.
 
 ### 21.4 What this repository does *not* have
 
-The successor's camera-side half was deliberately not ported, because nothing here needs
-it to stream:
-
 | Not ported | Consequence here |
 |---|---|
-| `adapter/codec_caps.py` | `videoCodecCaps`, `videoCodecDefault`, `videoEncoderToken`, `videoCodecProbe` are never written or refreshed by this repo. The rows carry values written when the successor ran against this shared table; treat them as a snapshot, not live truth |
-| `adapter/onvif_media2.py` | No ONVIF Media2 client. Media1's encoding enum stops at H.264, so an ONVIF camera's H.265 capability cannot be discovered from here at all |
-| Admin-GUI codec switch (`POST /api/cameras/<id>/codec`) | **The codec cannot be changed from this repo.** Change it in the camera's own web UI (or from the successor's admin GUI); the pipeline then follows it on the producer's next start |
+| `adapter/codec_caps.py` (the probe at registration) | `videoCodecDefault` is never written by this repo, and `videoCodecCaps` / `videoEncoderToken` / `videoCodecProbe` only when a camera is switched from the admin GUI (§21.5). Rows the successor wrote carry its values; treat them as a snapshot, not live truth |
 
 The cloud client displays `videoCodec` / `videoCodecActive` and never sets them, which is
 the successor's design too: codec is a property of a camera on the LAN, and there is
-deliberately no cloud route to it.
+deliberately no cloud route to it. A camera registered here and never switched has neither
+`videoCodec` nor `videoCodecDefault`, so `list_cameras.py` falls back to "h264" and the cloud
+page labels an H.265 camera H.264, without its HEVC warning, until the first switch (or no-op
+selection) in the admin GUI writes `videoCodec`.
 
 One wrinkle worth knowing rather than fixing: registering a camera through the local admin
 GUI still creates its KVS stream with `MediaType="video/h264"`
@@ -3965,6 +4022,99 @@ camera's video. If that camera turns out to send H.265, the label is wrong only 
 producer first starts — `stream-codec.py` then corrects it with `UpdateStream` (§21.2).
 `MediaType` is consumer metadata and nothing in this system reads it to make a decision, so
 the window is cosmetic; it is called out here so the mismatch is not mistaken for a bug.
+
+### 21.5 Switching the codec from the admin GUI
+
+Each camera's settings column in the local admin GUI has a **video** selector, H.264 or H.265.
+An option the camera can't deliver is disabled, with the reason as its tooltip: cam-01 offers
+H.264 only, because the Pi encodes it (§21.1). The status line under it shows what MediaMTX
+actually receives, codec and size, and adds the camera's own claim only when the two disagree.
+The selector reads the camera once per table load and is never polled (`FoundAndFixed.md` #55).
+
+`GET /api/cameras/<id>/codec` reads, `POST /api/cameras/<id>/codec {"videoCodec": "h265"}`
+switches. The camera side is `adapter/onvif_media2.py`, raw SOAP with WS-UsernameToken digest,
+because the `onvif` library has Media1 only and Media1 can't name H.265. A switch:
+
+1. finds the Media2 profile whose `GetStreamUri` is the registered `rtspUrl` (path and query
+   compared, credentials ignored) — the encoder behind any other profile never reaches MediaMTX;
+2. checks the target is in that encoder's `GetVideoEncoderConfigurationOptions`;
+3. does nothing to the camera if MediaMTX already receives the target codec;
+4. otherwise sends `SetVideoEncoderConfiguration` with only the encoding changed. Every other
+   field is kept where the new codec allows it and moved to the nearest allowed value where it
+   doesn't (`plan_config`), and **the picture size is taken from the wire**, because a camera's
+   reported configuration can be stale;
+5. calls it done only when MediaMTX receives the new codec (45 s budget), then writes
+   `videoCodec`, `videoCodecCaps`, `videoEncoderToken` and `videoCodecProbe` to the registry,
+   field by field, with the successor's meanings (`PIR-MQTT-VMS-PI4.md` §4.3).
+
+Everything downstream follows on its own: the camera closes RTSP, MediaMTX reconnects with the
+new track, the producer's watchdog restarts it on the matching chain (§21.2), and
+`stream-codec.py` records `videoCodecActive` and the KVS `MediaType`. A failure is reported, not
+rolled back: either codec is a working stream, so a slow camera is not worth a second
+interruption.
+
+Measured on cam-03 (H4-52POX-S), 2026-10-17, both directions twice: the camera accepts in
+0.5–1 s, video is back in MediaMTX after **6.0–6.7 s**, the producer is on the new chain and
+persisting fragments within ~25 s, and LIVE HLS opened afterwards plays the new codec.
+
+Two things this camera taught, worth expecting from others:
+
+- **Its ONVIF read-back was stale.** Media1 and Media2 both reported H264 2880×1620 @25 while
+  it sent H.265 2560×1440 @20 on the same URI, until the first switch through ONVIF made the two
+  agree. Hence the wire as the definition of done, and the size taken from the wire.
+- **It doesn't send what it's told in every detail.** Set to H264 `Profile="Main"`, it encodes
+  H.264 **Baseline** (`avc1.420032`); with a 25 fps limit it still sends ~20 fps. KVS and the
+  decoded frames were fine with both; check a browser before relying on it.
+
+
+### 21.6 Stream and frame rate from the admin GUI
+
+An ONVIF camera usually serves two streams: cam-03's **main** is 2560×1440, its **sub**
+800×448. Each camera's settings column in the admin GUI has two more selectors under
+**video**:
+- **stream** (main/sub): which stream this system pulls;
+- **fps**: 10, 15, 20 or 25, each offered only where that stream's encoder accepts it
+  (`GetVideoEncoderConfigurationOptions`).
+
+Like the codec, both are properties of the camera and stay LAN-side.
+
+`GET /api/cameras/<id>/stream` reads, `POST /api/cameras/<id>/stream {"stream": "sub"}` or
+`{"fps": 10}` switches (`adapter/onvif_media2.py`: `streams`, `fps_config`, `with_credentials`).
+"Main" means the largest picture, not the first profile, because profile names are the
+vendor's.
+
+- **A stream switch** points the MediaMTX path at the other profile's URI, keeping the
+  registered URI's credentials. `rtspUrl` is written first, because a MediaMTX restart rebuilds
+  the path from the registry. MediaMTX reconnecting with video is the proof. The producer
+  follows on its own, as after a codec switch, and the registry's `videoCodec` takes the new
+  stream's codec from the wire.
+- **A frame rate** is set on the encoder of the stream being pulled, with the **keyframe
+  interval kept in seconds**: `GovLength` counts frames, and a KVS fragment is one keyframe
+  interval, so 100 frames at 20 fps (5 s) left alone at 10 fps would double live latency and
+  clip granularity. The proof is counting frames on the wire (ffprobe, 4 s of packet
+  timestamps from MediaMTX). A camera that sends fewer frames than asked is reported, not
+  rolled back.
+
+The registration form offers the same choice and **preselects 10 fps**. A camera already
+registered keeps its rate until it is changed here. Fewer frames also mean less data to KVS,
+and the sub stream far less again. cam-03's main stream at 2 Mbit/s was the reason it cost
+about four times cam-02's sub stream.
+
+Measured on cam-03, 2026-10-17:
+
+| Change | Took | Wire |
+|---|---|---|
+| 20 → 10 fps | 6.9 s | 10.0 fps, keyframe interval 100 → 50 frames |
+| main → sub | 2.1 s | 800×448, **H.265**, though the camera reported its sub encoder as H.264 |
+| sub → main | 4.3 s | 2560×1440 H.265 |
+| 10 → 20 fps | 5.1 s | 20.0 fps, keyframe interval back to 100 |
+
+The sub row is cam-03's stale read-back again (§21.5), and the reason the wire is the
+definition of done here too.
+
+**Audio at 25 fps is unmeasured.** 8 kHz AAC (128 ms frames) satisfies §18.3's rule at all
+four rates, but zero rejects were measured at 15 fps (cam-02) and 20 fps (cam-03) only, so the
+switch adds a note when audio is on at 25.
 
 ---
 
@@ -4259,3 +4409,29 @@ value shown is the last one set, not the one in use"*. That is not a simplificat
 control genuinely reports the last value written rather than the one being used — after
 setting 50 and switching to auto it still read 50 while metering independently (image luma
 222 → 142 across the switch). Showing a live number there would be showing fiction.
+
+### 22.8 Microphone level
+
+The webcam's microphone gain is a **mixer control on its own ALSA card**, not a v4l2 control.
+On the PW310 it is `Mic Capture Volume`: 0–24 steps of 1 dB, −12 to +12 dB, and it shipped at
+the maximum, which made the sound too loud. The admin GUI has a **mic level** slider in cam-01's
+row (`GET`/`POST /api/usb-cameras/mic-gain`, `usb_camera.mic_gain` / `set_mic_gain`).
+
+- **One move does both.** Unlike §22.7's Set now / Apply, the slider sets the gain live *and*
+  saves it. A gain needs no restart and can't break video, so there is nothing to try before
+  keeping it. It is saved as `MIC_GAIN_DB` in `cam01.env`, through `configure-camera.sh` like
+  every other edit: validated, previous file backed up.
+- **Reapplied at every start** by `camera-init.sh`. Unset leaves the device's own setting, as
+  before.
+- **Found by capability.** The card is the one on the same USB device as the camera
+  (`alsa_card_for_video`); the control is its first one with a capture volume
+  (`mic_capture_control`, `detect-hw.sh`), whatever the vendor named it.
+- **It changes what is recorded.** Every live view, recording and clip carries the new level from
+  then on. The players' own volume sliders only change what one listener hears.
+
+Measured 2026-10-17: +12 → 0 dB took the room's mean level from −39.6 to −57.9 dB, and a restart
+of `kvs-camera-init` put a hand-set +12 dB back to the saved 0 dB.
+
+ONVIF cameras have no such control here: core ONVIF has no input gain, so a camera's microphone
+level is set in its own web interface.
+

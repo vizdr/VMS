@@ -85,12 +85,18 @@ advice (guide §15 "Known traps").
 | 48 | Deploying from this repo overwrote the successor's live Lambda and client | process / deployment | 2026-09-27 | fixed |
 | 49 | Automatic rollback could not roll back — the backup list was read too late | admin GUI | 2026-09-27 | fixed |
 | 50 | MediaMTX reported a path `ready` while no media flowed at all | admin GUI / verification | 2026-09-27 | fixed |
-| 51 | The cam-01 publisher hung silently at boot and stayed `active`, dead, for 7.5 hours | media pipeline / systemd | 2026-10-03 | **open** — restart is a workaround |
+| 51 | The cam-01 publisher hung silently at boot and stayed `active`, dead, for 7.5 hours | media pipeline / systemd | 2026-10-03 | **mitigated** — watchdog restarts it; cause unknown |
 | 52 | The FRITZ!Box drops the Pi's Wi-Fi after bursts of group rekeying, costing every AWS client minutes | network / Wi-Fi | 2026-10-03 | **open** — environmental |
 | 53 | cam-02's H.265 detection clips are 9 s files listed as 45 s | ONVIF clips / successor's path | 2026-10-03 | **open** — the successor's code |
 | 54 | The AWS block missed the IoT endpoint's new address, so test outages "recovered" after 7 s | test tooling | 2026-10-03 | fixed (`awsblock.sh`) |
 | 55 | A DNS failure froze the whole admin page: every camera-status poll waited on AWS | admin GUI | 2026-10-03 | fixed |
 | 56 | The Pi 4B's USB 3 stick deafened the Pico's 2.4 GHz Wi‑Fi next to it | hardware / RF | 2026-10-04 | **mitigated** — distance; USB 2 port is the fix |
+| 57 | kvssink dropped every keyframe of an H.265 camera: no DTS, so cam-03 never reached the cloud | media pipeline | 2026-10-17 | fixed (`h265timestamper`) |
+| 58 | H.265 with audio: KVS refused audio frames in bursts, because video ran on a clock 1000 h ahead | media pipeline | 2026-10-17 | **diagnosis wrong**, see #62 |
+| 59 | A GUI-registered camera could never record audio: no `audioCapable`, no audio branch | registration / producer / docs | 2026-10-17 | fixed |
+| 60 | Start pressed in the cloud page during an MQTT drop was lost, and the page only said "not available" | control plane / cloud page | 2026-10-17 | **open** — streams restarted locally |
+| 61 | cam-01 with audio on: the stream died, because Start never restarted the publisher that captures the microphone | producer / publisher | 2026-10-17 | fixed (`stream-cam01.sh`) |
+| 62 | Audio cameras lost audio frames to KVS: a millisecond tie in the SDK's track merge, and invented video DTS on cam-01 | kvssink / producers | 2026-10-17 | fixed (SDK patch 4, `h264timestamper`) |
 
 ### What they have in common
 
@@ -1234,7 +1240,8 @@ declared fine.
 ### #51 — The cam-01 publisher hung silently at boot and stayed `active`, dead, for 7.5 hours
 
 **Found:** 2026-10-03, starting PIR-MQTT-VMS-PI4.md Phase 5's live test. **Referenced from:**
-CLAUDE.md (the `publish-cam01.sh` gap), PIR-MQTT-VMS-PI4.md Phase 5. **Status: open.**
+CLAUDE.md (the `publish-cam01.sh` gap), PIR-MQTT-VMS-PI4.md Phase 5. **Status: mitigated**
+2026-10-17 by a run-time watchdog in `publish-cam01.sh`; the cause is still unknown.
 
 Before arming the PIR ring, MediaMTX's `cam01` path read `ready: true` since 08:03:23 with
 `bytesReceived` frozen at **83,257** -- about a second of video, at 15:35. The publisher's
@@ -1264,8 +1271,26 @@ receives. With a hung publisher the supervisor arms happily and records nothing.
 planned watcher's ring check (PIR-MQTT-VMS-PI4.md §3.3: newest segment older than two
 segment durations means "ring not recording") will catch it for PIR, but it only reports.
 
-**Still to do:** a run-time watchdog for the publisher that applies #50's rule -- restart it
-when `bytesReceived` stops advancing -- and, if the stall recurs at boot, find its cause.
+**Recurred 2026-10-17, not at boot:** the publisher had run normally for 64 minutes when its
+RTP `octets-sent` stopped at 11:14:33; MediaMTX's `bytesReceived` stayed frozen and the admin
+GUI's cam-01 preview showed nothing. Again no warning, no error, no EOS, nothing in `dmesg`, and
+nothing else on the system at that second (no admin-GUI action, no USB event). The hung
+process's threads: `v4l2src0:src` in `poll` on `/dev/video0`, `v4l2jpegdec0:src` and one
+`v4l2h264enc0:src` thread in `futex` waits, the rest idle. The xHCI interrupt rate was the same
+hung (425/s) as after the restart (428/s), so the webcam's isochronous stream most likely never
+stopped and the stall is inside the pipeline (the V4L2 M2M chain), not in the camera.
+
+**Mitigation:** `publish_run` in `adapter/bin/publish-cam01.sh` applies #50's rule at run time.
+It polls MediaMTX's `bytesReceived` for `cam01` every 10 s and SIGKILLs gst-launch when the
+counter has not moved for 30 s; any end of the pipeline, a clean EOS included, exits 1 so
+`Restart=on-failure` brings it back (which also closes CLAUDE.md's "still uses `exec`" gap). An
+unreachable MediaMTX API never kills. Verified by freezing gst-launch with SIGSTOP: killed 46 s
+later (status 137), video flowing again 7 s after that; a normal Stop still ends `inactive`,
+result `success`.
+
+**Still open:** the cause. A recurrence now costs ~40 s of cam-01 instead of hours; the journal
+line `MediaMTX bytesReceived stuck at ... -- the pipeline hung` marks each one, so their
+frequency is now countable.
 
 ### #52 — The FRITZ!Box drops the Pi's Wi-Fi after bursts of group rekeying, costing every AWS client minutes
 
@@ -1304,6 +1329,16 @@ finding on this network.
 
 Count further disconnects first (`journalctl | grep CTRL-EVENT-DISCONNECTED`) to see whether
 they follow the rekey interval.
+
+**Counted, 2026-10-17: they do, every time.** Four disconnects, **11:21:17, 14:21:19, 18:31:21,
+19:21:21**, each the same sequence: the normal rekey every 10 min, then at one of them four rekeys
+one second apart, then `CTRL-EVENT-DISCONNECTED reason=2` (68 rekeys that day). The Pi logs each
+retry as completed, so the access point is evidently not getting the Pi's replies to the group-key
+handshake: an uplink problem, consistent with the signal (5 GHz, −68/−69 dBm) and 25
+`brcmfmac` SDIO read failures that day (`brcmf_sdio_rxfail`). Wi-Fi power saving is already off.
+Effects that day: a cloud Start lost during an MQTT drop (#60), and the admin page unreachable
+from the LAN around 19:21 while the app itself kept answering in under a second. The options above
+stand, Ethernet first.
 
 
 ### #53 — cam-02's H.265 detection clips are 9 s files listed as 45 s
@@ -1402,3 +1437,172 @@ device to a USB 2 port or onto a shielded extension cable. A USB 2 port is enoug
 now: since `PIR-MQTT-VMS-PI4.md` Phase 12 it receives only finished clips and outage captures
 (~4 MB per 30 s at most), far under USB 2's ~35 MB/s. Phase 12 also cut the stick's traffic
 itself, from a continuous ring to occasional clips.
+
+### #57 — kvssink dropped every keyframe of an H.265 camera: no DTS, so cam-03 never reached the cloud
+
+**Found:** 2026-10-17, after cam-03 (an H4-52POX-S "AI IPC" camera, ONVIF, H.265 2560×1440 @20)
+was registered through the admin GUI. **Referenced from:** `adapter/bin/producer-lib.sh`
+(`video_depay_chain`), guide §21.2, CLAUDE.md. **Status: fixed.**
+
+The local preview played, the cloud page didn't. `kvs-cam@cam03` was `active (running)` and had
+been for hours; its log was a loop of
+
+```
+curl perform failed for url .../putMedia with result Timeout was reached: Operation too slow.
+  Less than 30 bytes/sec transferred the last 30 seconds
+... has exited without triggering end-of-stream. Service call result: 599
+```
+
+with **`Dropping frame with flag: 17920 for cam-03`** in between, 107 times. 17920 is `0x4600`,
+HEADER | MARKER | TAG_MEMORY: exactly the flags of the camera's keyframes, which carry the
+in-band VPS/SPS/PPS. A test pipeline ending in `identity silent=false` showed every buffer out
+of `rtph265depay ! h265parse` with **`dts: none`**. kvssink drops a buffer that is flagged
+HEADER and lacks a valid PTS *or DTS* (`gstkvssink.cpp`, the `isDroppable` expression). So every
+keyframe was discarded, no fragment could ever start, nothing was sent, and PutMedia starved
+into 599s while the unit looked healthy. #46's watchdog didn't fire, correctly: it watches for
+the *source* closing, and the source was fine.
+
+cam-02's H.265 stream passed the same chain in `measurements/codec-phase0.md` §3 (59/60
+fragments persisted), so whether h265parse produces a DTS depends on the camera's bitstream.
+cam-03 has no B-frames (`has_b_frames=0`); its stream simply arrives without one.
+
+**Fix:** `h265timestamper` (GStreamer's codectimestamper plugin, present in 1.26) at the end of
+the H.265 chain. It computes DTS from PTS and the SPS reorder depth, so it stays right for a
+camera with B-frames. It also offsets timestamps by 1000 h; harmless here, because kvssink
+rebases PTS in realtime mode and the SDK only requires DTS to be monotonic (`MkvGenerator.c`,
+`dts >= lastClusterDts`). Harmless for video alone; not beside an audio track (#58). Verified: fragments `PERSISTED` every 6 s (the camera's GOP), live HLS
+`CODECS="hvc1.1.6.L153.A0"` at 2560×1440, a decoded frame from the cloud clean, and again after
+switching the camera to H.264 and back. The H.264 chain is unchanged.
+
+**The rule:** a producer that is `active` and connected to KVS but sends nothing is dropping
+frames before they reach the SDK. Look for `Dropping frame with flag` and decode the flags
+before suspecting the network.
+
+### #58 — H.265 with audio: KVS refused audio frames in bursts, because video ran on a clock 1000 h ahead
+
+**Found:** 2026-10-17, the first time a camera streamed H.265 and audio together (cam-03, right
+after #59 gave GUI-registered cameras an audio branch). **Referenced from:**
+`adapter/bin/producer-lib.sh` (`video_depay_chain`), guide §18.3. **Status: fixed.**
+
+Audio reached KVS and live HLS carried it, but the producer logged **14 rejects in 87 s**
+(`0x30000005`, `STATUS_CONTENT_VIEW_INVALID_TIMESTAMP`) where guide §18.3 asks for zero. They
+came in clusters every ~14.4 s, two or three per cluster, 640–680 ms apart: audio frames, by
+their spacing, each carrying its own DTS equal to its PTS. A fakesink pipeline printing both
+tracks' timestamps before kvssink showed why: **video at `1000:00:03.0`, audio at `0:00:03.0`.**
+`h265timestamper` (#57's fix) shifts every buffer by 1000 h and its segment by the same, so
+running time is right; kvssink reads raw buffer timestamps, and the SDK orders a stream's frames
+across tracks by DTS (`Stream.c`, `clusterDts + frameDts`). Two clocks 1000 h apart can't be
+ordered. #57 called the offset harmless, correctly for video alone.
+
+**Fix:** `identity single-segment=true` after the timestamper, which re-stamps buffers to
+running time: video lands on the audio's clock, as H.264 always was. Measured on cam-03 at
+20 fps with audio: **0 rejects** in 75 s, live HLS with HEVC 2560×1440 and AAC 8 kHz, a clean
+frame from KVS; and video-only afterwards, 0 rejects and fragments persisting. For a camera with
+B-frames the first frames' DTS falls below zero in running time, so the first keyframe may be
+dropped and streaming starts one GOP later.
+
+**Correction, 2026-10-17 (evening): the diagnosis above is wrong.** The same reject pattern came
+back with the fix in place, 96 rejects in four minutes; the 0 in 75 s was a lucky window. The
+real causes are in #62. The `identity` stays: matching clocks are still right, and harmless.
+
+**The rule:** an element that offsets timestamps through the segment is invisible to everything
+that uses running time, and kvssink doesn't. Print the buffers' own `dts`/`pts` per track right
+before kvssink (`identity silent=false`) whenever a track is added.
+
+### #59 — A GUI-registered camera could never record audio: no `audioCapable`, no audio branch
+
+**Found:** 2026-10-17, comparing cam-03 with cam-02: cam-03 sends G.711, yet both GUIs greyed out
+its audio checkbox. **Referenced from:** guide §18, `adapter/onvif_discovery.py`,
+`adapter/bin/stream-channel.sh`. **Status: fixed.**
+
+Three gaps, each enough on its own:
+- **Registration never wrote `audioCapable`.** Guide §18 said the flag is "written at
+  registration"; for an ONVIF camera nothing wrote it. cam-02's had been set by hand, so the
+  gap never showed.
+- **The template producer had no audio branch.** `stream-channel.sh`, which every GUI-registered
+  camera runs, linked audio to a fakesink unconditionally. Setting the flag by hand would have
+  done nothing.
+- **cam-03 is mu-law, cam-02 A-law.** cam-02's chain hardcodes `rtppcmadepay ! alawdec`; ONVIF
+  names both laws "G711", so copying that chain would have failed to link on cam-03. MediaMTX
+  reports the law (`tracks2[].codecProps.muLaw`).
+
+**Fix:** discovery reads the microphone from the camera's profile (`onvif_discovery._audio`),
+the card shows it, and registration writes `audioCapable` (G.711 only: a producer waiting on an
+audio pad it can't decode stalls the video, guide §18). `stream-codec.py` also prints the audio
+track MediaMTX receives, and `stream-channel.sh` gained cam-02's G.711 → AAC 8 kHz branch with
+the depayloader chosen by law. Verified on cam-03 with #58's fix: audio in KVS live HLS.
+
+### #60 — Start pressed in the cloud page during an MQTT drop was lost, and the page only said "not available"
+
+**Found:** 2026-10-17, "the stream for both cam-01 and cam-03 is not available". **Referenced
+from:** —. **Status: open.** Both producers were started locally (admin API) and verified in KVS.
+
+Both producers were stopped (cam-01 since a cloud-page Stop at 12:43, cam-03 since a test at
+14:15). Start was pressed in the cloud page at 14:34:17, 14:35:17 and 14:37:20: `pir-publish-cmd`
+ran each time and the page polled `GET /hls` for minutes. No start reached the Pi. `kvs-agent`'s
+MQTT link was **down from 14:34:03 to 14:41:48** (`AWS_ERROR_MQTT_TIMEOUT`), the fourth drop
+since 14:08. The Wi-Fi underneath was struggling: 5 GHz at −68 dBm, `brcmfmac` SDIO read failures
+at 14:17 and 14:33:16, a full disassociation at 14:21 (#52's environment).
+
+Why the queue didn't save it is **not established.** The Lambda publishes QoS 1 and the agent
+subscribes QoS 1 with `clean_session=False`, so IoT Core should have held the 14:35 and 14:37
+Starts for the persistent session and delivered them at 14:41:48; nothing arrived. Candidates:
+the session not being resumed, or the successor's Pi holding client ID `adapter-01` meanwhile
+and receiving them (`PIR-MQTT-VMS-PI4.md` §4.4). Fleet indexing, which would show connection
+history, is off in this account.
+
+**The rule so far:** a cloud Start is fire-and-forget. The page can't tell "the Pi is offline
+from AWS" from "the stream is starting". When live view stays unavailable, check `kvs-agent`'s
+journal for INTERRUPTED before anything else.
+
+### #61 — cam-01 with audio on: the stream died, because Start never restarted the publisher that captures the microphone
+
+**Found:** 2026-10-17: "the stream becomes unavailable if I record with sound on cam-01, and
+recovers with sound off." **Referenced from:** `adapter/bin/stream-cam01.sh`. **Status: fixed.**
+
+cam-01's audio crosses two processes. `publish-cam01.sh` (user unit `kvs-camera-publish`,
+long-running) captures the microphone into MediaMTX, but reads `audioEnabled` only when *it*
+starts. `stream-cam01.sh` (system unit `kvs-cam01`, restarted by Start) reads it fresh. The
+publisher had started at 11:41 with audio off. Each Start with audio on ran a producer that
+waited for an `LPCM` track MediaMTX didn't have (`tracks: ['H264']`). kvssink collects across its
+pads, so the video stalled with it: guide §18.7's warning, reached by a different route.
+
+**Fix:** at Start, the producer compares the flag with what MediaMTX carries for `cam01` and
+restarts the publisher when they disagree, both ways: off must stop the capture, which the outage
+and PIR rings would otherwise record. It runs as the same user (`User=vladimir`, linger on), so
+`systemctl --user` reaches the publisher's manager. If the microphone track still doesn't appear,
+the producer goes video-only instead of stalling. Verified: "restarting kvs-camera-publish to
+match", then `tracks: ['LPCM', 'H264']`, and KVS live HLS with AAC 16 kHz at −39 dB, not silence.
+
+### #62 — Audio cameras lost audio frames to KVS: a millisecond tie in the SDK's track merge, and invented video DTS on cam-01
+
+**Found:** 2026-10-17, while checking #61 and #59. **Referenced from:** LAUNCH.md A3 (patch 4),
+`adapter/bin/stream-cam01.sh`, guide §18.3. **Status: fixed.**
+
+With audio on, both cameras logged `0x30000005` rejects: cam-03 in clusters every ~14 s (96 in
+4 min), cam-01 in runs of 2–3 (57 in 160 s). Each reject is an audio frame lost, a 64–128 ms
+dropout; video was never hit. Two causes, both in how kvssink and the SDK handle timestamps:
+
+1. **The track merge rounds to milliseconds; the queue after it doesn't.** kvssink sets
+   `FRAME_ORDERING_MODE_MULTI_TRACK_AV_COMPARE_PTS_ONE_MS_COMPENSATE_EOFR`. The coordinator
+   compares PTS divided by the timecode scale (1 ms) and lets the first track go first on a tie
+   (`FrameOrderCoordinator.c`); the content view then demands non-decreasing DTS at 100 ns
+   (`ContentView.c:465`). Two frames less than 1 ms apart in the wrong order: the second is
+   refused. On cam-03 audio (128 ms) and video (on a 40 ms grid) coincide every 640 ms, and the
+   camera's audio clock runs ~0.06 % off its video clock, so they fall within 1 ms of each other
+   for a couple of seconds every ~14 s. That matches the rejects 640 ms apart, in clusters 14.2 s
+   apart. **Fix: SDK patch 4** in `gstkvssink.cpp`: DTS rounded down to the timecode scale and
+   PTS − DTS kept a whole number of units, so frames are an exact tie or at least 1 ms apart.
+   cam-03: 0 rejects since.
+2. **cam-01's video had no DTS.** `h264parse` leaves the Pi encoder's frames at `dts: none`, so
+   kvssink invents `last_dts + 40 ms` per video frame (`gstkvssink.cpp`). Video frames are 66.7 ms
+   apart and audio frames 64 ms; two video frames in a row put the second invented DTS 80 ms
+   after the last audio frame, past the next one, which is refused. **Fix:** `h264timestamper !
+   identity single-segment=true` on cam-01's video in its audio branch. 0 rejects in 160 s, 77
+   fragments, live HLS with audio.
+
+This also settles guide §18.3's mechanism: the invented DTS was the **video's**, not the audio's.
+Its measured rule held because, with H.264 from `h264parse`, video DTS is invented.
+
+**The rule:** before blaming rates or clocks, print each track's `dts`/`pts` right before kvssink.
+`dts: none` anywhere means kvssink is inventing timestamps.
