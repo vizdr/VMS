@@ -433,6 +433,10 @@ New code that reads the table joins that list. The cloud page learns the mark fr
 `GET /pir`, because `/cameras` stays identical to the shared `list-cameras`. The successor's
 page still shows the camera (guide §16.2, `PIR-MQTT-VMS-PI4.md` §4.2).
 
+**A camera's display name is `displayName`** ("Kitchen"), edited only in the admin GUI and shown
+beside the ID in both GUIs (guide §16.2.2). It is display only: never key, look up or name
+anything by it. Both pages render it through `esc()`, so any new place that shows a name must too.
+
 Credential storage in that table is phased: currently a plain `onvifPassword` attribute
 (Phase 1); a planned Phase 2 moves it to an SSM Parameter Store `SecureString` referenced
 by a `credentialRef`, decrypted only via the adapter's own device identity. Not yet built.

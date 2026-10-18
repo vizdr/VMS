@@ -47,6 +47,12 @@ from pir_watcher import HEARTBEAT_FILE as PIR_HEARTBEAT
 app = Flask(__name__, static_folder="static")
 
 CAMERA_ID_RE = re.compile(r"^cam-\d{2}$")
+# A camera's display name ("Kitchen", "Hall-1", "Küche"): what people read in both GUIs. The
+# cameraId stays the key everywhere else (KVS, S3, DynamoDB, MediaMTX, units), so a name is
+# only ever displayed (guide §16.2.2). Letters and digits in any script, space, - _ . -- nothing
+# that HTML or a shell would read as syntax: both pages render it, and this page has no login.
+DISPLAY_NAME_RE = re.compile(r"^[\w .-]{1,32}$")
+DISPLAY_NAME_MAX = 32
 MEDIAMTX_API = "http://127.0.0.1:9997"
 REGION = config.AWS_REGION
 
@@ -407,6 +413,9 @@ def register_camera():
     # value alone. audioEnabled is never set here: recording audio stays the user's choice.
     audio_capable = body.get("audioCapable")
     fps = body.get("fps")             # the form preselects onvif_media2.DEFAULT_FPS
+    # Optional display name (guide §16.2.2). Absent: a re-registration keeps the stored one;
+    # "" clears it. Checked before anything is changed anywhere.
+    name_given = "displayName" in body
 
     if not CAMERA_ID_RE.match(camera_id):
         return jsonify({"error": "cameraId must look like 'cam-03'"}), 400
@@ -420,6 +429,11 @@ def register_camera():
     table = cameras_table()
     existing = table.get_item(Key={"cameraId": camera_id}).get("Item")
     mediamtx_path = camera_control.mediamtx_path_name(camera_id)
+    display_name = None
+    if name_given:
+        display_name, err = _display_name(body.get("displayName"), camera_id, _all_names(table))
+        if err:
+            return jsonify({"error": err}), 400
 
     if existing:
         # Re-register: an already-discovered device commonly IS an already-registered
@@ -472,8 +486,14 @@ def register_camera():
         if audio_capable is not None:
             sets += ", audioCapable = :ac"
             values[":ac"] = audio_capable
+        removes = "unregisteredAt"
+        if name_given and display_name:
+            sets += ", displayName = :dn"
+            values[":dn"] = display_name
+        elif name_given:
+            removes += ", displayName"
         table.update_item(Key={"cameraId": camera_id},
-                          UpdateExpression=f"SET {sets} REMOVE unregisteredAt",
+                          UpdateExpression=f"SET {sets} REMOVE {removes}",
                           ExpressionAttributeValues=values)
         if reactivate and camera_control.unit_name(camera_id).startswith("kvs-cam@"):
             camera_control.set_boot_start(camera_id, True)
@@ -544,6 +564,8 @@ def register_camera():
         "audioCapable": bool(audio_capable),
         "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if display_name:
+        row["displayName"] = display_name
     table.put_item(Item=row)
 
     detection = _registration_detection(camera_id, host, port, user, password)
@@ -615,6 +637,70 @@ def _refresh_path_cache():
         sync_mediamtx_paths.load_cameras()
     except Exception as e:  # noqa: BLE001
         print(f"path cache not refreshed: {type(e).__name__}: {e}", flush=True)
+
+
+def _all_names(table):
+    """{cameraId: displayName} of every row, unregistered ones included: they come back with
+    Re-register, and must not come back sharing a name."""
+    names, kw = {}, {"ProjectionExpression": "cameraId, displayName"}
+    while True:
+        page = table.scan(**kw)
+        names.update({i["cameraId"]: i.get("displayName") for i in page["Items"]})
+        if "LastEvaluatedKey" not in page:
+            return names
+        kw["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+def _display_name(raw, camera_id, names):
+    """(name or None, error or None). Empty means "no name": the GUIs then show the ID."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, "displayName must be text"
+    name = " ".join(raw.split())                  # trimmed, inner whitespace collapsed
+    if not name:
+        return None, None
+    if len(name) > DISPLAY_NAME_MAX or not DISPLAY_NAME_RE.match(name):
+        return None, (f"a name has 1-{DISPLAY_NAME_MAX} characters: letters, digits, "
+                      f"space, '-', '_' and '.'")
+    if not re.search(r"[^\W_]", name):
+        return None, "a name needs at least one letter or digit"
+    if re.fullmatch(r"(?i)cam-?\d+", name):
+        return None, "a name can't look like a camera ID"
+    taken = next((cid for cid, n in names.items()
+                  if cid != camera_id and n and n.casefold() == name.casefold()), None)
+    if taken:
+        return None, f"'{name}' is already the name of {taken}"
+    return name, None
+
+
+@app.post("/api/cameras/<camera_id>/name")
+def set_display_name(camera_id):
+    """Set or clear a camera's display name: {"displayName": "Kitchen"}, or "" to clear. Any
+    camera, cam-01 included, unregistered ones too. Writes only that field (and updatedAt),
+    and nothing when nothing changes. Edited here only; the cloud page shows it (GET /pir)."""
+    if not CAMERA_ID_RE.match(camera_id):
+        return jsonify({"error": "bad camera id"}), 400
+    raw = (request.get_json(force=True, silent=True) or {}).get("displayName", "")
+    table = cameras_table()
+    names = _all_names(table)
+    if camera_id not in names:
+        return jsonify({"error": "unknown camera"}), 404
+    name, err = _display_name(raw, camera_id, names)
+    if err:
+        return jsonify({"error": err}), 400
+    if name == names[camera_id]:
+        return jsonify({"cameraId": camera_id, "displayName": name, "unchanged": True})
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if name:
+        table.update_item(Key={"cameraId": camera_id},
+                          UpdateExpression="SET displayName = :n, updatedAt = :t",
+                          ExpressionAttributeValues={":n": name, ":t": now})
+    else:
+        table.update_item(Key={"cameraId": camera_id},
+                          UpdateExpression="SET updatedAt = :t REMOVE displayName",
+                          ExpressionAttributeValues={":t": now})
+    return jsonify({"cameraId": camera_id, "displayName": name})
 
 
 @app.post("/api/cameras/<camera_id>/unregister")

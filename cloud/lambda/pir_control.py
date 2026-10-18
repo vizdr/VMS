@@ -94,6 +94,9 @@ def get_pir(camera):
         # trigger test run from the admin GUI: {mode: {result, at, events}}.
         "webUrl": item.get("webUrl"),
         "detectionTests": item.get("detectionTests"),
+        # The name people gave the camera in the admin GUI ("Kitchen"), shown beside the ID;
+        # None when it has none. Edited only there (guide §16.2.2).
+        "displayName": item.get("displayName"),
     })
 
 

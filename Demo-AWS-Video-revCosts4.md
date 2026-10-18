@@ -2367,6 +2367,33 @@ adapter's own device identity) as a planned Phase 2 that hasn't been built yet �
 schema and IAM shape were chosen so that swap is a small, localized change rather than a
 redesign when it happens.
 
+#### 16.2.2 Camera names
+
+A camera can have a **display name** ("Kitchen", "Hall-1", "Küche"), shown beside its ID. The
+ID itself can't be renamed: `cam-03` is the KVS stream name (KVS has no rename, so a new stream
+would lose the archive), the key in `cameras`, `clips` and `pir-local`, the S3 prefix of every
+clip, the IAM wildcard `stream/cam-*/*`, the MediaMTX path and the unit names, and it is shared
+with the successor. So the name is display only, in a new registry field `displayName`, and the
+ID stays everywhere a machine or a log reads it.
+
+- **Edited in the admin GUI only:** the optional *Name* field in the registration form, and the
+  name field in each camera's row (`POST /api/cameras/<id>/name {"displayName": "Kitchen"}`, ""
+  clears it). Any camera, cam-01 included.
+- **Shown in both GUIs**, in ID order: the admin table, Discover's "Registered as" and
+  "Unregistered: was", the registration button, the analytics selector, the PIR panel and clip
+  rows, and dialogs, as "Kitchen (cam-03)". The cloud page shows it in each camera's heading,
+  from `GET /pir`.
+- **Rules**, checked on the server: 1–32 characters after trimming (inner spaces collapsed);
+  letters and digits in any script, space, `-`, `_`, `.`; at least one letter or digit; nothing
+  that looks like a camera ID; unique ignoring case across every row, unregistered ones included,
+  since Re-register brings them back.
+- **Escaped in both pages.** It is the one free text a person types that both pages render, and
+  the admin GUI has no login. A name with markup that reached the registry some other way shows as
+  text: verified by writing `<img src=x onerror=…>` into a row directly; both pages showed it
+  literally and ran nothing.
+
+It is a new field, so the successor's code doesn't see it (`PIR-MQTT-VMS-PI4.md` §4.2).
+
 ### 16.3 The four worth actually doing
 
 **(a) Multi-channel — done.** Two real channels running concurrently, not synthetic

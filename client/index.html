@@ -52,6 +52,7 @@
 
   .camera-panel { margin-bottom: 3rem; padding-bottom: 1rem; border-bottom: 2px solid #ddd; }
   .camera-panel h2 { margin-bottom: 0.25rem; }
+  .camera-panel h2 .cam-id { color: #888; font-size: 0.9rem; font-weight: normal; margin-left: 0.4rem; }
   .camera-subtitle { color: #888; font-size: 0.85rem; margin-top: 0; margin-bottom: 1rem; }
 
   .clips-section { margin-top: 1.5rem; }
@@ -422,12 +423,22 @@ async function checkForNewClips(camera) {
   } catch (e) { /* transient; the next tick retries */ }
 }
 
+// A camera's display name, given in the admin GUI (guide §16.2.2) and read from GET /pir: the one
+// free text a person types that this page shows, so it is escaped. The server allows only
+// letters, digits, space, - _ . anyway.
+const esc = v => String(v ?? "").replace(/[&<>"']/g,
+  ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+function camHeading(id) {
+  const name = (pirFirst[id] || {}).displayName;
+  return name ? `${esc(name)}<span class="cam-id">${esc(id)}</span>` : esc(id);
+}
+
 function renderCameraPanel(cam) {
   const div = document.createElement("div");
   div.className = "camera-panel";
   const modeLabel = cam.mode === "passthrough" ? "ONVIF, passthrough" : "USB, transcoded";
   div.innerHTML = `
-    <h2>${cam.id}</h2>
+    <h2>${camHeading(cam.id)}</h2>
     <p class="camera-subtitle">${modeLabel} · <span title="Set on the camera, in the local admin GUI">${codecLabel(cam)}</span>${cam.hasIrControl ? " · IR control" : ""}</p>
     ${cam.videoCodec === "h265" && !hevcSupport().live
       ? `<p class="codec-warn">This browser can't play H.265 video — live view and clips of this camera won't show here. See the note at the top of the page.</p>`

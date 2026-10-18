@@ -616,6 +616,18 @@ records next time it runs. `list-cameras` must never return `rtspUrl` or `liveRt
 
 ---
 
+### Optional: camera names (VMS guide §16.2.2)
+
+VMS added display names on 2026-10-18: `displayName` on the camera's row, edited in the admin GUI
+only, shown beside the ID in both GUIs, cameras kept in ID order. The registry is shared, so a name
+set on either card shows up in the other's pages once both read the field. Port from VMS
+`adapter/onvif-admin/app.py` (`_display_name`, `_all_names`, `POST /api/cameras/<id>/name`, the
+registration field) and the `esc()` / `camLabel()` / `camHtml()` helpers in both pages. The
+successor's cloud page reads cameras from its own `list-cameras`, so add `displayName` there
+(additive). **Escape it everywhere it is rendered**: it is free text, and the admin GUI has no login.
+Verify as VMS did: a hostile name written straight into the registry must render as text in both
+pages.
+
 ## 8. Out of scope (deliberately)
 
 - **New cam-01 features (R2):** VMS guide §22.3–§22.8, i.e. USB scan (`usb_camera.py`,

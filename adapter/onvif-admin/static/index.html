@@ -12,6 +12,8 @@
   table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
   th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; font-size: 0.9rem; }
   .status { color: #666; font-size: 0.85rem; margin-top: 0.4rem; }
+  .cam-id { color: #888; font-size: 0.75rem; font-weight: normal; }
+  .name-input { width: 7.5em; font-size: 0.75rem; padding: 0.1rem 0.25rem; margin-top: 0.25rem; }
   /* inline-flex + align-items:center keeps the box on the text's own line. A bare
      <label><input> ... </label> lets the box drift onto its own row in a table cell. */
   .cb { display: inline-flex; align-items: center; gap: 0.35rem;
@@ -193,6 +195,18 @@ let registeredUriByHost = {};
 // The last scan's devices, for the registration forms' stream and frame-rate selectors.
 let discovered = [];
 
+// Display names (guide §16.2.2), cameraId -> name, from /api/cameras. A name is the one free text
+// a person types that both pages show, and this page has no login: everything that can carry one
+// goes through esc(). The server allows only letters, digits, space, - _ . anyway.
+let cameraNames = {};
+const esc = v => String(v ?? "").replace(/[&<>"']/g,
+  ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+// Plain text (textContent, confirm()): "Kitchen (cam-03)", or the ID when there is no name.
+const camLabel = id => cameraNames[id] ? `${cameraNames[id]} (${id})` : id;
+// HTML: the name in bold, the ID beside it in small print.
+const camHtml = id => cameraNames[id]
+  ? `<b>${esc(cameraNames[id])}</b> <span class="cam-id">${esc(id)}</span>` : `<b>${esc(id)}</b>`;
+
 const FPS_CHOICES = [10, 15, 20, 25];
 const DEFAULT_FPS = 10;       // what a newly registered camera gets unless changed in the form
 
@@ -251,7 +265,7 @@ async function scan() {
       const p = document.createElement("p");
       p.className = "status";
       p.textContent = "Unregistered, not found at their last address: "
-        + missing.map(([host, id]) => `${id} (${host})`).join(", ")
+        + missing.map(([host, id]) => `${camLabel(id)} at ${host}`).join(", ")
         + ". If one of them is a device above, enter its ID in that device's form to re-register it.";
       devicesEl.appendChild(p);
     }
@@ -286,8 +300,8 @@ function renderDevice(d, i) {
     <div><strong>${details ? `${details.manufacturer} ${details.model}` : d.xaddr || "unknown"}</strong>
       ${details && details.has_ir_control ? '<span class="badge">IR control</span>' : ""}
       ${audioBadge}
-      ${registeredByHost[host] ? `<span class="badge badge-registered">Registered as ${existingId}</span>` : ""}
-      ${hiddenId ? `<span class="badge badge-unregistered">Unregistered: was ${hiddenId}</span>` : ""}
+      ${registeredByHost[host] ? `<span class="badge badge-registered">Registered as ${esc(camLabel(existingId))}</span>` : ""}
+      ${hiddenId ? `<span class="badge badge-unregistered">Unregistered: was ${esc(camLabel(hiddenId))}</span>` : ""}
     </div>
     <div class="meta">${d.xaddr || ""}</div>
     ${details ? `<div class="meta">Profile: ${details.profile} · Stream: ${details.stream_uri}</div>` : ""}
@@ -296,10 +310,12 @@ function renderDevice(d, i) {
     <div class="meta">${triggerNote(details.webUrl)} After registering, check them with "Test triggers".</div>` : ""}
     ${details && details.streamsError ? `<div class="meta">Streams unknown (no ONVIF Media2): ${details.streamsError}</div>` : ""}
     ${d.enrichError ? `<div class="error meta">${d.enrichError}</div>` : ""}
-    <p><button onclick="toggleForm(${i})">${existingId ? `Re-register ${existingId}` : "Register this camera"}</button>
+    <p><button onclick="toggleForm(${i})">${existingId ? `Re-register ${esc(camLabel(existingId))}` : "Register this camera"}</button>
        <button onclick="dismissDevice(this)" title="Hide this scan result. Nothing is changed; Scan LAN shows it again.">Cancel</button></p>
     <div id="form-${i}" class="register-form">
       <label>Camera ID (e.g. cam-03) <input id="cid-${i}" placeholder="cam-03" value="${existingId || ""}" ${existingId ? "readonly" : ""}></label>
+      <label title="What both pages show, beside the ID. Letters, digits, space, - _ . -- up to 32. Changeable later in the table.">Name (optional, e.g. Kitchen)
+        <input id="fname-${i}" maxlength="32" placeholder="Kitchen" value="${esc(cameraNames[existingId] || "")}"></label>
       <label>ONVIF host <input id="host-${i}" value="${host}"></label>
       <label>ONVIF port <input id="port-${i}" value="${port}"></label>
       <label>ONVIF username <input id="user-${i}" value="${document.getElementById('scanUser').value}"></label>
@@ -352,6 +368,26 @@ function dismissDevice(btn) {
   }
 }
 
+// A camera's display name, saved when the field loses focus (guide §16.2.2). Only the heading
+// is redrawn, so a running preview isn't interrupted.
+async function setName(id, input) {
+  const st = document.getElementById(`nameStatus-${id}`);
+  st.className = "status";
+  st.textContent = "saving…";
+  try {
+    const r = await api(`/api/cameras/${id}/name`, { method: "POST",
+      body: JSON.stringify({ displayName: input.value }) });
+    if (r.displayName) cameraNames[id] = r.displayName; else delete cameraNames[id];
+    input.value = r.displayName || "";
+    document.getElementById(`camName-${id}`).innerHTML = camHtml(id);
+    st.textContent = r.unchanged ? "" : r.displayName ? "saved -- the cloud page shows it on its next load" : "name removed";
+  } catch (e) {
+    st.textContent = e.message;
+    st.className = "status error";
+    input.value = cameraNames[id] || "";
+  }
+}
+
 async function register(i) {
   const statusEl = document.getElementById(`regStatus-${i}`);
   statusEl.textContent = "saving...";
@@ -361,6 +397,7 @@ async function register(i) {
       method: "POST",
       body: JSON.stringify({
         cameraId: document.getElementById(`cid-${i}`).value.trim(),
+        displayName: document.getElementById(`fname-${i}`).value.trim(),   // "" clears it
         host: document.getElementById(`host-${i}`).value.trim(),
         port: document.getElementById(`port-${i}`).value.trim(),
         user: document.getElementById(`user-${i}`).value,
@@ -376,7 +413,7 @@ async function register(i) {
     const fpsText = !f ? "" : f.error ? ` Frame rate not set: ${f.error}`
       : ` The camera is set to ${f.configured} fps.`;
     statusEl.textContent = (result.reactivated
-      ? `re-registered -- ${result.cameraId} is back in both GUIs. Its KVS push is stopped: Start Remote when wanted.`
+      ? `re-registered -- ${camLabel(result.cameraId)} is back in both GUIs. Its KVS push is stopped: Start Remote when wanted.`
       : result.updated ? "re-registered -- details updated." : "registered.") + fpsText;
     loadCameras();
   } catch (e) {
@@ -457,6 +494,7 @@ async function loadCameras() {
     currentCameraIds = data.cameras.map(c => c.cameraId);
     mediamtxPaths = Object.fromEntries(data.cameras.map(c => [c.cameraId, c.previewPath || c.mediamtxPath]));
     registeredUriByHost = {};
+    cameraNames = Object.fromEntries(all.cameras.filter(c => c.displayName).map(c => [c.cameraId, c.displayName]));
     for (const c of all.cameras) {
       if (c.onvifHost) (c.unregisteredAt ? unregisteredByHost : registeredByHost)[c.onvifHost] = c.cameraId;
       if (c.onvifHost && c.rtspUrl) registeredUriByHost[c.onvifHost] = c.rtspUrl;
@@ -465,7 +503,11 @@ async function loadCameras() {
     for (const c of data.cameras) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${c.cameraId}</td>
+        <td><span id="camName-${c.cameraId}">${camHtml(c.cameraId)}</span>
+          <div><input id="name-${c.cameraId}" class="name-input" maxlength="32" placeholder="name"
+                      value="${esc(c.displayName || "")}" onchange="setName('${c.cameraId}', this)"
+                      title="A name both pages show beside the ID, e.g. Kitchen. Empty: the ID only."></div>
+          <div id="nameStatus-${c.cameraId}" class="status"></div></td>
         <td>${c.mode}</td>
         <td>${c.hasIrControl ? "yes" : "no"}</td>
         <td>${c.onvifHost || ""}</td>
@@ -603,7 +645,7 @@ async function loadCameras() {
     const anSel = document.getElementById("anCam");
     if (anSel) {
       anSel.innerHTML = data.cameras.filter(c => c.onvifHost)
-        .map(c => `<option value="${c.cameraId}">${c.cameraId}</option>`).join("");
+        .map(c => `<option value="${c.cameraId}">${esc(camLabel(c.cameraId))}</option>`).join("");
     }
     refreshAllStreamStatuses();
   } catch (e) {
@@ -931,7 +973,7 @@ async function loadCodec(id) {
 async function setCodec(id, codec) {
   const sel = document.getElementById(`codec-${id}`);
   const el = document.getElementById(`codecStatus-${id}`);
-  if (!confirm(`Switch ${id} to ${CODEC_LABEL[codec]}?\n\nThe camera restarts its stream: ` +
+  if (!confirm(`Switch ${camLabel(id)} to ${CODEC_LABEL[codec]}?\n\nThe camera restarts its stream: ` +
                `about 10 s without video in the preview, the cloud stream and any recording.`)) {
     loadCodec(id);   // put the selector back to what the camera actually sends
     return;
@@ -1015,14 +1057,14 @@ async function streamAction(id, action) {
 }
 
 async function unregisterCamera(id) {
-  if (!confirm(`Unregister ${id}?\n\nIt disappears from this page and the cloud page, its KVS push stops `
+  if (!confirm(`Unregister ${camLabel(id)}?\n\nIt disappears from this page and the cloud page, its KVS push stops `
       + `and the Pi stops pulling its video. Its KVS stream, clips and settings are kept.\n\n`
       + `To bring it back: Scan LAN above, then Re-register on the matching device.`)) return;
   const el = document.getElementById(`ctlStatus-${id}`);
   el.textContent = "unregistering…";
   try {
     const r = await api(`/api/cameras/${id}/unregister`, { method: "POST", body: "{}" });
-    if (r.warning) alert(`${id} unregistered, with a warning: ${r.warning}`);
+    if (r.warning) alert(`${camLabel(id)} unregistered, with a warning: ${r.warning}`);
     stopPreview(id);
     loadCameras();
   } catch (e) {
@@ -1539,7 +1581,7 @@ async function loadPir() {
   }
   for (const [id, c] of Object.entries(h.cameras || {})) {
     const counts = Object.entries(c.counts || {}).map(([k, v]) => `${k}: ${v}`).join(", ") || "none";
-    html += `<div class="device-card"><b>${id}</b> &larr; ${c.pirTopic}
+    html += `<div class="device-card">${camHtml(id)} &larr; ${esc(c.pirTopic)}
       <div class="pir-grid">
         <span class="k">PIR trigger</span><span>${c.pirRecording ? "<b>on</b>" : "off"}
           <button onclick="togglePir('${id}', ${!c.pirRecording})">${c.pirRecording ? "Switch off" : "Switch on"}</button>
@@ -1623,7 +1665,7 @@ async function loadPirClips(page = "current") {
                 ? `<span class="error">failed: ${c.error || "?"}</span>` : `${c.status}…`;
     return `<tr id="pirrow-${sid}">
       <td>${c.hasThumb ? `<img class="clip-thumb" src="/api/pir-clips/${sid}/thumb-1.jpg" alt="">` : ""}</td>
-      <td>${when}<div class="status">${c.cameraId} &middot; closed by ${c.reason || "--"}</div></td>
+      <td>${when}<div class="status">${esc(camLabel(c.cameraId))} &middot; closed by ${c.reason || "--"}</div></td>
       <td>${state}</td><td>${aws}</td>
       <td class="clip-actions">
         <button ${ready ? "" : "disabled"} onclick="playPirClip('${sid}')">&#9654; Play</button>
