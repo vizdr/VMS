@@ -761,6 +761,7 @@ The live state on 2026-10-03:
 | `PirLocal` inline policy | device role `KVSAdapterRole` | The successor's Pi gains access to `pir-local`, which it never uses | **Safe**, slightly wider privileges (§4.4) |
 | PIR status and upload requests | HTTPS with the device certificate | Don't touch the shared `adapter-01` MQTT connection | **Safe** |
 | Unprefixed Lambdas, `kvs-demo-api`, root page, IoT policy | none | Not modified; this repository stops deploying them | **Safe** |
+| `liveRtspUrl` on a camera's row and KVS streams `<cameraId>-live` (live view on the sub stream, 2026-10-18; guide §21.7) | `cameras` table, KVS | Invisible: `list-cameras` returns a fixed set of fields, and nothing of the successor's lists KVS streams. The field carries credentials like `rtspUrl` and is never returned by a Lambda. Written only for a camera recording its main stream, removed again when it records sub | **Safe.** A new field and new streams (rule 2); `rtspUrl` keeps its meaning, the recorded stream |
 | `unregisteredAt` on a camera's row (Unregister in the admin GUI, 2026-10-17; guide §16.2) | `cameras` table | Invisible: `list-cameras` returns a fixed set of fields. The successor's page keeps listing the camera, and its Start reaches this Pi's `agent.py`, which refuses it. The row is never deleted, so nothing the successor reads disappears | **Safe.** A new field, set and removed field by field (rules 1–2); the hiding happens in this project's readers and page (rule 4) |
 
 ### 4.3 The data contract

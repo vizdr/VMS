@@ -4152,6 +4152,61 @@ definition of done here too.
 four rates, but zero rejects were measured at 15 fps (cam-02) and 20 fps (cam-03) only, so the
 switch adds a note when audio is on at 25.
 
+### 21.7 Live view always on the sub stream
+
+§21.6 chooses what is **recorded**. Live view, meaning the admin GUI's local preview and the cloud
+page's player, shows an ONVIF camera's **sub stream** whenever the camera has one, whatever is
+recorded. It is far less to watch (viewing cost grows with watch time, `COSTS-1.4.md` §5.2), and a
+browser decodes 800×448 more readily than 2560×1440 H.265.
+
+When the recorded stream is the sub stream, or the camera has only one, nothing changes: live
+view uses the recording path and KVS stream. Only a camera **recording its main stream** gets a
+separate live view (`adapter/live_view.py`), with names derived in `camera_control.live_*`:
+
+| Part | cam-03 | Set up by |
+|---|---|---|
+| registry `liveRtspUrl` | the sub stream's URI, with the registered URI's credentials | its presence is what every reader goes by |
+| MediaMTX path | `cam03_live`, pulled continuously like any camera path | the admin GUI; `sync_mediamtx_paths.py` after a MediaMTX restart (offline too, via its cache) |
+| KVS stream | `cam-03-live`, retention 1 h (KVS serves no HLS from a 0-retention stream) | the admin GUI, through the device identity (`stream/cam-*/*` covers it) |
+| producer | `kvs-cam@cam03_live`, the template's `stream-channel.sh` with `KVS_STREAM` and `LIVE=1` | `adapter/bin/provision-live.sh` via sudo |
+
+**The live producer runs exactly while the recording producer runs.** `provision-live.sh` adds it
+to the recording unit's `Wants=` and gives it `PartOf=` that unit, so Start starts both (at boot
+too, if the recording unit is enabled) and Stop stops both, from either GUI, `agent.py` or
+Unregister, without any of them knowing it exists. It can never run unattended on its own (the
+§1.2 cost rule); the extra cost while streaming is the sub stream's ingest, cam-03's ~0.3 Mbit/s.
+With `--live`, `stream-codec.py` reads the live path and corrects only `cam-03-live`'s MediaType:
+`videoCodecActive` describes the recorded stream, which clip windows are clamped to.
+
+**When it is set up or removed:** on a stream switch (§21.6), at registration and at
+Re-register, all three from the camera's own stream list. A switch to main creates it; a switch
+back to sub removes the producer, the path and the field (the KVS stream stays, idle). Unregister
+deletes the live path with the camera's own path. A camera registered on main before this existed
+gets its live view at its next Re-register or stream switch.
+
+**Readers:** the admin GUI's preview plays `previewPath` from `GET /api/cameras`, and the stream
+line says "live view: sub stream (H265 800×448), preview and cloud". The cloud page asks
+`pir-get-hls-url` for the live view, which returns `<camera>-live` when the row has
+`liveRtspUrl` and the recorded stream otherwise. The name is derived there, never taken from the
+caller. Live view is the route's default, so even a page loaded before this existed gets the sub
+stream; `view=recorded` asks for the other. Right after a Start the page also sends `since`
+(seconds since Start), and the Lambda serves only fragments from after it (`LIVE_REPLAY`), so a
+quick Stop → Start can't hand the player the previous run's last fragment (`FoundAndFixed.md` #65).
+Manual recordings, detection clips and outage buffering always use the recorded stream.
+
+**This differs from the successor's plan** (`SUCCESSOR-PLAN.md` D3), where live view is
+independent of Start, pushed on demand with a keep-alive. Here it follows Start, which keeps
+the page's flow and needs no new command.
+
+Verified on cam-03, 2026-10-18, by switching its recording to main and back:
+- the live producer started with the recording one, and `cam-03-live` persisted fragments;
+- `view=live` returned `cam-03-live` at 800×448 (a clean decoded frame from the cloud URL), and
+  the recorded stream 2560×1440;
+- the admin preview in headless Firefox played `cam03_live` at 800×448;
+- Stop left both units `inactive` (live result `success`), and Start brought both back;
+- switching back to sub removed the unit, its files, the path and the field, and `view=live`
+  then served `cam-03`.
+
 ---
 
 ## 22. Appendix E — The USB camera: detection, configuration and swapping

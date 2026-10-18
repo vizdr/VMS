@@ -47,6 +47,24 @@ def unit_name(camera_id: str) -> str:
     return f"kvs-{path}.service"
 
 
+def live_path_name(camera_id: str) -> str:
+    # The live view's own MediaMTX path, which pulls the camera's sub stream when the stream
+    # being recorded is the main one (adapter/live_view.py, guide §21.7): "cam-03" -> "cam03_live".
+    return f"{mediamtx_path_name(camera_id)}_live"
+
+
+def live_stream_name(camera_id: str) -> str:
+    # Its KVS stream: "cam-03" -> "cam-03-live". Inside the producer role's stream/cam-*/*
+    # wildcard, so it needs no IAM change.
+    return f"{camera_id}-live"
+
+
+def live_unit_name(camera_id: str) -> str:
+    # Its producer: another instance of the kvs-cam@ template (provision-live.sh), started and
+    # stopped with the recording producer through Wants=/PartOf=, never on its own.
+    return f"kvs-cam@{live_path_name(camera_id)}.service"
+
+
 def is_unregistered(row: dict) -> bool:
     # A camera unregistered in the admin GUI keeps its registry row, KVS stream and clips, so
     # Re-register can bring it back as it was; `unregisteredAt` (when) is the only mark. Every

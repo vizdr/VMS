@@ -16,6 +16,12 @@ Waits up to --wait seconds for the path to come up with H.264 or H.265 video. If
 not, prints nothing and exits 1, so the unit fails and systemd retries (Restart=on-failure)
 -- what a dead source has always meant for a producer.
 
+    eval "$(stream-codec.py --live cam-03)"   # the live view's path (cam03_live), guide §21.7
+
+With --live it reads the camera's live-view path and corrects only the live KVS stream's
+MediaType (cam-03-live). The registry's videoCodecActive describes the *recorded* stream, which
+clip windows are clamped to, so the live view's codec is never written there.
+
 When the codec differs from the last one recorded, it also records the change, soft-failing
 and on a hard time budget so AWS can never delay a start:
   - registry: videoCodecActive, plus videoCodecActiveSince when it replaces another codec.
@@ -47,56 +53,67 @@ def wait_for_codec(path: str, wait: int) -> str | None:
         time.sleep(1)
 
 
-def record(camera_id: str, codec: str) -> None:
+def record(camera_id: str, codec: str, stream: str, live: bool) -> None:
     try:
         from botocore.config import Config
         from aws_device_creds import get_session   # loads config; inside the try on purpose
         quick = Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
         session = get_session()
-
-        table = session.resource("dynamodb", config=quick).Table("cameras")
-        prev = (table.get_item(Key={"cameraId": camera_id}).get("Item") or {}).get("videoCodecActive")
-        if prev != codec:
-            # "Since" only marks a real switch. On the very first record there is no
-            # earlier codec in the archive, so there is no boundary to clamp clips to.
-            update, values = "SET videoCodecActive = :c", {":c": codec}
-            if prev:
-                update += ", videoCodecActiveSince = :t"
-                values[":t"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            table.update_item(Key={"cameraId": camera_id}, UpdateExpression=update,
-                              ExpressionAttributeValues=values)
-            print(f"stream-codec.py: {camera_id} now streams {codec} (was {prev or 'unrecorded'})",
-                  file=sys.stderr)
-
-        kv = session.client("kinesisvideo", config=quick)
-        info = kv.describe_stream(StreamName=camera_id)["StreamInfo"]
-        parts = [p for p in (info.get("MediaType") or "").split(",") if p]
-        want = f"video/{codec}"
-        if want not in parts:
-            # Replace only the video part; keep anything else (e.g. an audio type) as set.
-            media_type = ",".join([want] + [p for p in parts if not p.startswith("video/")])
-            kv.update_stream(StreamName=camera_id, CurrentVersion=info["Version"],
-                             MediaType=media_type)
-            print(f"stream-codec.py: {camera_id} KVS MediaType -> {media_type}", file=sys.stderr)
+        if not live:
+            record_registry(session.resource("dynamodb", config=quick).Table("cameras"),
+                            camera_id, codec)
+        record_media_type(session.client("kinesisvideo", config=quick), stream, codec)
     except Exception as e:  # noqa: BLE001 -- recording is best effort, streaming is not
-        print(f"stream-codec.py: could not record {codec} for {camera_id} "
+        print(f"stream-codec.py: could not record {codec} for {stream} "
               f"({type(e).__name__}: {e}); streaming anyway", file=sys.stderr)
+
+
+def record_registry(table, camera_id: str, codec: str) -> None:
+    prev = (table.get_item(Key={"cameraId": camera_id}).get("Item") or {}).get("videoCodecActive")
+    if prev != codec:
+        # "Since" only marks a real switch. On the very first record there is no
+        # earlier codec in the archive, so there is no boundary to clamp clips to.
+        update, values = "SET videoCodecActive = :c", {":c": codec}
+        if prev:
+            update += ", videoCodecActiveSince = :t"
+            values[":t"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        table.update_item(Key={"cameraId": camera_id}, UpdateExpression=update,
+                          ExpressionAttributeValues=values)
+        print(f"stream-codec.py: {camera_id} now streams {codec} (was {prev or 'unrecorded'})",
+              file=sys.stderr)
+
+
+def record_media_type(kv, stream: str, codec: str) -> None:
+    info = kv.describe_stream(StreamName=stream)["StreamInfo"]
+    parts = [p for p in (info.get("MediaType") or "").split(",") if p]
+    want = f"video/{codec}"
+    if want not in parts:
+        # Replace only the video part; keep anything else (e.g. an audio type) as set.
+        media_type = ",".join([want] + [p for p in parts if not p.startswith("video/")])
+        kv.update_stream(StreamName=stream, CurrentVersion=info["Version"], MediaType=media_type)
+        print(f"stream-codec.py: {stream} KVS MediaType -> {media_type}", file=sys.stderr)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("camera_id")
     ap.add_argument("--wait", type=int, default=30, help="seconds to wait for the source")
+    ap.add_argument("--live", action="store_true",
+                    help="the camera's live-view path and KVS stream (guide §21.7)")
     args = ap.parse_args()
 
-    path = camera_control.mediamtx_path_name(args.camera_id)
+    if args.live:
+        path = camera_control.live_path_name(args.camera_id)
+        stream = camera_control.live_stream_name(args.camera_id)
+    else:
+        path, stream = camera_control.mediamtx_path_name(args.camera_id), args.camera_id
     codec = wait_for_codec(path, args.wait)
     if not codec:
         print(f"stream-codec.py: no H.264/H.265 video on MediaMTX path '{path}' after "
               f"{args.wait}s", file=sys.stderr)
         return 1
 
-    t = threading.Thread(target=record, args=(args.camera_id, codec), daemon=True)
+    t = threading.Thread(target=record, args=(args.camera_id, codec, stream, args.live), daemon=True)
     t.start()
     t.join(RECORD_BUDGET_SEC)
     if t.is_alive():

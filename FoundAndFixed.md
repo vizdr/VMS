@@ -31,7 +31,7 @@ advice (guide §15 "Known traps").
 
 ## Overview
 
-56 defects, from the first build (2026-08-20) to the Pico's Wi‑Fi next to the Pi (2026-10-04).
+65 defects, from the first build (2026-08-20) to the cloud player's endless spinner (2026-10-18).
 
 | # | Defect | Area | Found | Status |
 |---|---|---|---|---|
@@ -99,6 +99,7 @@ advice (guide §15 "Known traps").
 | 62 | Audio cameras lost audio frames to KVS: a millisecond tie in the SDK's track merge, and invented video DTS on cam-01 | kvssink / producers | 2026-10-17 | fixed (SDK patch 4, `h264timestamper`) |
 | 63 | Both GUIs' IR buttons had ONVIF's ON/OFF backwards: "Force Night" sent the day command | GUIs | 2026-10-18 | fixed (labels); cam-03 ignores the setting |
 | 64 | Detection recording never fired on cam-03: modes mapped to topics it doesn't publish, and the watcher leaked subscriptions | event watcher / GUIs | 2026-10-18 | fixed: Cell grid records on cam-03; its human alarm doesn't reach ONVIF |
+| 65 | The cloud player spun forever: stale live sessions after Stop → Start, no recovery from a stuck player, an old page served the main stream | cloud page / Lambda | 2026-10-18 | fixed (`since`, watchdog, live view by default) |
 
 ### What they have in common
 
@@ -1698,3 +1699,62 @@ values. The wording match is a heuristic, not tested here on a camera with such 
 Motion detection) and Cell grid selected, the watcher produced clips at 09:29 and 09:32 UTC,
 48.3 s and 44.3 s of H.265 800×448: full length, so #53 doesn't affect this camera.
 
+### #65 — The cloud player spun forever: stale live sessions after Stop → Start, and nothing to get it out
+
+**Found:** 2026-10-18: "the video stream in the cloud view hangs and shows a rotating circle
+forever, even after Reload player or Stop → Start" (cam-03, an hour after guide §21.7's live view
+on the sub stream was deployed). **Referenced from:** `client/index.html` (`load`, `watchStalls`,
+the hls.js error handler), `cloud/lambda/get_hls_url.py`. **Status: fixed.**
+
+The Pi side was healthy throughout: both cam-03 producers persisted every fragment ~4.2 s after it
+started (ack just after the 4 s fragment closes), and every session URL played in headless Firefox
+through the page's own hls.js. The deployed page itself, run in Firefox against the real Lambdas
+(Cognito and API Gateway stubbed by a local proxy), showed three faults, none of them in KVS:
+
+1. **A quick Stop → Start got a session built from the old run.** The page's first look comes 5 s
+   after Start. KVS still counts a stream as live for some seconds after its last fragment (200
+   nine seconds after a Stop, 503 at fourteen), so `GetHLSStreamingSessionURL` (LIVE) answered at
+   once with a playlist holding **one fragment from before the Stop**. The page stopped polling,
+   played those 4 s and sat in the spinner until the new run's first fragment, ~15 s after Start.
+   The user's own request log shows it: Start at 18:06:42, one session request at 18:06:46 (no 503
+   retries), first new fragment at 18:06:57. The recorded stream had the same race before §21.7.
+2. **Nothing got a stuck player out.** On a fatal network error the page called `hls.startLoad()`
+   twice before fetching a new session. After a failed *playlist* load there is nothing for
+   `startLoad()` to resume, and no further error ever comes, so the page waited forever. And a
+   player that simply stopped advancing (stream stopped elsewhere, a session stuck on an old run, a
+   decoder that accepts but never shows) had no watchdog at all, the same gap `producer_run` closed
+   on the Pi (#46).
+3. **A page loaded before §21.7 was deployed asked for the recorded stream.** "Reload player" and
+   Stop/Start run the page's code again, not a new copy of it. With cam-03 switched to its main
+   stream at 18:04:48, that old page played **2560×1440 H.265 at level 5.1** (`hvc1.1.6.L153`),
+   while the page's H.265 check probes level 3 only. A decoder that accepts the stream and never
+   shows a frame would explain the endless spinner. This one is inferred, not observed: what the
+   user's browser ran isn't recorded anywhere.
+
+**Fix:**
+- **`since`:** the page measures the time since Start on its own clock and passes it during the
+  Start window (`/hls?…&since=9.0`). The Lambda then asks for `LIVE_REPLAY` from that moment
+  (server timestamps, so no clock skew). With no fragment from the new run yet, KVS answers
+  `ResourceNotFoundException`, the existing 503 that the page keeps polling on; afterwards the
+  session plays on as live. No IAM change: same API, same permission. Measured: after a Stop →
+  Start 5 s apart, 503 at `since` 5.3, 9.0 and 12.6, then 200 at 16.4 and playback from the new
+  run's first fragment.
+- **Stall watchdog** (`watchStalls`): if the picture hasn't moved for 20 s while the page is visible
+  and not paused, fetch a new session. That either plays or shows "stream is not live … Press
+  Start". After three reloads with no progress at all it stops and says the browser receives the
+  video but doesn't play it (naming H.265 where that applies). A failed playlist or level load
+  now goes straight to a new session instead of `startLoad()`. Measured: producers stopped from
+  the admin GUI while the page played → frozen at t=32.55 → reconnect after ~20 s → "stream is
+  not live".
+- **Live view is `/hls`'s default:** the live player is the route's only caller, so a page that
+  doesn't send `view=live` now gets the sub stream too; `view=recorded` asks for the recorded one.
+- **hls.js pinned** to 1.7.3 in both pages. `@latest` wasn't the cause (1.7.3 since 2026-09-11),
+  but it could change under the page without a deploy.
+
+What remains by design: right after a Start only one fragment exists, so the player starts at the
+live edge, and a fragment arriving late shows the browser's spinner for a few seconds. With 4 s
+fragments that is usually one short wait.
+
+**The rule:** a player needs a watchdog for the same reason a producer does. "Loaded" and
+"playing" are states that were entered, not proof of progress: check `currentTime`. And after a
+restart, ask for footage from *after* the restart; "live" alone can mean the previous run.

@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 import camera_control
+import live_view
 import mediamtx_api
 import onvif_discovery
 import onvif_media2
@@ -383,6 +384,11 @@ def list_cameras():
         # so this is always derivable -- send it rather than have the page re-implement
         # the naming convention itself.
         i["mediamtxPath"] = camera_control.mediamtx_path_name(i["cameraId"])
+        # The local preview is live view, so it plays the sub stream's path when the camera
+        # records its main stream (live_view.py, guide §21.7). The URI itself carries
+        # credentials and the page doesn't need it.
+        i["previewPath"] = (camera_control.live_path_name(i["cameraId"])
+                            if i.pop("liveRtspUrl", None) else i["mediamtxPath"])
     # Unregistered cameras too, with their unregisteredAt: the page leaves them out of the
     # table and needs them only to offer Re-register on a matching discovered device.
     return jsonify({"cameras": sorted(items, key=lambda c: c["cameraId"])})
@@ -472,10 +478,15 @@ def register_camera():
         if reactivate and camera_control.unit_name(camera_id).startswith("kvs-cam@"):
             camera_control.set_boot_start(camera_id, True)
         detection = _registration_detection(camera_id, host, port, user, password)
+        # The stream may have changed, and an unregistered camera's live path went with
+        # Unregister: set the live view up again from what the camera says now.
+        live = _apply_live_view(camera_id, {**existing, "onvifHost": host, "onvifPort": port,
+                                            "onvifUser": user, "onvifPassword": password,
+                                            "rtspUrl": stream_uri})
         _refresh_path_cache()
         return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"],
                         "updated": True, "reactivated": reactivate, "fps": fps_result,
-                        "detectionModes": detection}), 200
+                        "detectionModes": detection, "liveView": live}), 200
 
     # 0. The frame rate, on the camera, before MediaMTX ever connects: a change can restart the
     #    camera's RTSP session, which costs nothing yet. Not fatal -- a camera without Media2
@@ -520,7 +531,7 @@ def register_camera():
     # 4. The registry row -- Phase 1 of the credential-storage plan: plain attributes.
     #    Phase 2 (SSM Parameter Store SecureString + a credentialRef here instead of
     #    onvifPassword) is a deliberately deferred follow-up, not done in this pass.
-    table.put_item(Item={
+    row = {
         "cameraId": camera_id,
         "mode": "passthrough",
         "hasIrControl": has_ir_control,
@@ -532,12 +543,14 @@ def register_camera():
         "rtspUrl": stream_uri,
         "audioCapable": bool(audio_capable),
         "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    })
+    }
+    table.put_item(Item=row)
 
     detection = _registration_detection(camera_id, host, port, user, password)
+    live = _apply_live_view(camera_id, row)    # registered on the main stream: live view on sub
     _refresh_path_cache()
     return jsonify({"cameraId": camera_id, "kvsStreamArn": stream_arn, "updated": False,
-                    "fps": fps_result, "detectionModes": detection}), 201
+                    "fps": fps_result, "detectionModes": detection, "liveView": live}), 201
 
 
 def _registration_detection(camera_id, host, port, user, password):
@@ -575,6 +588,22 @@ def _registration_fps(host, port, user, password, stream_uri, fps):
         return {"asked": fps, "configured": got["frameRate"], "govLength": got["govLength"]}
     except Exception as e:  # noqa: BLE001
         return {"asked": fps, "error": f"{type(e).__name__}: {e}"}
+
+
+def _apply_live_view(camera_id, item, found=None):
+    """Point the camera's live view at its sub stream, or back at the recorded stream
+    (live_view.py, guide §21.7), from the camera's own stream list. Never fails the action that
+    called it -- a registration or a stream switch has already worked; the outcome, or why the
+    live view wasn't set up, goes in the response."""
+    try:
+        if found is None:
+            found = onvif_media2.streams(onvif_media2.for_camera(item))
+        uri = live_view.live_uri(found, item.get("rtspUrl"))
+        return live_view.apply(camera_id, item, uri, cameras_table(),
+                               get_session(REGION).client("kinesisvideo"))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"live view not set up ({type(e).__name__}: {e}) -- "
+                         f"re-register the camera to retry"}
 
 
 def _refresh_path_cache():
@@ -625,7 +654,11 @@ def unregister_camera(camera_id):
     camera_control.set_boot_start(camera_id, False)
     result = {"cameraId": camera_id, "unregisteredAt": now}
     try:
+        # The live view's path too (live_view.py); its producer stopped with the recording one
+        # (PartOf=). Its registry field and unit files stay, like everything else, until
+        # Re-register sets the live view up again.
         mediamtx_api.delete_path(camera_control.mediamtx_path_name(camera_id))
+        mediamtx_api.delete_path(camera_control.live_path_name(camera_id))
     except (mediamtx_api.MediaMTXError, requests.RequestException) as e:
         result["warning"] = f"MediaMTX path not removed ({e}); it goes at the next MediaMTX restart"
     _refresh_path_cache()
@@ -1268,9 +1301,14 @@ def get_stream_choice(camera_id):
         return jsonify({"error": str(e)}), 502
     current = next((x["name"] for x in found
                     if onvif_media2.same_stream(x["streamUri"], item.get("rtspUrl"))), None)
+    live_path = (camera_control.live_path_name(camera_id) if item.get("liveRtspUrl")
+                 else camera_control.mediamtx_path_name(camera_id))
     return jsonify({"cameraId": camera_id, "switchable": True, "current": current,
                     "streams": [_stream_view(x) for x in found],
-                    "wire": mediamtx_api.path_video_track(camera_control.mediamtx_path_name(camera_id))})
+                    "wire": mediamtx_api.path_video_track(camera_control.mediamtx_path_name(camera_id)),
+                    # What live view (preview and cloud player) shows: guide §21.7.
+                    "live": {"stream": "sub" if item.get("liveRtspUrl") else current,
+                             "path": live_path, "wire": mediamtx_api.path_video_track(live_path)}})
 
 
 @app.post("/api/cameras/<camera_id>/stream")
@@ -1341,6 +1379,10 @@ def set_stream_choice(camera_id):
                                             cam.encoder_options(new["encoderToken"]), new["encoderToken"])
             out["stream"], out["wire"] = new["name"], wire
             target, item = new, {**item, "rtspUrl": new_uri}
+            # Recording moved to main: live view goes on to sub; moved to sub: live view is the
+            # recorded stream again.
+            out["liveView"] = _apply_live_view(camera_id, item, found)
+            _refresh_path_cache()
 
         if want_fps is not None:
             settings = _set_camera_fps(cam, item["rtspUrl"], want_fps)

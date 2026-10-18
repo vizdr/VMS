@@ -5,9 +5,20 @@
 # instead of being duplicated per camera the way stream-cam01.sh/stream-cam02.sh were.
 # Passthrough-only (§16.2.1/§16.3: WS-Discovery only ever finds networked ONVIF cameras,
 # which this project already treats as pure passthrough, no transcode stage).
+#
+# The same script is a camera's live-view producer (guide §21.7, provision-live.sh): its env file
+# sets MEDIAMTX_PATH=cam03_live, KVS_STREAM=cam-03-live and LIVE=1, so it pushes the camera's sub
+# stream to the live KVS stream while the recording producer pushes the recorded stream.
 set -e
 : "${CAMERA_ID:?CAMERA_ID must be set}"
 : "${MEDIAMTX_PATH:?MEDIAMTX_PATH must be set}"
+KVS_STREAM="${KVS_STREAM:-${CAMERA_ID}}"
+CODEC_ARGS=()
+[ "${LIVE:-0}" = 1 ] && CODEC_ARGS=(--live)
+# The watchdog FIFO is named after the label, and every kvs-cam@ instance shares
+# /run/vms-producer: one label per instance, or a camera's recording and live producers,
+# started together, could open each other's pipe.
+LABEL="stream-channel-${MEDIAMTX_PATH}"
 # $VMS_HOME if exported (interactive shells, via ~/.bashrc); otherwise the repo root
 # this script lives in (systemd units do not read ~/.bashrc).
 VMS_HOME="${VMS_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
@@ -21,8 +32,8 @@ CERTS="${VMS_HOME}/certs"
 # stream-cam02.sh for why a missing source is a deliberate failure here. The same call reports
 # the audio track (AUDIO_TRACK), whose G.711 law ONVIF can't tell: cam-02 is A-law, cam-03 mu-law.
 VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
-             ${VMS_HOME}/adapter/bin/stream-codec.py "${CAMERA_ID}")" \
-  || { echo "stream-channel(${CAMERA_ID}): no H.264/H.265 video from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
+             ${VMS_HOME}/adapter/bin/stream-codec.py "${CODEC_ARGS[@]}" "${CAMERA_ID}")" \
+  || { echo "stream-channel(${KVS_STREAM}): no H.264/H.265 video on ${MEDIAMTX_PATH} from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
 eval "${VIDEO_ENV}"
 VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
 
@@ -42,11 +53,11 @@ esac
 if [ "${AUDIO:-off}" = "on" ] && [ -z "${AUDIO_DEPAY}" ]; then
   # Never start an audio branch that can't deliver: kvssink collects across its pads, so an
   # audio pad that never gets a buffer stalls the video as well (guide §18).
-  echo "stream-channel(${CAMERA_ID}): audio is on, but MediaMTX receives ${AUDIO_TRACK:-no audio}, not G.711 -- video only" >&2
+  echo "stream-channel(${KVS_STREAM}): audio is on, but MediaMTX receives ${AUDIO_TRACK:-no audio}, not G.711 -- video only" >&2
   AUDIO=off
 fi
 
-KVSSINK="kvssink name=kvs stream-name=${CAMERA_ID} aws-region=${AWS_REGION} \
+KVSSINK="kvssink name=kvs stream-name=${KVS_STREAM} aws-region=${AWS_REGION} \
   iot-certificate=iot-certificate,endpoint=${IOT_CRED_ENDPOINT},cert-path=${CERTS}/adapter.cert.pem,key-path=${CERTS}/adapter.private.key,ca-path=${CERTS}/cacert.pem,role-aliases=${IOT_ROLE_ALIAS},iot-thing-name=${THING_NAME}"
 
 if [ "${AUDIO:-off}" = "on" ]; then
@@ -55,8 +66,8 @@ if [ "${AUDIO:-off}" = "on" ]; then
   # are 128 ms, longer than one video frame at 10-25 fps, which is guide §18.3's rule. Measured
   # with zero rejects at 15 fps (cam-02) and 20 fps (cam-03, FoundAndFixed.md #58); 25 fps with
   # audio is unmeasured -- count 0x30000005 rejects there.
-  echo "stream-channel(${CAMERA_ID}): audio ENABLED (${AUDIO_TRACK} -> AAC 8kHz), video ${VIDEO_CODEC}"
-  producer_run stream-channel -v \
+  echo "stream-channel(${KVS_STREAM}): audio ENABLED (${AUDIO_TRACK} -> AAC 8kHz), video ${VIDEO_CODEC} from ${MEDIAMTX_PATH}"
+  producer_run "${LABEL}" -v \
     rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
     ! ${VIDEO_CHAIN} ! queue ! kvs.video_0 \
@@ -73,8 +84,8 @@ fi
 # links can abort the whole pipeline with "streaming stopped, reason not-linked (-1)"
 # depending on which pad is exposed first (FoundAndFixed.md #43). The branch is inert if the
 # source has no audio track.
-echo "stream-channel(${CAMERA_ID}): audio disabled (video only), video ${VIDEO_CODEC}"
-producer_run stream-channel -v \
+echo "stream-channel(${KVS_STREAM}): audio disabled (video only), video ${VIDEO_CODEC} from ${MEDIAMTX_PATH}"
+producer_run "${LABEL}" -v \
   rtspsrc location="rtsp://127.0.0.1:8554/${MEDIAMTX_PATH}" protocols=tcp latency=200 name=src \
   src. ! application/x-rtp,media=video ! queue \
   ! ${VIDEO_CHAIN} \

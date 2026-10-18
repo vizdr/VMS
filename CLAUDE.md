@@ -513,6 +513,14 @@ repoints rtspUrl and the MediaMTX path at the other profile, proved by MediaMTX 
 frame rate is set on the encoder with the keyframe interval kept in seconds and proved by
 counting frames on the wire. The registration form offers the same, preselecting 10 fps; a camera
 already registered keeps its rate until changed.
+**Live view (the local preview and the cloud player) always shows the sub stream** when the
+camera has one, whatever is recorded (guide §21.7, `adapter/live_view.py`). A camera recording its
+main stream gets `liveRtspUrl` in the registry, a MediaMTX path `cam03_live`, a KVS stream
+`cam-03-live` and a producer `kvs-cam@cam03_live` (`adapter/bin/provision-live.sh`), which is
+`Wants=`/`PartOf=` the recording producer: Start and Stop drive both, so nothing else needs to
+know about it. Derive these names through `camera_control.live_path_name()`, `live_stream_name()`
+and `live_unit_name()`, like the other naming helpers. The cloud page asks `pir-get-hls-url`
+with `view=live`.
 
 It also scans the Pi's **own USB bus** (`GET /api/usb-cameras` → `adapter/usb_camera.py`,
 guide §22): formats, resolutions, frame rates, v4l2 controls and the microphone on the

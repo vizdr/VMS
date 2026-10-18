@@ -168,7 +168,8 @@
   <span class="clips-page-label"></span>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<!-- Pinned: @latest can change under the page without a deploy (FoundAndFixed.md #65). -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.3"></script>
 <script>
 async function api(path, opts) {
   const r = await fetch(path, {
@@ -398,7 +399,9 @@ function stopPreview(id) {
   }
 }
 
-function togglePreview(id, mediamtxPath) {
+// The preview is live view: the camera's sub stream when it records its main stream
+// (previewPath from /api/cameras, guide §21.7), otherwise the recorded stream's path.
+function togglePreview(id, mediamtxPath = mediamtxPaths[id]) {
   const box = document.getElementById(`previewBox-${id}`);
   const btn = document.getElementById(`previewBtn-${id}`);
   if (previewPlayers[id]) {
@@ -439,7 +442,7 @@ function togglePreview(id, mediamtxPath) {
 }
 
 let currentCameraIds = [];
-let mediamtxPaths = {};   // cameraId -> MediaMTX path, as the server names it
+let mediamtxPaths = {};   // cameraId -> the MediaMTX path the preview plays, as the server names it
 
 async function loadCameras() {
   for (const id in previewPlayers) stopPreview(id);
@@ -452,7 +455,7 @@ async function loadCameras() {
     registeredByHost = {};
     unregisteredByHost = {};
     currentCameraIds = data.cameras.map(c => c.cameraId);
-    mediamtxPaths = Object.fromEntries(data.cameras.map(c => [c.cameraId, c.mediamtxPath]));
+    mediamtxPaths = Object.fromEntries(data.cameras.map(c => [c.cameraId, c.previewPath || c.mediamtxPath]));
     registeredUriByHost = {};
     for (const c of all.cameras) {
       if (c.onvifHost) (c.unregisteredAt ? unregisteredByHost : registeredByHost)[c.onvifHost] = c.cameraId;
@@ -468,7 +471,7 @@ async function loadCameras() {
         <td>${c.onvifHost || ""}</td>
         <td class="preview-cell">
           <div class="preview-box" id="previewBox-${c.cameraId}"><span class="preview-msg">no preview</span></div>
-          <button id="previewBtn-${c.cameraId}" onclick="togglePreview('${c.cameraId}','${c.mediamtxPath}')" style="font-size:0.7rem; padding:0.15rem 0.4rem; margin-top:2px;">▶ Local preview</button>
+          <button id="previewBtn-${c.cameraId}" onclick="togglePreview('${c.cameraId}')" style="font-size:0.7rem; padding:0.15rem 0.4rem; margin-top:2px;">▶ Local preview</button>
         </td>
         <td><span id="kvsState-${c.cameraId}" class="kvs-state">…</span></td>
         <td>
@@ -720,11 +723,19 @@ async function loadStream(id, keepStatus = false) {
     if (cur && !FPS_CHOICES.includes(cur.fps)) fs.value = "";
     ss.disabled = d.streams.length < 2;
     fs.disabled = !cur;
-    if (!keepStatus) { st.textContent = ""; st.className = "status"; }
+    if (!keepStatus) { st.textContent = liveText(d); st.className = "status"; }
+    if (d.live && d.live.path) mediamtxPaths[id] = d.live.path;
   } catch (e) {
     st.textContent = `stream: ${e.message}`;
     st.className = "status error";
   }
+}
+
+// Live view (this preview and the cloud player) shows the sub stream while main is recorded.
+function liveText(d) {
+  if (!d.live || d.live.stream !== "sub" || d.current === "sub") return "";
+  const w = d.live.wire;
+  return `live view: sub stream${w ? ` (${w.codec.toUpperCase()} ${w.width}×${w.height})` : ""}, preview and cloud`;
 }
 
 async function setStreamChoice(id, change) {
@@ -732,6 +743,10 @@ async function setStreamChoice(id, change) {
   const fs = document.getElementById(`fps-${id}`);
   const st = document.getElementById(`streamStatus-${id}`);
   ss.disabled = fs.disabled = true;
+  // A stream switch can move the preview to another path (live view, guide §21.7): close it now,
+  // reopen it on whatever path loadStream() reports afterwards.
+  const hadPreview = !!previewPlayers[id];
+  if (hadPreview) togglePreview(id);
   st.className = "status";
   st.textContent = change.stream ? `switching to the ${change.stream} stream… (video pauses ~10 s)`
                                  : `setting ${change.fps} fps, then counting frames…`;
@@ -740,6 +755,8 @@ async function setStreamChoice(id, change) {
     const parts = [];
     if (r.stream) parts.push(`now ${r.stream}: ${r.wire.codec.toUpperCase()} ${r.wire.width}×${r.wire.height}`);
     if (r.fps) parts.push(`${r.fps.measured ?? "?"} fps measured (keyframe every ${r.fps.govLength} frames)`);
+    if (r.liveView) parts.push(r.liveView.error ? `live view: ${r.liveView.error}`
+                               : `live view: ${r.liveView.live === "sub" ? "sub stream" : "this stream"}`);
     st.textContent = parts.join(" · ") + (r.warning ? ` -- ${r.warning}` : "") + (r.note ? `. Note: ${r.note}` : "");
     if (r.warning) st.className = "status error";
   } catch (e) {
@@ -747,6 +764,7 @@ async function setStreamChoice(id, change) {
     st.className = "status error";
   }
   await loadStream(id, true);
+  if (hadPreview) togglePreview(id);
   loadCodec(id);              // a stream switch can change the codec and size the codec line shows
 }
 

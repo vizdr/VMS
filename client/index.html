@@ -169,7 +169,8 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<!-- Pinned: @latest can change under the page without a deploy (FoundAndFixed.md #65). -->
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.3"></script>
 <script>
 // This project's own API and app client (PIR-MQTT-VMS-PI4.md §3.9, Phase 11): pir-api and
 // pir-web on the user pool shared with the successor. Never the shared kvs-demo-api: this page
@@ -262,6 +263,8 @@ function teardownPlayer(camera) {
   const s = state[camera];
   clearTimeout(s.refreshTimer);
   s.refreshTimer = null;
+  clearInterval(s.stallTimer);
+  s.stallTimer = null;
   if (s.hls) { s.hls.destroy(); s.hls = null; }
   const v = el(camera, "video");
   v.onvolumechange = null;        // or it fires during load() and rewrites s.listen
@@ -436,7 +439,7 @@ function renderCameraPanel(cam) {
     <p>
       <button onclick="cmd('${cam.id}','start')">Start</button>
       <button onclick="cmd('${cam.id}','stop')">Stop</button>
-      <button onclick="load('${cam.id}')">Reload player</button>
+      <button onclick="state['${cam.id}'].stallReloads = 0; load('${cam.id}')">Reload player</button>
     </p>
     <div id="status-${cam.id}" class="status"></div>
 
@@ -638,9 +641,16 @@ async function load(camera) {
   setStatus(camera, "loading stream...");
   showOverlay(camera, "Loading stream…");
   try {
-    const r = await fetch(`${API}/hls?stream=${camera}`, { headers: { Authorization: idToken } });
-    const data = await r.json();
+    // view=live: a camera recording its main stream is watched on its sub stream, which the Pi
+    // pushes to a stream of its own while Start is on (guide §21.7). Clips stay the recorded stream.
+    // Within the Start window, since=<seconds since Start> asks for footage from the new run only:
+    // a plain live session right after Stop -> Start is built from the old run's last fragment
+    // and then waits for the new one (FoundAndFixed.md #65). Measured on this page's own clock.
     const s0 = state[camera];
+    const since = s0.startedAt && Date.now() < (s0.liveWaitUntil || 0)
+      ? `&since=${Math.max(1, (performance.now() - s0.startedAt) / 1000).toFixed(1)}` : "";
+    const r = await fetch(`${API}/hls?stream=${camera}&view=live${since}`, { headers: { Authorization: idToken } });
+    const data = await r.json();
     // Right after Start, "not live" (503) is expected, not an error: the producer needs a
     // few seconds to connect, and KVS has nothing until the camera's first keyframe
     // *closes* a fragment. cam-02 sends one every 3 s, so its first fragment lands ~10 s
@@ -654,6 +664,7 @@ async function load(camera) {
       return;
     }
     s0.liveWaitUntil = 0;
+    s0.startedAt = null;
     if (!r.ok) {
       setStatus(camera, "error: " + (data.error || r.status));
       showOverlay(camera, (data.error || "Could not load stream") + "\n\nPress Start to begin.");
@@ -665,6 +676,7 @@ async function load(camera) {
 
     if (s.hls) { s.hls.destroy(); s.hls = null; }
     clearTimeout(s.refreshTimer);
+    clearInterval(s.stallTimer);
     s.userStopped = false;
     s.netRetries = 0;
 
@@ -705,7 +717,10 @@ async function load(camera) {
             // for genuinely transient blips, then go get a whole new session. The
             // overlay matters too: without it the only feedback is the browser's own
             // spinner, which looks identical to "still buffering".
-            if (++s.netRetries <= 2) {
+            // A failed playlist load is different: startLoad() resumes fragment loading and has
+            // no playlist to resume, so the player would sit there spinning, never erroring
+            // again (FoundAndFixed.md #65). Those go straight to a new session.
+            if (!/^(manifest|level)/.test(data.details) && ++s.netRetries <= 2) {
               s.hls.startLoad();
             } else {
               s.netRetries = 0;
@@ -740,16 +755,56 @@ async function load(camera) {
       if (box && !box.disabled) { box.checked = !v.muted; s.listen = !v.muted; }
     };
     scheduleSessionRefresh(camera, data.expires_in);
-    setStatus(camera, "stream loaded");
+    watchStalls(camera);
+    setStatus(camera, data.view === "sub" ? "stream loaded · live view on the sub stream" : "stream loaded");
   } catch (e) {
     setStatus(camera, "error: " + e.message);
     showOverlay(camera, "Error loading stream.\n\nPress Reload player to retry.");
   }
 }
 
+// A player that stops advancing must never spin forever (FoundAndFixed.md #65). If the
+// picture hasn't moved for STALL_SEC while the page is visible, get a new session: the stream
+// may have restarted, or the session may be stuck on an old run. load() then either plays or
+// says the stream isn't live. Three times in a row with no progress at all means the browser
+// gets the video but doesn't show it -- say so instead of reloading forever.
+const STALL_SEC = 20;
+function watchStalls(camera) {
+  const s = state[camera];
+  const v = el(camera, "video");
+  clearInterval(s.stallTimer);
+  let lastT = -1, lastMove = Date.now();
+  s.stallTimer = setInterval(() => {
+    if (s.userStopped || !s.hls) return;
+    if (v.currentTime !== lastT) {
+      if (lastT >= 0) s.stallReloads = 0;
+      lastT = v.currentTime; lastMove = Date.now();
+      return;
+    }
+    // Hidden tabs may pause video on purpose; a paused player is the user's choice.
+    if (document.visibilityState !== "visible" || v.paused) { lastMove = Date.now(); return; }
+    if (Date.now() - lastMove < STALL_SEC * 1000) return;
+    clearInterval(s.stallTimer);
+    s.stallReloads = (s.stallReloads || 0) + 1;
+    if (s.stallReloads > 2) {
+      const cam = CAMERAS.find(c => c.id === camera) || {};
+      setStatus(camera, "video arrives but doesn't play");
+      showOverlay(camera, "The video reaches this browser but doesn't play.\n\n" +
+        (cam.videoCodec === "h265" ? "This browser may not decode this camera's H.265 at this size. " : "") +
+        "Press Reload player to try again.");
+      return;
+    }
+    setStatus(camera, `no new video for ${STALL_SEC} s -- reconnecting`);
+    showOverlay(camera, "Reconnecting…");
+    load(camera);
+  }, 5000);
+}
+
 async function cmd(camera, action) {
   setStatus(camera, `sending ${action}...`);
   const s = state[camera];
+  s.stallReloads = 0;
+  s.startedAt = null;
   if (action === "stop") {
     s.userStopped = true;
     s.liveWaitUntil = 0;
@@ -758,6 +813,7 @@ async function cmd(camera, action) {
   } else {
     showOverlay(camera, "Starting stream…\nThis can take a few seconds.");
   }
+  const t0 = performance.now();   // when Start was asked for: load() wants footage from after it
   try {
     const r = await fetch(`${API}/cmd`, {
       method: "POST",
@@ -771,6 +827,7 @@ async function cmd(camera, action) {
       // 45 s covers a producer that dies on its first try and is restarted by systemd
       // (RestartSec=5) plus a 3 s GOP, with room to spare.
       s.liveWaitUntil = Date.now() + 45000;
+      s.startedAt = t0;
       clearTimeout(s.refreshTimer);
       s.refreshTimer = setTimeout(() => load(camera), 5000);
     }
