@@ -196,7 +196,9 @@ publishes to it and `kvs-pir-watcher` subscribes. It costs nothing to leave runn
 
 **User units** (`~/.config/systemd/user/`, `systemctl --user`, no sudo): `kvs-mediamtx`,
 `kvs-camera-init`, `kvs-camera-publish`, `kvs-agent`, `onvif-admin`,
-`kvs-event-watcher` (ONVIF detection → clips), `kvs-outage-buffer` +
+`kvs-event-watcher` (ONVIF detection → clips; it subscribes only to a topic the camera advertises,
+renews every 20 s, pulls with `PT2S` and unsubscribes when it stops, because cam-03 has 10
+subscription slots and the old loop filled them, `FoundAndFixed.md` #64), `kvs-outage-buffer` +
 `kvs-outage-uploader` (durable outage buffering, `OUTAGE.md`), `kvs-pir-watcher` (PIR motion →
 local clips on the USB stick, `PIR-MQTT-VMS-PI4.md` Phases 6 and 10; local recording makes no AWS
 call and idles while no camera has `pirRecording` on, while a separate thread reports status and
@@ -494,6 +496,10 @@ can't name H.265). **Done means MediaMTX receives the new codec**, never the cam
 cam-03 reported H264 2880×1620 while it sent H.265 2560×1440. It writes `videoCodec`,
 `videoCodecCaps`, `videoEncoderToken`, `videoCodecProbe` with the successor's meanings and
 never `videoCodecDefault`. cam-01 shows H.264 only: the Pi has no H.265 encoder.
+Its recording-mode selector offers only the modes the camera's ONVIF event list supports
+(`GET /api/cameras/<id>/detection` records them as `detectionModes`, read by the cloud page via
+`GET /pir`; `adapter/onvif_events.py`). cam-03 supports Cell grid only, and only with motion
+detection ticked in its own web interface.
 Next to it, **stream** (main/sub) and **fps** (10/15/20/25, each only where the stream's encoder
 accepts it) selectors (`GET`/`POST /api/cameras/<id>/stream`, guide §21.6): a stream switch
 repoints rtspUrl and the MediaMTX path at the other profile, proved by MediaMTX reconnecting; a

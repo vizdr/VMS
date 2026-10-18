@@ -87,6 +87,9 @@ def get_pir(camera):
         # the shared list-cameras and stays identical to it; this page is the one that filters
         # (data contract rule 4).
         "unregistered": bool(item.get("unregisteredAt")),
+        # The detection modes the camera's own event list supports, recorded by the admin GUI
+        # (FoundAndFixed.md #64); None until it has looked. The page greys out the rest.
+        "detectionModes": item.get("detectionModes"),
     })
 
 

@@ -718,6 +718,12 @@ def set_recording_mode(camera_id):
         return jsonify({"error": "unknown camera"}), 404
     if mode != "manual" and not item.get("onvifHost"):
         return jsonify({"error": "no ONVIF host — this camera supports only 'manual'"}), 400
+    # detectionModes: what the camera's own event list supports, recorded by GET .../detection.
+    # A mode outside it would subscribe to a topic the camera never sends (FoundAndFixed.md #64).
+    supported = item.get("detectionModes")
+    if mode != "manual" and supported is not None and mode not in supported:
+        return jsonify({"error": f"this camera doesn't publish the events for '{mode}' "
+                                 f"(it supports: {', '.join(supported) or 'no detection mode'})"}), 409
 
     table.update_item(
         Key={"cameraId": camera_id},
@@ -725,6 +731,48 @@ def set_recording_mode(camera_id):
         ExpressionAttributeValues={":m": mode},
     )
     return jsonify({"cameraId": camera_id, "recordingMode": mode})
+
+
+@app.get("/api/cameras/<camera_id>/detection")
+def get_detection_modes(camera_id):
+    """The detection modes this camera can serve: those whose ONVIF topic its GetEventProperties
+    lists (onvif_events). Once per table load, like the codec. The result goes to the registry
+    as detectionModes, field-level and only when it changed, so the cloud page (via GET /pir) and
+    the mode routes offer the same choice. A new field: invisible to the successor's code."""
+    try:
+        item = _camera_item_quick(camera_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if not item.get("onvifHost"):
+        return jsonify({"modes": [], "reason": "no ONVIF host: manual recording only"})
+
+    async def read():
+        from onvif import ONVIFCamera
+        import onvif_events
+        cam = ONVIFCamera(item["onvifHost"], int(item.get("onvifPort", 80)), item["onvifUser"],
+                          item["onvifPassword"], wsdl_dir=camera_control.WSDL_DIR)
+        try:
+            await cam.update_xaddrs()
+            return await onvif_events.camera_topics(cam)
+        finally:
+            await cam.close()
+    try:
+        import onvif_events
+        topics = asyncio.run(asyncio.wait_for(read(), 15))
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"camera unreachable ({type(e).__name__})",
+                        "modes": item.get("detectionModes")}), 502
+    modes = onvif_events.supported_modes(topics)
+    if item.get("detectionModes") != modes:
+        try:
+            cameras_table().update_item(Key={"cameraId": camera_id},
+                                        UpdateExpression="SET detectionModes = :m",
+                                        ExpressionAttributeValues={":m": modes})
+        except Exception:  # noqa: BLE001 -- the answer stands; the next load writes it
+            pass
+    return jsonify({"modes": modes, "topics": sorted(topics)})
 
 
 @app.post("/api/cameras/<camera_id>/audio")

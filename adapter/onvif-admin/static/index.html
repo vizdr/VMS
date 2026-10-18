@@ -549,9 +549,10 @@ async function loadCameras() {
           </div>
           ${c.hasIrControl ? `
           <div class="ctl-row">
-            <button onclick="setIr('${c.cameraId}','AUTO')">IR Auto</button>
-            <button onclick="setIr('${c.cameraId}','OFF')">IR Off</button>
-            <button onclick="setIr('${c.cameraId}','ON')">IR On</button>
+            <!-- ONVIF IrCutFilter: ON = filter in = day (colour, IR off); OFF = night (B/W, IR on). -->
+            <button onclick="setIr('${c.cameraId}','AUTO')" title="The camera's light sensor decides">Day/Night Auto</button>
+            <button onclick="setIr('${c.cameraId}','ON')" title="IR-cut filter in: colour, IR illuminator off">Day</button>
+            <button onclick="setIr('${c.cameraId}','OFF')" title="IR-cut filter out: black-and-white, IR illuminator on">Night</button>
           </div>` : ""}
           ${c.mode === "passthrough" && c.onvifHost ? `
           <div class="ctl-row">
@@ -573,6 +574,7 @@ async function loadCameras() {
       if (pir) pir.checked = !!c.pirRecording;
       loadCodec(c.cameraId);   // not awaited: a slow camera must not hold up the table
       if (c.onvifHost) loadStream(c.cameraId);
+      if (c.onvifHost) { limitModes(sel, c.detectionModes); loadDetection(c.cameraId); }
       if (c.audioCapable && !c.onvifHost) loadMicGain(c.cameraId);
     }
     const anSel = document.getElementById("anCam");
@@ -730,6 +732,26 @@ async function setStreamChoice(id, change) {
 
 // The USB camera's microphone gain (GET/POST /api/usb-cameras/mic-gain): a hardware mixer
 // control, so a change is live at once and saved for every start, with no restart.
+// Grey out the detection modes a camera's ONVIF event list doesn't support (FoundAndFixed.md
+// #64): choosing one would subscribe to events the camera never sends. `modes` null = not known.
+function limitModes(sel, modes) {
+  if (!sel || !Array.isArray(modes)) return;
+  for (const opt of sel.options) {
+    if (opt.value === "manual") continue;
+    const ok = modes.includes(opt.value);
+    opt.disabled = !ok;
+    opt.title = ok ? "" : "this camera doesn't publish the events for this mode";
+  }
+}
+
+// Ask the camera which modes it supports; the server also records them for the cloud page.
+async function loadDetection(id) {
+  try {
+    const d = await api(`/api/cameras/${id}/detection`);
+    limitModes(document.getElementById(`recMode-${id}`), d.modes);
+  } catch (e) { /* keep what the registry said */ }
+}
+
 async function loadMicGain(id) {
   const r = document.getElementById(`micgain-${id}`), v = document.getElementById(`micgainVal-${id}`);
   const st = document.getElementById(`micgainStatus-${id}`);
@@ -890,12 +912,13 @@ async function unregisterCamera(id) {
   }
 }
 
+const IR_MODE_TEXT = { AUTO: "day/night auto", ON: "day (colour, IR off)", OFF: "night (B/W, IR on)" };
 async function setIr(id, mode) {
   const el = document.getElementById(`ctlStatus-${id}`);
   el.textContent = "...";
   try {
     await api(`/api/cameras/${id}/ir`, { method: "POST", body: JSON.stringify({ mode }) });
-    el.textContent = `IR: ${mode}`;
+    el.textContent = `asked for ${IR_MODE_TEXT[mode]}`;
   } catch (e) {
     el.textContent = e.message;
   }

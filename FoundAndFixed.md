@@ -97,6 +97,8 @@ advice (guide §15 "Known traps").
 | 60 | Start pressed in the cloud page during an MQTT drop was lost, and the page only said "not available" | control plane / cloud page | 2026-10-17 | **open** — streams restarted locally |
 | 61 | cam-01 with audio on: the stream died, because Start never restarted the publisher that captures the microphone | producer / publisher | 2026-10-17 | fixed (`stream-cam01.sh`) |
 | 62 | Audio cameras lost audio frames to KVS: a millisecond tie in the SDK's track merge, and invented video DTS on cam-01 | kvssink / producers | 2026-10-17 | fixed (SDK patch 4, `h264timestamper`) |
+| 63 | Both GUIs' IR buttons had ONVIF's ON/OFF backwards: "Force Night" sent the day command | GUIs | 2026-10-18 | fixed (labels); cam-03 ignores the setting |
+| 64 | Detection recording never fired on cam-03: modes mapped to topics it doesn't publish, and the watcher leaked subscriptions | event watcher / GUIs | 2026-10-18 | fixed: Cell grid records on cam-03; its human alarm doesn't reach ONVIF |
 
 ### What they have in common
 
@@ -1606,3 +1608,84 @@ Its measured rule held because, with H.264 from `h264parse`, video DTS is invent
 
 **The rule:** before blaming rates or clocks, print each track's `dts`/`pts` right before kvssink.
 `dts: none` anywhere means kvssink is inventing timestamps.
+
+### #63 — Both GUIs' IR buttons had ONVIF's ON/OFF backwards: "Force Night" sent the day command
+
+**Found:** 2026-10-18: "cam-03 shows only grayscale, and the IR control doesn't work".
+**Referenced from:** `client/index.html`, `adapter/onvif-admin/static/index.html`. **Status:
+fixed** (labels). cam-03's own behaviour is a firmware matter, below.
+
+ONVIF's Imaging service defines `IrCutFilter ON` as the IR-cut filter *engaged*: infrared blocked,
+**day**, colour, IR LEDs off; `OFF` is **night**, black-and-white, IR on. The cloud page sent `ON`
+from "Force Night (IR on)" and `OFF` from "Force Day (IR off)"; the admin page sent `ON` from
+"IR On". The docs only ever recorded that cam-02's control "works", never in which direction, so
+the inversion was never noticed. The labels now follow the spec (Day = `ON`, Night = `OFF`), and the
+status line says "sent: day (colour, IR off)" rather than echoing `ON`. **Recheck on cam-02 when it
+is back**: a camera that implemented the enum backwards would show the old labels were right for
+it.
+
+**cam-03 (H4-52POX-S, firmware 1.1.0-20251110YG) stores the setting and ignores it.**
+`SetImagingSettings` with `IrCutFilter` `ON`, `OFF` or `AUTO` succeeds and reads back exactly what was
+sent, but the picture stays grayscale: colour saturation measured 0 on the wire in all three modes
+(`signalstats` SATAVG), at 09:30 in a dim hallway where `AUTO` had chosen night. Its web interface
+(Boa, "IP CAMERA") has a separate **Light** page (`isSupportLightpage`, `LightCapability`,
+`motionLight` in `ipc/js/common.js`), which is where this camera's day/night and illuminator mode
+evidently live, behind its login and an undocumented API. Not reverse-engineered: set it there.
+Its clock also runs six hours ahead (overlay 15:29 at 09:29 CEST), probably a UTC+8 time zone.
+
+### #64 — Detection recording never fired on cam-03: modes mapped to topics it doesn't publish, and the watcher leaked subscriptions
+
+**Found:** 2026-10-18: Human and Motion recording set for cam-03 in the cloud page; nothing
+recorded, although the live view showed the camera's frames around people. **Referenced from:**
+`adapter/event_watcher.py` (`MODE_TOPICS`, `watch_camera`). **Status: open.**
+
+Three independent reasons, any one enough:
+1. **The modes are cam-02's topics.** `motion` → `tns1:VideoSource/MotionAlarm`, `human` →
+   `tns1:UserAlarm/IVA/HumanShapeDetect`. cam-03's `GetEventProperties` (2026-10-17) lists only
+   `RuleEngine/CellMotionDetector/Motion`, `Device/Trigger/DigitalInput`, `Device/Trigger/Relay` and
+   `Device/HardwareFailure/StorageFailure`. Its boxes around people are an on-screen overlay from its
+   own AI, not an ONVIF event. Only **Cell grid** can work on it, and its cell-motion module has
+   `Sensitivity` 0. Both GUIs offer every mode to any ONVIF camera (`supportsDetection` = "has an
+   ONVIF host").
+2. **The subscription never survives.** The watcher creates a PullPoint subscription without a
+   termination time, never renews it, and never unsubscribes. cam-03 doesn't answer `PullMessages`
+   within the requested `PT10S` (it held a `PT5S` request past 15 s), so the request times out, the
+   watcher logs "subscription lost" and subscribes again: every ~100 s since at least 08:22 UTC, the
+   pull URL counting up `event_service/3`, `/4` … `/7`.
+3. **The leaked subscriptions exhausted the camera.** From 08:29 UTC `CreatePullPointSubscription`
+   failed with the fault "Invalid Hostname", with and without a termination time, and still did
+   20 s later.
+
+**Fixed (watcher and GUIs), 2026-10-18.** The 10 leaked subscriptions were released by sending
+`Unsubscribe` to `/onvif/event_service/0`…`/9` (10 is the camera's limit). The watcher now:
+- subscribes only to a topic the camera's `GetEventProperties` lists, saying why otherwise;
+- pulls with `PT2S` and an 8 s deadline, pausing 1 s when nothing came back (cam-03 also answered
+  3330 pulls a minute when not paced);
+- treats a hung pull or a dropped keep-alive ("Server disconnected") as nothing yet;
+- renews every **20 s**, because cam-03 grants the requested lifetime at creation but only +60 s
+  per Renew, and a subscription died after 60 s in practice;
+- unsubscribes and closes its HTTP session whenever it gives up.
+
+Measured: 10 minutes, 543 pulls, one subscription throughout, a clean unsubscribe, all slots free
+afterwards. `adapter/onvif_events.py` holds the mode→topic map and the topic parser. The admin GUI
+records each camera's supported modes as `detectionModes` (cam-03: `["cellMotion"]`); `GET /pir`
+passes them on, both GUIs grey out the rest, and the admin mode route refuses them.
+
+**What cam-03's firmware does with its own detections** (its web API, read with the web login):
+- `/Pictures/1/Motion`: motion detection `Enable=false`, sensitivity `middle`, an
+  `EnablePedestrianfiltering` option (motion counted only with a person in it), off.
+- `/System/ElectronicDenceUIDesignCfg`: intrusion **on**, `DetectTarget=human`, sensitivity high,
+  linked to the alarm output, local recording and the vendor's push. Line crossing off.
+- With intrusion on, a person walking through the area for 10 minutes produced **no ONVIF event**,
+  not even on `Device/Trigger/Relay`, although the linkage drives the relay. Its detections reach the
+  vendor's own web page over `ws://<camera>/WebSocket/Connect` (JSON `{"auth": {user, mode "0", time,
+  pass = md5(password + time)}, "req": {"fun": "event", "ctrl": "open", "ch": "1", …}}`). One attempt
+  to read it was followed by the camera restarting (HTTP 500, port 80 refused, video back 35 s later);
+  not established whether it caused that.
+- So, through ONVIF, cam-03 can record on **motion** only (Cell grid, once its firmware motion
+  detection is switched on), not on people.
+
+**Confirmed 2026-10-18:** with motion detection ticked in cam-03's web interface ("Normal event" →
+Motion detection) and Cell grid selected, the watcher produced clips at 09:29 and 09:32 UTC,
+48.3 s and 44.3 s of H.265 800×448: full length, so #53 doesn't affect this camera.
+

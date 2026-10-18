@@ -51,14 +51,24 @@ PULL_NS = "http://www.onvif.org/ver10/events/wsdl/PullPointSubscription"
 EVENT_TOPIC = f"{config.TOPIC_PREFIX}/event"
 REGION = config.AWS_REGION
 
-# recordingMode -> the ONVIF topic that drives it. All three were confirmed firing and
-# latching in Phase 0; they differ only in what they classify, so one mapping covers
-# Phase 2 (motion) and Phase 3 (human) alike.
-MODE_TOPICS = {
-    "motion":     "tns1:VideoSource/MotionAlarm",
-    "cellMotion": "tns1:RuleEngine/CellMotionDetector/Motion",
-    "human":      "tns1:UserAlarm/IVA/HumanShapeDetect",
-}
+# recordingMode -> the ONVIF topic that drives it (onvif_events.py). All three were confirmed
+# firing and latching on cam-02 in Phase 0; another camera may advertise only some of them.
+from onvif_events import MODE_TOPICS, camera_topics  # noqa: E402
+import aiohttp  # noqa: E402  -- the onvif library's transport; its errors surface from pulls
+
+# Subscription hygiene (FoundAndFixed.md #64). A subscription gets a lifetime and is renewed
+# well inside it; a pull asks for a short wait and has its own deadline, because cam-03 held
+# PT5S/PT10S pulls open indefinitely; a pull that hangs is "nothing yet", not a lost
+# subscription; and every subscription is unsubscribed when it is given up. cam-03 has 10 slots
+# and the old loop, re-subscribing every ~100 s and never unsubscribing, filled them all.
+SUB_LIFETIME = "PT600S"
+RENEW_EVERY_SEC = 20       # cam-03 grants 600 s at creation, but any Renew only +60 s, and its
+                           # subscriptions died after 60 s in practice: renew well inside that
+PULL_TIMEOUT = "PT2S"
+PULL_DEADLINE_SEC = 8
+PULL_PACE_SEC = 1.0        # cam-03 answers at once, whatever Timeout says: don't spin
+MAX_HUNG_PULLS = 3
+TOPIC_RECHECK_SEC = 300
 COOLDOWN_SEC = 60          # Phase 0: 60 s -> ~1.6 clips/h overall, 0.22/h overnight
 # clip_to_s3 cuts ts+33s, and KVS only returns already-ingested footage, so the publish
 # has to wait for that window to actually elapse. Measured: publishing immediately gave
@@ -150,21 +160,59 @@ async def watch_camera(item, dry_run, stop_event):
     mode = item["recordingMode"]
     topic = MODE_TOPICS[mode]
     gate = ClipGate()
+    warned_topic = False
 
     while not stop_event.is_set():
+        sm = cam = None
         try:
             cam = ONVIFCamera(item["onvifHost"], int(item.get("onvifPort", 80)),
                               item["onvifUser"], item["onvifPassword"], wsdl_dir=WSDL)
             await cam.update_xaddrs()
+
+            # Subscribe only to a topic the camera advertises: otherwise nothing can ever fire,
+            # and the GUIs offered the mode by mistake.
+            topics = await camera_topics(cam)
+            if topic not in topics:
+                if not warned_topic:
+                    log(f"[{cam_id}] mode={mode} needs {topic}, which this camera doesn't publish "
+                        f"(it offers: {', '.join(sorted(topics)) or 'nothing'}) -- not subscribing")
+                    warned_topic = True
+                await _close(None, cam)
+                await asyncio.sleep(TOPIC_RECHECK_SEC)
+                continue
+
             ev = await cam.create_events_service()
-            sub = await ev.CreatePullPointSubscription()
+            sub = await ev.CreatePullPointSubscription({"InitialTerminationTime": SUB_LIFETIME})
             cam.xaddrs[PULL_NS] = sub.SubscriptionReference.Address._value_1
             pull = await cam.create_pullpoint_service()
+            sm = await cam.create_subscription_service("PullPointSubscription")
             log(f"[{cam_id}] subscribed, mode={mode}, topic={topic}")
+            renewed = asyncio.get_event_loop().time()
+            hung = 0
 
             while not stop_event.is_set():
-                msgs = await pull.PullMessages({"Timeout": "PT10S", "MessageLimit": 50})
-                for m in (getattr(msgs, "NotificationMessage", None) or []):
+                now = asyncio.get_event_loop().time()
+                if now - renewed >= RENEW_EVERY_SEC:
+                    await asyncio.wait_for(sm.Renew({"TerminationTime": SUB_LIFETIME}), PULL_DEADLINE_SEC)
+                    renewed = now
+                started = asyncio.get_event_loop().time()
+                try:
+                    msgs = await asyncio.wait_for(
+                        pull.PullMessages({"Timeout": PULL_TIMEOUT, "MessageLimit": 50}),
+                        PULL_DEADLINE_SEC)
+                    hung = 0
+                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                    # A pull that hangs, or a keep-alive connection the camera dropped
+                    # ("Server disconnected"), is "nothing yet": pull again on the same
+                    # subscription. Only a run of them means it is really gone.
+                    hung += 1
+                    if hung >= MAX_HUNG_PULLS:
+                        raise RuntimeError(f"{hung} pulls in a row failed ({type(e).__name__})")
+                    continue
+                notes = getattr(msgs, "NotificationMessage", None) or []
+                if not notes and asyncio.get_event_loop().time() - started < PULL_PACE_SEC:
+                    await asyncio.sleep(PULL_PACE_SEC)
+                for m in notes:
                     try:
                         if str(m.Topic._value_1) != topic:
                             continue
@@ -194,11 +242,33 @@ async def watch_camera(item, dry_run, stop_event):
                             publish_event(cam_id, mode, detected_at, dry_run))
                     elif reason.startswith("cooldown"):
                         log(f"[{cam_id}] detection suppressed: {reason}")
+        except asyncio.CancelledError:
+            await _close(sm, cam)
+            raise
         except Exception as e:
             # Subscriptions expire, cameras reboot, the LAN blips. Log it so a gap is
-            # explainable, then rebuild rather than dying.
+            # explainable, then rebuild rather than dying -- after giving the old one back.
             log(f"[{cam_id}] subscription lost ({type(e).__name__}: {str(e)[:120]}), retrying in 10s")
+            await _close(sm, cam)
             await asyncio.sleep(10)
+        else:
+            await _close(sm, cam)
+
+
+async def _close(sm, cam):
+    """Give the subscription back and close the camera's HTTP session, best effort. A camera
+    has only so many subscriptions (cam-03: 10), and an unclosed session is a leaked socket
+    (the "Unclosed client session" lines this loop used to log)."""
+    if sm is not None:
+        try:
+            await asyncio.wait_for(sm.Unsubscribe(), PULL_DEADLINE_SEC)
+        except Exception:
+            pass
+    if cam is not None:
+        try:
+            await cam.close()
+        except Exception:
+            pass
 
 
 async def main(dry_run):

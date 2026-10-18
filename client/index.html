@@ -443,8 +443,10 @@ function renderCameraPanel(cam) {
     <p>
       IR illumination:
       <button onclick="setIrMode('${cam.id}','AUTO')">Auto</button>
-      <button onclick="setIrMode('${cam.id}','OFF')">Force Day (IR off)</button>
-      <button onclick="setIrMode('${cam.id}','ON')">Force Night (IR on)</button>
+      <!-- ONVIF IrCutFilter: ON = the IR-cut filter is in (day: colour, IR LEDs off), OFF = it is
+           out (night: black-and-white, IR on). These labels had it the other way round. -->
+      <button onclick="setIrMode('${cam.id}','ON')">Force Day (colour, IR off)</button>
+      <button onclick="setIrMode('${cam.id}','OFF')">Force Night (B/W, IR on)</button>
       <span id="irStatus-${cam.id}" class="status"></span>
     </p>` : ""}
 
@@ -613,6 +615,7 @@ async function login() {
       // the node is in the DOM rather than as a `selected` attribute in the template.
       const sel = document.getElementById(`recMode-${cam.id}`);
       if (sel) sel.value = cam.recordingMode || "manual";
+      limitModes(sel, (pirFirst[cam.id] || {}).detectionModes);   // from GET /pir, read before rendering
       const aud = document.getElementById(`audio-${cam.id}`);
       if (aud) aud.checked = !!cam.audioEnabled;
       const ob = document.getElementById(`outage-${cam.id}`);
@@ -859,9 +862,10 @@ async function setOutageBuffer(camera, secs) {
   }
 }
 
+const IR_MODE_TEXT = { AUTO: "day/night auto", ON: "day (colour, IR off)", OFF: "night (B/W, IR on)" };
 async function setIrMode(camera, mode) {
   const statusEl = document.getElementById(`irStatus-${camera}`);
-  statusEl.textContent = `setting ${mode}...`;
+  statusEl.textContent = `asking for ${IR_MODE_TEXT[mode]}...`;
   try {
     const r = await fetch(`${API}/cmd`, {
       method: "POST",
@@ -869,7 +873,9 @@ async function setIrMode(camera, mode) {
       body: JSON.stringify({ action: "ir", camera, mode }),
     });
     const data = await r.json();
-    statusEl.textContent = r.ok ? `IR mode: ${mode}` : "error: " + (data.error || r.status);
+    // Sent, not confirmed: the command reaches the Pi over MQTT (FoundAndFixed.md #60), and a
+    // camera can accept the setting and ignore it (cam-03, #63).
+    statusEl.textContent = r.ok ? `sent: ${IR_MODE_TEXT[mode]}` : "error: " + (data.error || r.status);
   } catch (e) {
     statusEl.textContent = "error: " + e.message;
   }
@@ -1213,6 +1219,18 @@ async function pirFetch(path, opts = {}) {
 // camera for the PIR panel, does. Its answers are kept for initPir(). A camera whose /pir fails is
 // shown, as before this existed.
 let pirFirst = {};
+
+// Grey out the detection modes a camera's ONVIF event list doesn't support (FoundAndFixed.md
+// #64): choosing one would subscribe to events the camera never sends. `modes` null = not known.
+function limitModes(sel, modes) {
+  if (!sel || !Array.isArray(modes)) return;
+  for (const opt of sel.options) {
+    if (opt.value === "manual") continue;
+    const ok = modes.includes(opt.value);
+    opt.disabled = !ok;
+    opt.title = ok ? "" : "this camera doesn't publish the events for this mode";
+  }
+}
 
 async function registeredCameras(cameras) {
   const answers = await Promise.all(cameras.map(c => pirFetch(`/pir?camera=${c.id}`).catch(() => null)));
