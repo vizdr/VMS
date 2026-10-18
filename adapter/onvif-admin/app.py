@@ -15,6 +15,7 @@ unauthenticated on this LAN. Not intended to be port-forwarded or exposed beyond
 """
 import asyncio
 import base64
+import copy
 import json
 import re
 import shutil
@@ -22,6 +23,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -469,9 +471,11 @@ def register_camera():
                           ExpressionAttributeValues=values)
         if reactivate and camera_control.unit_name(camera_id).startswith("kvs-cam@"):
             camera_control.set_boot_start(camera_id, True)
+        detection = _registration_detection(camera_id, host, port, user, password)
         _refresh_path_cache()
         return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"],
-                        "updated": True, "reactivated": reactivate, "fps": fps_result}), 200
+                        "updated": True, "reactivated": reactivate, "fps": fps_result,
+                        "detectionModes": detection}), 200
 
     # 0. The frame rate, on the camera, before MediaMTX ever connects: a change can restart the
     #    camera's RTSP session, which costs nothing yet. Not fatal -- a camera without Media2
@@ -530,9 +534,20 @@ def register_camera():
         "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
 
+    detection = _registration_detection(camera_id, host, port, user, password)
     _refresh_path_cache()
     return jsonify({"cameraId": camera_id, "kvsStreamArn": stream_arn, "updated": False,
-                    "fps": fps_result}), 201
+                    "fps": fps_result, "detectionModes": detection}), 201
+
+
+def _registration_detection(camera_id, host, port, user, password):
+    """Record the camera's recording triggers at registration, so both GUIs restrict the
+    selector from the first load. Never fails the registration; None when it couldn't ask."""
+    try:
+        dmap, _, web_url = _read_detection(host, port, user, password)
+    except Exception:  # noqa: BLE001
+        return None
+    return _record_detection(camera_id, dmap, web_url=web_url)
 
 
 def _set_camera_fps(client, stream_uri, fps):
@@ -733,12 +748,55 @@ def set_recording_mode(camera_id):
     return jsonify({"cameraId": camera_id, "recordingMode": mode})
 
 
+def _read_detection(host, port, user, password):
+    """(detection map, topics, web URL) read from the camera: its event list (onvif_events) and
+    its own settings page, if it has one (onvif_discovery.web_url)."""
+    async def read():
+        from onvif import ONVIFCamera
+        import onvif_events
+        cam = ONVIFCamera(host, int(port or 80), user, password, wsdl_dir=camera_control.WSDL_DIR)
+        try:
+            await cam.update_xaddrs()
+            dmap, topics = await onvif_events.camera_detection(cam)
+            try:
+                ports = await onvif_discovery.http_ports(cam)
+            except Exception:  # noqa: BLE001
+                ports = []
+            return dmap, topics, ports
+        finally:
+            await cam.close()
+    dmap, topics, ports = asyncio.run(asyncio.wait_for(read(), 15))
+    return dmap, topics, onvif_discovery.web_url(host, ports)
+
+
+def _record_detection(camera_id, dmap, item=None, web_url=None):
+    """Write detectionModes (the modes), detectionTopics (mode -> topic and on/off field) and
+    webUrl (the camera's own settings page, where it has one) to the registry, field-level and
+    only when they changed. New fields, invisible to the successor; recordingMode keeps its four
+    shared values. Best effort: the next table load retries."""
+    import onvif_events
+    modes = onvif_events.supported_modes(dmap)
+    topics = {m: {"topic": v["topic"], "field": v["field"]} for m, v in dmap.items()}
+    if item is not None and item.get("detectionModes") == modes and \
+            item.get("detectionTopics") == topics and (web_url is None or item.get("webUrl") == web_url):
+        return modes
+    sets, values = "detectionModes = :m, detectionTopics = :t", {":m": modes, ":t": topics}
+    if web_url:
+        sets += ", webUrl = :w"
+        values[":w"] = web_url
+    try:
+        cameras_table().update_item(Key={"cameraId": camera_id}, UpdateExpression=f"SET {sets}",
+                                    ExpressionAttributeValues=values)
+    except Exception:  # noqa: BLE001
+        pass
+    return modes
+
+
 @app.get("/api/cameras/<camera_id>/detection")
 def get_detection_modes(camera_id):
-    """The detection modes this camera can serve: those whose ONVIF topic its GetEventProperties
-    lists (onvif_events). Once per table load, like the codec. The result goes to the registry
-    as detectionModes, field-level and only when it changed, so the cloud page (via GET /pir) and
-    the mode routes offer the same choice. A new field: invisible to the successor's code."""
+    """The detection modes this camera can serve and the topic behind each, read from its own
+    event list (onvif_events.detection_map), once per table load like the codec, and recorded in
+    the registry so the cloud page (via GET /pir) and the mode routes offer the same choice."""
     try:
         item = _camera_item_quick(camera_id)
     except Exception as e:  # noqa: BLE001
@@ -747,32 +805,165 @@ def get_detection_modes(camera_id):
         return jsonify({"error": "unknown camera"}), 404
     if not item.get("onvifHost"):
         return jsonify({"modes": [], "reason": "no ONVIF host: manual recording only"})
-
-    async def read():
-        from onvif import ONVIFCamera
-        import onvif_events
-        cam = ONVIFCamera(item["onvifHost"], int(item.get("onvifPort", 80)), item["onvifUser"],
-                          item["onvifPassword"], wsdl_dir=camera_control.WSDL_DIR)
-        try:
-            await cam.update_xaddrs()
-            return await onvif_events.camera_topics(cam)
-        finally:
-            await cam.close()
     try:
-        import onvif_events
-        topics = asyncio.run(asyncio.wait_for(read(), 15))
+        dmap, topics, web_url = _read_detection(item["onvifHost"], item.get("onvifPort", 80),
+                                                item["onvifUser"], item["onvifPassword"])
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"camera unreachable ({type(e).__name__})",
-                        "modes": item.get("detectionModes")}), 502
-    modes = onvif_events.supported_modes(topics)
-    if item.get("detectionModes") != modes:
-        try:
-            cameras_table().update_item(Key={"cameraId": camera_id},
-                                        UpdateExpression="SET detectionModes = :m",
-                                        ExpressionAttributeValues={":m": modes})
-        except Exception:  # noqa: BLE001 -- the answer stands; the next load writes it
-            pass
-    return jsonify({"modes": modes, "topics": sorted(topics)})
+                        "modes": item.get("detectionModes"), "webUrl": item.get("webUrl"),
+                        "tests": item.get("detectionTests")}), 502
+    modes = _record_detection(camera_id, dmap, item, web_url)
+    return jsonify({"modes": modes, "detection": dmap, "topics": sorted(topics),
+                    "webUrl": web_url or item.get("webUrl"), "tests": item.get("detectionTests")})
+
+
+# --- trigger test ------------------------------------------------------------------------------
+#
+# "Offered" is not "works": a camera's event list says which detections it has, not that they are
+# switched on (cam-03's cell motion needed motion detection ticked in its own web interface) or
+# that they reach ONVIF at all (its human alarm never does). The test listens to the camera for up
+# to a minute while someone walks past, for every trigger it offers at once, and records what
+# arrived. In memory while it runs, polled by the page without any AWS call (FoundAndFixed.md #55);
+# the outcome goes to the registry as detectionTests when it ends, for both GUIs to show.
+
+TRIGGER_TEST_SEC = 60
+START_STATE_SEC = 2.0
+_trigger_tests = {}                 # cameraId -> state, written by the test's thread
+_trigger_lock = threading.Lock()
+
+
+@app.post("/api/cameras/<camera_id>/detection/test")
+def start_trigger_test(camera_id):
+    secs = (request.get_json(force=True, silent=True) or {}).get("seconds", TRIGGER_TEST_SEC)
+    if not isinstance(secs, int) or not 15 <= secs <= 180:
+        return jsonify({"error": "seconds must be a whole number from 15 to 180"}), 400
+    try:
+        item = _camera_item_quick(camera_id)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"registry unreachable ({type(e).__name__})"}), 503
+    if not item:
+        return jsonify({"error": "unknown camera"}), 404
+    if not item.get("onvifHost"):
+        return jsonify({"error": "no ONVIF host: this camera has no events to test"}), 400
+    with _trigger_lock:
+        running = _trigger_tests.get(camera_id)
+        if running and running["state"] in ("starting", "listening"):
+            return jsonify({"error": "a test is already running for this camera"}), 409
+        state = {"state": "starting", "cameraId": camera_id, "seconds": secs,
+                 "startedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "modes": {}, "otherTopics": {}, "error": None, "_stop": threading.Event()}
+        _trigger_tests[camera_id] = state
+    threading.Thread(target=lambda: asyncio.run(_trigger_test(item, state)), daemon=True).start()
+    return jsonify(_public_test(state)), 202
+
+
+@app.get("/api/cameras/<camera_id>/detection/test")
+def trigger_test_status(camera_id):
+    with _trigger_lock:
+        state = _trigger_tests.get(camera_id)
+        return jsonify(_public_test(state) if state else {"state": "none", "cameraId": camera_id})
+
+
+@app.delete("/api/cameras/<camera_id>/detection/test")
+def stop_trigger_test(camera_id):
+    with _trigger_lock:
+        state = _trigger_tests.get(camera_id)
+        if state:
+            state["_stop"].set()
+        return jsonify(_public_test(state) if state else {"state": "none", "cameraId": camera_id})
+
+
+def _public_test(state):
+    out = {k: copy.deepcopy(v) for k, v in state.items() if not k.startswith("_")}
+    if state["state"] == "listening":
+        out["secondsLeft"] = max(0, int(state["_deadline"] - time.monotonic()))
+    return out
+
+
+async def _trigger_test(item, state):
+    """Listen for every trigger the camera offers until each has fired, the time is up, or Stop.
+
+    What a fresh subscription delivers first -- the Initialized state and any backlog of earlier
+    Changed messages, which cam-03 sends together 0.3 s after subscribing -- is the state *at the
+    start*, not a detection during the walk: anything in the first START_STATE_SEC, or marked
+    Initialized, is recorded apart and never counts as seen."""
+    from onvif import ONVIFCamera
+    import onvif_events
+    cam = None
+    try:
+        cam = ONVIFCamera(item["onvifHost"], int(item.get("onvifPort", 80)), item["onvifUser"],
+                          item["onvifPassword"], wsdl_dir=camera_control.WSDL_DIR)
+        await cam.update_xaddrs()
+        dmap, _ = await onvif_events.camera_detection(cam)
+        by_topic = {v["topic"]: m for m, v in dmap.items()}
+        with _trigger_lock:
+            state["modes"] = {m: {"topic": v["topic"], "field": v["field"], "seen": 0,
+                                  "firstAfterSec": None, "atStart": None} for m, v in dmap.items()}
+        if not dmap:
+            return
+        async with onvif_events.PullSubscription(cam) as sub:
+            t0 = time.monotonic()
+            with _trigger_lock:
+                state["state"], state["_deadline"] = "listening", t0 + state["seconds"]
+            while time.monotonic() < state["_deadline"] and not state["_stop"].is_set():
+                notes = await sub.pull()
+                # The camera's opening report (Initialized state, backlog) arrives at once: cam-03
+                # sent it 0.3 s after subscribing. A person can't have walked in by then.
+                first = time.monotonic() - t0 < START_STATE_SEC
+                with _trigger_lock:
+                    for note in notes:
+                        topic, op, data = onvif_events.parse_notification(note)
+                        mode = by_topic.get(topic)
+                        if mode is None:
+                            state["otherTopics"][topic] = state["otherTopics"].get(topic, 0) + 1
+                            continue
+                        field = dmap[mode]["field"]
+                        if field not in data:
+                            continue
+                        on, entry = onvif_events.is_on(data[field]), state["modes"][mode]
+                        if first or op == "Initialized":
+                            entry["atStart"] = on
+                        elif on:
+                            entry["seen"] += 1
+                            if entry["firstAfterSec"] is None:
+                                entry["firstAfterSec"] = round(time.monotonic() - t0, 1)
+                    if all(e["seen"] for e in state["modes"].values()):
+                        break
+    except Exception as e:  # noqa: BLE001
+        with _trigger_lock:
+            state["error"] = f"{type(e).__name__}: {str(e)[:160]}"
+    finally:
+        if cam is not None:
+            try:
+                await cam.close()
+            except Exception:  # noqa: BLE001
+                pass
+        with _trigger_lock:
+            state["endedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            state["stopped"] = state["_stop"].is_set()
+            state["state"] = "error" if state["error"] else "done"
+        if not state["error"] and state["modes"]:
+            _record_trigger_test(item["cameraId"], state)
+
+
+def _record_trigger_test(camera_id, state):
+    """Merge this test's outcome into the registry's detectionTests (mode -> result, when, how
+    many), best effort. A stopped test records only what it saw: "not seen" needs the full time."""
+    results = {}
+    for mode, e in state["modes"].items():
+        if e["seen"]:
+            results[mode] = {"result": "seen", "at": state["endedAt"], "events": e["seen"]}
+        elif not state["stopped"]:
+            results[mode] = {"result": "not-seen", "at": state["endedAt"], "events": 0}
+    if not results:
+        return
+    try:
+        table = cameras_table()
+        current = (table.get_item(Key={"cameraId": camera_id}).get("Item") or {}).get("detectionTests") or {}
+        table.update_item(Key={"cameraId": camera_id}, UpdateExpression="SET detectionTests = :d",
+                          ExpressionAttributeValues={":d": {**current, **results}})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @app.post("/api/cameras/<camera_id>/audio")

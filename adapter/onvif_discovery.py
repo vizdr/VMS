@@ -9,7 +9,9 @@ import sys
 
 from onvif import ONVIFCamera
 
+import onvif_events
 import onvif_media2
+import requests
 from wsdiscovery.discovery import ThreadedWSDiscovery as WSDiscovery
 from wsdiscovery import QName
 
@@ -81,8 +83,25 @@ async def enrich(xaddr: str, user: str, password: str) -> dict:
         except Exception:
             has_ir_control = False
 
+    # The recording triggers it can serve, from its own event list (onvif_events.detection_map):
+    # {mode: {topic, field, match}}. What it offers, not proof it fires (FoundAndFixed.md #64).
+    try:
+        detection, topics = await onvif_events.camera_detection(cam)
+        detection_error = None
+    except Exception as e:  # noqa: BLE001 -- an event service is optional; the card still shows
+        detection, topics, detection_error = {}, set(), f"{type(e).__name__}: {e}"
+
+    try:
+        ports = await http_ports(cam)
+    except Exception:  # noqa: BLE001 -- the web link is a convenience; try port 80 alone
+        ports = []
+
     await cam.close()
     return {
+        "httpPorts": ports,
+        "detection": detection,
+        "eventTopics": sorted(topics),
+        "detectionError": detection_error,
         "host": host,
         "port": port,
         "manufacturer": info.Manufacturer,
@@ -101,6 +120,7 @@ def enrich_sync(xaddr: str, user: str, password: str) -> dict:
     rate and the frame rates it accepts), each with its microphone -- what the registration form
     offers. A camera without Media2 still enriches, with an empty stream list."""
     details = asyncio.run(enrich(xaddr, user, password))
+    details["webUrl"] = web_url(details["host"], details.pop("httpPorts"))
     by_profile = details.pop("audio_by_profile")
     try:
         found = onvif_media2.streams(onvif_media2.Media2(details["host"], details["port"],
@@ -114,3 +134,39 @@ def enrich_sync(xaddr: str, user: str, password: str) -> dict:
          "fpsChoices": x["fpsChoices"], "audio": by_profile.get(x["token"], details["audio"])}
         for x in found]
     return details
+
+
+async def http_ports(cam) -> list[int]:
+    """The HTTP ports the camera reports enabled (GetNetworkProtocols), for its web interface."""
+    dm = await cam.create_devicemgmt_service()
+    ports = []
+    for proto in await dm.GetNetworkProtocols() or []:
+        if proto.Name == "HTTP" and proto.Enabled:
+            ports += [int(p) for p in (proto.Port or [])]
+    return ports
+
+
+def web_url(host: str, ports=None) -> str | None:
+    """The camera's own web interface, or None when it has none we can see.
+
+    Asked of the camera, not assumed: some cameras serve only ONVIF on HTTP and have no settings
+    page (a Tapo, for one), and a link to nothing would be worse than none. A page is a 200 with
+    HTML, or a 401/403 asking for a login; the ports come from GetNetworkProtocols, then 80. The
+    link is for a browser on the camera's LAN -- from anywhere else it leads nowhere.
+    """
+    seen = []
+    for port in list(ports or []) + [80]:
+        if port in seen:
+            continue
+        seen.append(port)
+        url = f"http://{host}/" if port == 80 else f"http://{host}:{port}/"
+        try:
+            r = requests.get(url, timeout=3, allow_redirects=True)
+        except requests.RequestException:
+            continue
+        ctype = r.headers.get("Content-Type", "").lower()
+        if (r.status_code == 200 and "html" in ctype) or \
+                (r.status_code in (401, 403) and ("html" in ctype or "WWW-Authenticate" in r.headers)):
+            return url
+    return None
+

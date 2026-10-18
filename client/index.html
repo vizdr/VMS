@@ -10,6 +10,7 @@
   input { display: block; margin: 0.5rem 0; padding: 0.5rem; width: 100%; box-sizing: border-box; }
   button { padding: 0.5rem 1rem; margin-right: 0.5rem; }
   .status { color: #666; font-size: 0.9rem; }
+  .trigger-note { color: #666; font-size: 0.8rem; margin: -0.4rem 0 0.8rem; }
   /* Audio gets its own small panel: the two settings in it mean different things (one
      changes the stream for everyone, one only changes this browser) and sitting them
      loose among the buttons made that unreadable. */
@@ -461,6 +462,7 @@ function renderCameraPanel(cam) {
       </select>
       <span id="recModeStatus-${cam.id}" class="status">${recModeHint(cam.recordingMode, cam.supportsDetection)}</span>
     </p>
+    ${cam.supportsDetection ? `<p class="trigger-note">${triggerNoteCloud((pirFirst[cam.id] || {}))}</p>` : ""}
 
     <div class="setting-section">
       <h3>Audio</h3>
@@ -1230,6 +1232,21 @@ function limitModes(sel, modes) {
     opt.disabled = !ok;
     opt.title = ok ? "" : "this camera doesn't publish the events for this mode";
   }
+}
+
+// Detection triggers may need switching on in the camera's own settings (FoundAndFixed.md #64);
+// its page is a LAN address, so the link works only from home. Tests run from the local admin page,
+// and their outcome arrives here through GET /pir.
+const MODE_NAMES = { motion: "Motion", cellMotion: "Cell grid", human: "Human" };
+function triggerNoteCloud(p) {
+  const u = typeof p.webUrl === "string" && /^http:\/\/[A-Za-z0-9.-]+(:\d+)?\/$/.test(p.webUrl) ? p.webUrl : null;
+  const tests = p.detectionTests || {};
+  const done = Object.keys(MODE_NAMES).filter(m => tests[m]).map(m =>
+    `${MODE_NAMES[m]} ${tests[m].result === "seen" ? "✓" : "✗"} ${escText(new Date(tests[m].at).toLocaleDateString())}`);
+  return "Some triggers fire only after they are switched on in the camera's own settings"
+    + (u ? ` (<a href="${u}" target="_blank" rel="noopener">open</a>, home network only)` : "")
+    + ". Test them with \"Test triggers\" in the local admin page."
+    + (done.length ? ` Last test: ${done.join(" · ")}.` : "");
 }
 
 async function registeredCameras(cameras) {

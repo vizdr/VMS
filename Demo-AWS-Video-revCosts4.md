@@ -1897,6 +1897,42 @@ differ, and the operator means producer time.
 **Checkpoint 8:** publishing an event to `adapter/adapter-01/event` produces a playable
 MP4 in S3 and a row in DynamoDB.
 
+### 9.3 Recording triggers per camera, and testing them (2026-10-18)
+
+The detection modes (Motion, Cell grid, Human) were cam-02's ONVIF topics. Several users with
+different cameras need them per camera, so `adapter/onvif_events.py` reads each camera's own event
+list (`GetEventProperties`) and maps every mode it can serve to the camera's topic and on/off
+field:
+- **Known names first**, then a topic whose **wording** names the mode (`Human|People|Person|
+  Pedestrian`, `CellMotion`, `Motion`), keeping only topics with an on/off field.
+- **Discovery shows the result** on the device card ("Recording triggers: Manual, Cell grid").
+- **Registration and the table record it** as `detectionModes` and `detectionTopics`. Both GUIs
+  grey out the rest, and the watcher subscribes to the camera's own topic.
+- **`recordingMode` keeps its four shared values**, so the successor's code is unaffected.
+
+**Offered is not working.** cam-03 advertises cell motion but sends nothing until motion detection
+is ticked in its own web interface, and its human intrusion alarm never reaches ONVIF
+(`FoundAndFixed.md` #64). Two things deal with that:
+- **A note next to the recording-mode selector**, in both GUIs: "Some triggers fire only after they
+  are switched on in the camera's own settings", with a link to the camera's web interface where it
+  has one. The admin GUI finds it from the HTTP ports in `GetNetworkProtocols` and links it only if
+  a page answers (HTML, or a 401/403 login); some cameras have none. Saved as `webUrl`. In the cloud
+  page it says "home network only", since it is a LAN address.
+- **"Test triggers"** in the admin GUI (`POST`/`GET`/`DELETE /api/cameras/<id>/detection/test`).
+  It listens to the camera for up to 60 s while someone walks past, for every offered trigger at
+  once, and stops early when all have fired. A fresh subscription's opening report (the
+  `Initialized` state and any backlog, which cam-03 sends 0.3 s after subscribing) is recorded apart
+  and never counts. The page polls the test locally, with no AWS call. The outcome is saved as
+  `detectionTests` (mode → seen / not seen, when, how many) and shown in both GUIs ("Last test:
+  Cell grid ✓"). A stopped test records only what it saw.
+
+Measured on cam-03: Cell grid seen 11 times, first after 20.5 s, recorded; through the admin page's
+button, 5 times, first after 20.2 s.
+
+Both the test and the watcher use one subscription implementation, `onvif_events.PullSubscription`:
+renew every 20 s, `PT2S` pulls with an 8 s deadline, a hang or dropped connection counted as
+"nothing yet", always unsubscribed.
+
 ---
 
 ## 10. Phase 9 — Measurements (what makes this a portfolio piece)

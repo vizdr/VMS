@@ -29,6 +29,7 @@
   .badge-registered { background: #555; }
   .badge-unregistered { background: #b8860b; }
   .badge-muted { background: #999; }
+  .trigger-note { font-size: 0.75rem; color: #666; max-width: 240px; margin: 0.2rem 0; }
   button.danger { color: #c0392b; }
   .kvs-state { font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 1rem; color: #fff; white-space: nowrap; }
   .kvs-active { background: #2a7d2a; }
@@ -197,6 +198,17 @@ const DEFAULT_FPS = 10;       // what a newly registered camera gets unless chan
 const codecName = e => ({ H264: "H.264", H265: "H.265", JPEG: "JPEG", G711: "G.711" }[e] || e);
 const streamText = x => `${x.name} ${codecName(x.encoding)} ${x.width}×${x.height} @${x.fps} fps`;
 const audioText = a => `${codecName(a.encoding)} ${a.sampleRateKHz} kHz`;
+const MODE_NAMES = { motion: "Motion", cellMotion: "Cell grid", human: "Human" };
+// The detection modes a discovered camera offers (onvif_events.detection_map), each with the
+// topic behind it; "manual" is always possible.
+function triggerText(details) {
+  if (details.detectionError) return `unknown (no ONVIF events: ${details.detectionError})`;
+  const d = details.detection || {};
+  const offered = Object.keys(MODE_NAMES).filter(m => d[m]);
+  return offered.length
+    ? "Manual, " + offered.map(m => `<span title="${d[m].topic} (${d[m].field})">${MODE_NAMES[m]}</span>`).join(", ")
+    : "Manual only (the camera publishes no detection events over ONVIF)";
+}
 
 // Two RTSP URIs name the same stream when path and query agree, credentials aside
 // (onvif_media2.same_stream, the server's version of this).
@@ -279,6 +291,8 @@ function renderDevice(d, i) {
     <div class="meta">${d.xaddr || ""}</div>
     ${details ? `<div class="meta">Profile: ${details.profile} · Stream: ${details.stream_uri}</div>` : ""}
     ${streams.length ? `<div class="meta">Streams: ${streams.map(streamText).join(" · ")}</div>` : ""}
+    ${details ? `<div class="meta" title="From the camera's own ONVIF event list. Offered is not proven: a detection may need enabling in the camera's web interface first.">Recording triggers: ${triggerText(details)}</div>
+    <div class="meta">${triggerNote(details.webUrl)} After registering, check them with "Test triggers".</div>` : ""}
     ${details && details.streamsError ? `<div class="meta">Streams unknown (no ONVIF Media2): ${details.streamsError}</div>` : ""}
     ${d.enrichError ? `<div class="error meta">${d.enrichError}</div>` : ""}
     <p><button onclick="toggleForm(${i})">${existingId ? `Re-register ${existingId}` : "Register this camera"}</button>
@@ -467,6 +481,12 @@ async function loadCameras() {
             <option value="human">Human</option>
           </select>
           <div id="recModeStatus-${c.cameraId}" class="status"></div>
+          ${c.onvifHost ? `
+          <div class="trigger-note" id="trigNote-${c.cameraId}">${triggerNote(c.webUrl)}</div>
+          <button id="trigTest-${c.cameraId}" onclick="toggleTriggerTest('${c.cameraId}')"
+                  title="Listens to the camera for up to a minute while you walk past, for every trigger it offers"
+                  style="font-size:0.75rem; padding:0.15rem 0.4rem">Test triggers</button>
+          <div id="trigStatus-${c.cameraId}" class="status">${lastTestText(c.detectionTests)}</div>` : ""}
           <div>
             <label class="cb ${c.audioCapable ? "" : "disabled"}"
                    title="${c.audioCapable ? "Adds sound to the live view and to every clip. Applies on this camera's next Start." : "This camera has no usable audio source"}">
@@ -744,12 +764,93 @@ function limitModes(sel, modes) {
   }
 }
 
-// Ask the camera which modes it supports; the server also records them for the cloud page.
+// Ask the camera which modes it supports; the server also records them for the cloud page,
+// with the camera's settings page and the last trigger test.
 async function loadDetection(id) {
   try {
     const d = await api(`/api/cameras/${id}/detection`);
     limitModes(document.getElementById(`recMode-${id}`), d.modes);
+    const note = document.getElementById(`trigNote-${id}`);
+    if (note) note.innerHTML = triggerNote(d.webUrl);
+    const st = document.getElementById(`trigStatus-${id}`);
+    if (st && !triggerPolls[id]) st.textContent = lastTestText(d.tests);
   } catch (e) { /* keep what the registry said */ }
+}
+
+// A camera may offer a trigger it only sends once switched on in its own settings (cam-03's cell
+// motion: "Normal event" > Motion detection), so say so, with a link where the camera has a page.
+// Only http://host[:port]/ is linked: the value comes from the registry.
+function safeWebUrl(u) {
+  return typeof u === "string" && /^http:\/\/[A-Za-z0-9.-]+(:\d+)?\/$/.test(u) ? u : null;
+}
+function triggerNote(webUrl) {
+  const u = safeWebUrl(webUrl);
+  return "Some triggers fire only after they are switched on in the camera's own settings"
+    + (u ? `: <a href="${u}" target="_blank" rel="noopener">open ${u.replace(/^http:\/\/|\/$/g, "")}</a>.` : ".");
+}
+
+// The registry's detectionTests: {mode: {result: "seen"|"not-seen", at, events}}.
+function lastTestText(tests) {
+  if (!tests || !Object.keys(tests).length) return "Not tested yet.";
+  return "Last test: " + Object.keys(MODE_NAMES).filter(m => tests[m]).map(m => {
+    const t = tests[m], when = new Date(t.at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    return `${MODE_NAMES[m]} ${t.result === "seen" ? "✓ seen" : "✗ not seen"} (${when})`;
+  }).join(" · ");
+}
+
+// --- trigger test: POST starts it, GET is polled (local only, no AWS), DELETE stops it ---------
+const triggerPolls = {};
+
+async function toggleTriggerTest(id) {
+  const btn = document.getElementById(`trigTest-${id}`);
+  if (triggerPolls[id]) {                       // running: Stop
+    await api(`/api/cameras/${id}/detection/test`, { method: "DELETE" }).catch(() => {});
+    return;
+  }
+  try {
+    renderTriggerTest(id, await api(`/api/cameras/${id}/detection/test`, { method: "POST", body: "{}" }));
+  } catch (e) {
+    const st = document.getElementById(`trigStatus-${id}`);
+    st.textContent = e.message; st.className = "status error";
+    return;
+  }
+  btn.textContent = "Stop test";
+  triggerPolls[id] = setInterval(async () => {
+    let d;
+    try { d = await api(`/api/cameras/${id}/detection/test`); } catch (e) { return; }
+    renderTriggerTest(id, d);
+    if (d.state === "done" || d.state === "error") {
+      clearInterval(triggerPolls[id]); delete triggerPolls[id];
+      btn.textContent = "Test triggers";
+    }
+  }, 2000);
+}
+
+function renderTriggerTest(id, d) {
+  const st = document.getElementById(`trigStatus-${id}`);
+  st.className = "status";
+  const modes = Object.keys(MODE_NAMES).filter(m => d.modes && d.modes[m]);
+  if (d.state === "starting") { st.textContent = "connecting to the camera…"; return; }
+  if (d.state === "error") { st.textContent = `test failed: ${d.error}`; st.className = "status error"; return; }
+  if (d.state === "done" && !modes.length) {
+    st.textContent = "This camera offers no detection trigger over ONVIF: manual recording only."; return;
+  }
+  const parts = modes.map(m => {
+    const e = d.modes[m];
+    if (e.seen) return `${MODE_NAMES[m]} ✓ seen ${e.seen}× (first after ${e.firstAfterSec} s)`;
+    return `${MODE_NAMES[m]} ${d.state === "done" ? "✗ not seen" : "… waiting"}`;
+  });
+  if (d.state === "listening") {
+    st.textContent = `Walk in front of the camera now — ${d.secondsLeft} s left. ` + parts.join(" · ");
+    return;
+  }
+  const missed = modes.filter(m => !d.modes[m].seen);
+  const u = safeWebUrl((document.querySelector(`#trigNote-${id} a`) || {}).href);
+  st.innerHTML = parts.join(" · ") + (d.stopped ? " (stopped)" : "")
+    + (missed.length && !d.stopped
+       ? `. Not seen: switch ${missed.map(m => MODE_NAMES[m]).join(", ")} on in the camera's settings`
+         + (u ? ` (<a href="${u}" target="_blank" rel="noopener">open</a>)` : "") + ", then test again."
+       : ".");
 }
 
 async function loadMicGain(id) {

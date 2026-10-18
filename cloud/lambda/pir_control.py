@@ -90,6 +90,10 @@ def get_pir(camera):
         # The detection modes the camera's own event list supports, recorded by the admin GUI
         # (FoundAndFixed.md #64); None until it has looked. The page greys out the rest.
         "detectionModes": item.get("detectionModes"),
+        # The camera's own settings page (a LAN address, so a link only from home) and the last
+        # trigger test run from the admin GUI: {mode: {result, at, events}}.
+        "webUrl": item.get("webUrl"),
+        "detectionTests": item.get("detectionTests"),
     })
 
 

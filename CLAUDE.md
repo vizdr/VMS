@@ -496,9 +496,16 @@ can't name H.265). **Done means MediaMTX receives the new codec**, never the cam
 cam-03 reported H264 2880×1620 while it sent H.265 2560×1440. It writes `videoCodec`,
 `videoCodecCaps`, `videoEncoderToken`, `videoCodecProbe` with the successor's meanings and
 never `videoCodecDefault`. cam-01 shows H.264 only: the Pi has no H.265 encoder.
-Its recording-mode selector offers only the modes the camera's ONVIF event list supports
-(`GET /api/cameras/<id>/detection` records them as `detectionModes`, read by the cloud page via
-`GET /pir`; `adapter/onvif_events.py`). cam-03 supports Cell grid only, and only with motion
+Its recording-mode selector offers only the modes the camera's ONVIF event list supports, found
+per camera from discovery on (`adapter/onvif_events.py`: known topic names, then the topic's wording,
+only topics with an on/off field). Registration and `GET /api/cameras/<id>/detection` record them as
+`detectionModes` and `detectionTopics` (mode → the camera's topic and field); the cloud page reads
+the modes via `GET /pir`, and the watcher uses the camera's own topic. Offered is not proven: a
+detection may need enabling in the camera's own interface, or may not reach ONVIF at all. So both
+GUIs say so next to the selector, linking the camera's web interface where it has one (`webUrl`,
+found from `GetNetworkProtocols` and checked to serve a page), and the admin GUI's **Test triggers**
+listens up to 60 s while someone walks past and records `detectionTests` (guide §9.3). The test and
+the watcher share `onvif_events.PullSubscription`. cam-03 supports Cell grid only, and only with motion
 detection ticked in its own web interface.
 Next to it, **stream** (main/sub) and **fps** (10/15/20/25, each only where the stream's encoder
 accepts it) selectors (`GET`/`POST /api/cameras/<id>/stream`, guide §21.6): a stream switch

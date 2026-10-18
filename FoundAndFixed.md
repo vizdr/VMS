@@ -1685,6 +1685,15 @@ passes them on, both GUIs grey out the rest, and the admin mode route refuses th
 - So, through ONVIF, cam-03 can record on **motion** only (Cell grid, once its firmware motion
   detection is switched on), not on people.
 
+**Per camera, from discovery on (2026-10-18).** The mode→topic map is no longer cam-02's alone.
+`onvif_events.detection_map` reads each camera's `GetEventProperties`: the known topic names first,
+then a topic whose wording names the mode (`Human|People|Person|Pedestrian`, `CellMotion`,
+`Motion`), keeping only topics with an on/off field, and records which field. Discovery shows the
+result on the device card ("Recording triggers: Manual, Cell grid"); registration and the table
+write `detectionModes` and `detectionTopics` (mode → topic and field, new fields); the watcher
+subscribes to the camera's own topic and reads its own field. `recordingMode` keeps its four shared
+values. The wording match is a heuristic, not tested here on a camera with such names.
+
 **Confirmed 2026-10-18:** with motion detection ticked in cam-03's web interface ("Normal event" →
 Motion detection) and Cell grid selected, the watcher produced clips at 09:29 and 09:32 UTC,
 48.3 s and 44.3 s of H.265 800×448: full length, so #53 doesn't affect this camera.
