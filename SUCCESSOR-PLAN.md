@@ -7,7 +7,8 @@ work), against the successor as published on GitHub (`vizdr/VideoSafeZone`, `mas
 with no password; a microphone ONVIF doesn't list), #67 (an event field that differs from the
 declared one), #68 (a codec the registry never learnt), #69 (passthrough H.264 with audio: SDK
 patch 5), #70 (cam-02's hard-coded A-law), #71 (producer stall watchdog), #72 (cam-02's audio timestamps),
-#73 (audio units at discovery), and the live stream's codec (4.7). GitHub `master` was still `c13db2e` that day.
+#73 (audio units at discovery), #74 (cam-01 publisher's video watchdog), and the live stream's
+codec (4.7). GitHub `master` was still `c13db2e` that day.
 **For:** the next working session in `VideoSafeZone`, which runs on the same Pi 4B board from its
 own SD card and OS (D1). This file reaches that card through VMS's GitHub repository (step 0.1);
 copy it into the successor repository (step 0.2), and from then on that copy is the one to update.
@@ -332,7 +333,11 @@ there in either project.
   SIGKILLs the pipeline after 30 s without growth, and exits 1 on any end of the pipeline. Do
   **not** take VMS's whole script (its `cam01.env`-driven pipeline is VMS's USB feature work).
   *Verify:* `kill -STOP` the gst-launch: killed within ~46 s, video back ~7 s later; a normal Stop
-  ends `inactive`, result `success`.
+  ends `inactive`, result `success`. **And the video watchdog (VMS #74):** end the video chain in
+  `watchdog timeout=10000` (`PUBLISH_VIDEO_WATCHDOG_MS`). With audio on, `bytesReceived` keeps
+  moving on the microphone alone, and VMS's publisher sent no video for over an hour unnoticed.
+  *Verify:* the element in a test pipeline with the video held back by `valve drop=true` and audio
+  flowing: "Watchdog triggered" and gst-launch exits; then 5 min live without a trigger.
 - **#61** In `stream-cam01.sh`, at Start: compare `audioEnabled` with the tracks MediaMTX carries
   for `cam01`, restart `kvs-camera-publish` when they disagree (both ways), go video-only if the
   microphone track still doesn't appear. *Verify:* toggle audio on, Start: journal says
@@ -700,7 +705,7 @@ journalctl -u kvs-cam@cam03 -f | grep -E 'PERSISTED|Dropping frame|0x30000005|pi
 
 ---
 
-## 6. VMS bug triage (#51–#73) and number mapping
+## 6. VMS bug triage (#51–#74) and number mapping
 
 | VMS # | Bug | Relevant to successor? | Phase | Successor # |
 |---|---|---|---|---|
@@ -728,6 +733,7 @@ journalctl -u kvs-cam@cam03 -f | grep -E 'PERSISTED|Dropping frame|0x30000005|pi
 | 71 | Producer connected but feeding kvssink nothing stayed `active` (no watchdog for it) | **Yes**, same `producer_run` | 1.8d | |
 | 72 | cam-02 lost 1 AAC frame in 6: paired RTP audio timestamps → DISCONT → dropped | **Yes** (same producers, same camera) | 1.3 | |
 | 73 | Discovery showed "G.711 8000 kHz" (camera reports Hz) | **Yes**, with the 1.3 discovery port | 1.3 | |
+| 74 | cam-01 publisher sent audio, no video, for an hour; byte check fooled by the audio | **Yes** (bug fix on cam-01, with #51) | 1.4 | |
 
 Bugs found during this round get their own successor numbers; when one also applies to VMS, add it
 to §9.
@@ -806,7 +812,7 @@ pages.
 
 - [ ] VMS card: 0.1 VMS committed and pushed, uploads finished, producers stopped, card swapped
 - [ ] Successor card: 0.2 local work checked, pulled, plan copied, VMS cloned read-only · 0.3 §2 and OS versions (timestampers!) · 0.4 patches 4 + 5 rebuilt · 0.5 event watcher disabled · 0.6 stack up, cam-03 provisioned, video flowing · 0.7 cloud baseline · 0.8 contract and swap rules written down
-- [ ] 1.1 H.265 chain (H.264 chain unchanged) · 1.2 patches 4 + 5 · 1.3 ONVIF audio (+ from the stream, #66) · 1.4 cam-01 (#51, #61, #62) · 1.5 status poll · 1.6 IR · 1.7 awsblock · 1.8 clip duration · 1.8b player (#65) · 1.8c no-password camera (#66) · 1.8d stall watchdog (#71) · 1.9 docs
+- [ ] 1.1 H.265 chain (H.264 chain unchanged) · 1.2 patches 4 + 5 · 1.3 ONVIF audio (+ from the stream, #66) · 1.4 cam-01 (#51 + #74, #61, #62) · 1.5 status poll · 1.6 IR · 1.7 awsblock · 1.8 clip duration · 1.8b player (#65) · 1.8c no-password camera (#66) · 1.8d stall watchdog (#71) · 1.9 docs
 - [ ] 2 Unregister / Re-register, all readers incl. `rematch_cameras.py`, cloud 409s
 - [ ] 3 Triggers per camera, Test triggers, watcher on `PullSubscription`, `state_value` (#67), both GUIs, `set-camera-mode` check, cam-04 Motion fires
 - [ ] 4 Codec switch done-by-wire, encoder per request, `plan_config`, codec learnt from the wire on read (#68), live stream's codec (4.7)

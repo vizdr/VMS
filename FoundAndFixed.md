@@ -1995,3 +1995,32 @@ fixed.** ONVIF Media1 gives an audio encoder's `SampleRate` in kHz and `Bitrate`
 reports 8 and 64, cam-02 8000 and 64000. Discovery now divides any value of 1000 or more by 1000
 (no audio rate is a thousand kHz). Re-run: cam-02 and cam-03 8 kHz / 64 kbit/s, cam-04 8 kHz (read
 from its stream, which carries no bitrate).
+
+### #74 — cam-01's publisher sent audio but no video for over an hour, unnoticed
+
+**Found:** 2026-10-22, 19:25: "cam-01 does not stream: stream is not live". **Referenced from:**
+`adapter/bin/publish-cam01.sh` (`PUBLISH_VIDEO_WATCHDOG_MS`). **Status: fixed** (detection and
+recovery); the cause of the hang is still unknown, as in #51.
+
+`kvs-cam01` was restarted every ~45 s by #71's new stall watchdog: 0 metrics lines, 0 fragments
+since its 19:22 Start. Correctly: the producer had only an audio RTP pad, because MediaMTX received
+no video for `cam01`. Its 34 kB/s was the microphone's 16 kHz LPCM alone, and `ffprobe` saw 500 audio
+packets and 0 video in 5 s. The publisher (`kvs-camera-publish`) had been `active` since 18:05, and
+cam-01 last uploaded at 18:15:57, so its video stopped somewhere in that hour. It logged nothing at
+all, and the kernel log has no USB or `bcm2835-codec` message. `publish_run`'s watchdog (#51) checks
+MediaMTX's `bytesReceived` for the path, and the audio kept that moving. A restart of the publisher
+brought video back at once (59 video packets in 4 s), and the producer persisted 39 fragments in the
+next minute.
+
+MediaMTX 1.20.1 has no per-track counters, only path and session totals, so the fix is in the
+pipeline: `publish-cam01.sh`'s video chain ends in GStreamer's `watchdog timeout=10000`, which posts
+an error when no video buffer passes for 10 s; gst-launch exits and the unit restarts. Tested: with
+audio flowing and video held back by a `valve`, the error came after 4.35 s with a 4 s timeout and
+gst-launch exited; with video flowing it ran on. If a wedged element should keep gst-launch from
+exiting, the error has stopped `rtspclientsink`, so `publish_run`'s byte check still fires 30 s later.
+
+Two watchdogs now cover the two halves: this one the publisher's video, #71's the producer's
+frames into kvssink. Before #71 this outage would have shown only as "not live" in the cloud page.
+
+**The rule:** a liveness check must watch the thing that matters, not a total that something else
+can keep moving. "Bytes are arriving" stopped meaning "video is arriving" the day cam-01 got audio.

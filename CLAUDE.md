@@ -397,9 +397,11 @@ camera's G.711 law and held the video for 7 minutes (#70, #71). It only enforces
 the SDK's DEBUG lines, so a changed log level can't make it kill healthy producers. The units
 carry `RuntimeDirectory=vms-producer` for that watchdog's pipe. **`publish-cam01.sh`, the
 publisher, has its own watchdog, `publish_run`**, because it can **hang without exiting**:
-twice so far (`FoundAndFixed.md` #51, at boot and after an hour of normal running) it stopped
-sending with no error and no EOS and stayed `active`. `publish_run` restarts it when MediaMTX's
-`bytesReceived` for `cam01` hasn't moved for 30 s, and turns any end of the pipeline, a clean
+three times so far (`FoundAndFixed.md` #51, at boot and after an hour of normal running; #74,
+video only, audio still flowing) it stopped sending with no error and no EOS and stayed `active`. `publish_run` restarts it when MediaMTX's
+`bytesReceived` for `cam01` hasn't moved for 30 s, and its video chain ends in a GStreamer
+`watchdog` (10 s without a video buffer is an error), because with audio on the byte count keeps
+moving while the video is hung (`FoundAndFixed.md` #74); and turns any end of the pipeline, a clean
 EOS included, into exit 1 for `Restart=on-failure`. The cause of the hang is still unknown, so
 a stall now costs ~40 s of cam-01 and leaves a `bytesReceived stuck` line in its journal. **This is the layer Start/Stop buttons (in either GUI) actually
 control** — toggling it does not affect MediaMTX or the camera's own feed, which keep

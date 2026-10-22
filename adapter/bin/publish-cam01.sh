@@ -122,6 +122,15 @@ fi
 #
 # Not `exec`, so this shell stays the unit's main process; a Stop signals the whole cgroup,
 # which takes gst-launch with it (the same reasoning as producer_run in producer-lib.sh).
+#
+# bytesReceived is the whole path, so with audio on it can't see the *video* stopping: on
+# 2026-10-22 the video hung for over an hour while the microphone's LPCM (32 kB/s) kept the count
+# moving, and cam-01's producer, with no video to start a fragment, uploaded nothing
+# (FoundAndFixed.md #74). So the video chain ends in a GStreamer `watchdog`: no video buffer for
+# PUBLISH_VIDEO_WATCHDOG_MS is a pipeline error, gst-launch exits, and the unit restarts. Should a
+# wedged element keep gst-launch from exiting, the error has still stopped the RTSP sender, so
+# the byte check below catches it 30 s later.
+PUBLISH_VIDEO_WATCHDOG_MS=10000
 PUBLISH_CHECK_SEC=10
 PUBLISH_STALL_SEC=30
 publish_run() {
@@ -158,7 +167,7 @@ VIDEO_CHAIN="v4l2src device=$CAM ! \
   v4l2convert ! video/x-raw,format=I420 ! \
   v4l2h264enc extra-controls=controls,video_bitrate=${VIDEO_BITRATE},h264_i_frame_period=${GOP},repeat_sequence_header=1 ! \
   video/x-h264,level=(string)${H264_LEVEL},profile=(string)${H264_PROFILE} ! \
-  h264parse config-interval=-1"
+  h264parse config-interval=-1 ! watchdog timeout=${PUBLISH_VIDEO_WATCHDOG_MS}"
 
 if [ "${AUDIO:-off}" = "on" ]; then
   echo "publish-cam01: audio ENABLED (${AUDIO_DEV} -> LPCM $((AUDIO_RATE/1000))kHz mono)"
@@ -170,8 +179,8 @@ if [ "${AUDIO:-off}" = "on" ]; then
     rtspclientsink name=rtsp location=rtsp://127.0.0.1:8554/cam01 protocols=tcp
 fi
 
-# Video-only. With the shipped defaults this is token-for-token the pipeline that ran
-# before audio existed (checked against a stub gst-launch); the values now come from the
+# Video-only. With the shipped defaults this is the pipeline that ran before audio existed
+# (checked against a stub gst-launch), plus the video watchdog; the values now come from the
 # config file, so a different camera changes them by design.
 echo "publish-cam01: audio disabled (video only)"
 # The same VIDEO_CHAIN as the audio branch, not a second literal copy of it: the two used
