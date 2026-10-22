@@ -293,7 +293,7 @@ function renderDevice(d, i) {
   const audio = details && details.audio;
   const streams = (details && details.streams) || [];
   const audioBadge = !details ? "" : !audio ? '<span class="badge badge-muted">No microphone</span>'
-    : audio.supported ? `<span class="badge">Microphone · ${audioText(audio)}</span>`
+    : audio.supported ? `<span class="badge"${audio.fromStream ? ' title="Found in the stream itself: the camera\'s ONVIF profile does not list it"' : ""}>Microphone · ${audioText(audio)}</span>`
     : `<span class="badge badge-muted" title="The producer records G.711 only">Microphone · ${codecName(audio.encoding)}, not supported</span>`;
 
   div.innerHTML = `

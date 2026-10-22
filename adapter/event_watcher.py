@@ -53,7 +53,7 @@ REGION = config.AWS_REGION
 # recordingMode -> the ONVIF topic that drives it (onvif_events.py). All three were confirmed
 # firing and latching on cam-02 in Phase 0; another camera may advertise only some of them.
 from onvif_events import (MODE_TOPICS, PullSubscription, camera_detection,  # noqa: E402
-                          is_on, parse_notification)
+                          is_on, parse_notification, state_value)
 
 # Subscription hygiene (renewal, short pulls, unsubscribing) lives in onvif_events.PullSubscription,
 # shared with the admin GUI's trigger test (FoundAndFixed.md #64).
@@ -177,9 +177,10 @@ async def watch_camera(item, dry_run, stop_event):
                 while not stop_event.is_set():
                     for note in await sub.pull():
                         n_topic, _op, data = parse_notification(note)
-                        if n_topic != topic or field not in data:
+                        value = state_value(data, field) if n_topic == topic else None
+                        if value is None:
                             continue
-                        fire, reason = gate.update(is_on(data[field]), asyncio.get_event_loop().time())
+                        fire, reason = gate.update(is_on(value), asyncio.get_event_loop().time())
                         if fire:
                             detected_at = datetime.now(timezone.utc)
                             log(f"[{cam_id}] detection at {detected_at.isoformat()} -> clip "

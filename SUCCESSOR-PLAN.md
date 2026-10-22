@@ -3,6 +3,11 @@
 **Written:** 2026-10-18, in the VMS repository (`~/MyProjects/VMS`, HEAD `fdbb0eb` plus uncommitted
 work), against the successor as published on GitHub (`vizdr/VideoSafeZone`, `master` at
 `c13db2e`, 2026-09-28, "Paging improvement").
+**Updated:** 2026-10-22 with what a fourth camera (cam-04, §2a) brought out in VMS: #66 (a camera
+with no password; a microphone ONVIF doesn't list), #67 (an event field that differs from the
+declared one), #68 (a codec the registry never learnt), #69 (passthrough H.264 with audio: SDK
+patch 5), #70 (cam-02's hard-coded A-law), #71 (producer stall watchdog), #72 (cam-02's audio timestamps),
+#73 (audio units at discovery), and the live stream's codec (4.7). GitHub `master` was still `c13db2e` that day.
 **For:** the next working session in `VideoSafeZone`, which runs on the same Pi 4B board from its
 own SD card and OS (D1). This file reaches that card through VMS's GitHub repository (step 0.1);
 copy it into the successor repository (step 0.2), and from then on that copy is the one to update.
@@ -61,7 +66,8 @@ Checked in the GitHub clone at `c13db2e`:
 | Admin GUI routes | scan, cameras, register/re-register, status, analytics, mode, audio, outage-buffer, **codec**, on-wire, ir, start/stop | all of those, plus **unregister**, **detection** + **detection/test**, **codec GET**, **stream GET/POST**, (USB, PIR: not to port) |
 | Codec switch | exists: `onvif_media2.Media2Client.set_codec`, token stored at registration by `codec_caps.py`, **done = camera read-back** | done = **MediaMTX receives the new codec**; encoder found per request from the registered `rtspUrl`; size from the wire (`plan_config`) |
 | Event watcher | `MODE_TOPICS` hardcoded to cam-02's topics; subscription never renewed or unsubscribed | `onvif_events.py`: per-camera topics from `GetEventProperties`; `PullSubscription` (renew 20 s, `PT2S` pulls, always unsubscribe) |
-| Discovery | first profile's URI, IR, endpoint ref | plus audio track (`_audio`), recording triggers, camera web page (`web_url`) |
+| Discovery | first profile's URI, IR, endpoint ref | plus audio track (`_audio`, and from the stream's SDP when the profile names none: `stream_audio`, #66), recording triggers, camera web page (`web_url`) |
+| Registration credentials | `host, user, password, and streamUri are required`: a camera with no password can't be registered (#66 live); CLI says `--password` is required | empty password accepted and stored as `""`; username still required |
 | Unregister | none | `unregisteredAt` soft mark, skipped by every reader |
 | Stream / fps | none (registers `profiles[0]`) | main/sub + 10/15/20/25 fps, keyframe interval kept in seconds |
 | IP change | **`rematch_cameras.py`** (endpoint-ref based, timer every 5 min) | none (re-register by hand) |
@@ -71,9 +77,60 @@ Checked in the GitHub clone at `c13db2e`:
 | Admin status poll | DynamoDB `get_item` per poll (#55 live) | local registry cache |
 | IR buttons | ON = "Force Night" / "IR On" (#63 live) | Day = `ON`, Night = `OFF` |
 | `awsblock.sh` | no `63.176.0.0/12` (#54 live) | includes it |
-| SDK patch 4 (kvssink ms timestamps) | not in LAUNCH A3 | LAUNCH A3, `VMS patch 4` |
+| SDK patches 4 and 5 (kvssink timestamps) | not in LAUNCH A3 | LAUNCH A3, `VMS patch 4`, `VMS patch 5` |
 
 Re-check this table against the local clone at the start (step 0.3): the GitHub state may have moved.
+
+### 2a. Cameras on the LAN (2026-10-22)
+
+| Camera | Address | Model | Notes |
+|---|---|---|---|
+| cam-02 | 192.168.178.67 | YMA42P_C2_WM701_AF | G.711 in its ONVIF profile, **mu-law since 2026-10-22** (was A-law; changed in its audio page, #70); reports audio in Hz/bit/s, not kHz/kbit/s (#73); RTP audio in pairs with one timestamp (#72); credentials in the RTSP query |
+| cam-03 | 192.168.178.70 | H4-52POX-S | G.711 mu-law; RTSP without credentials; 10 subscription slots (#64) |
+| cam-04 | 192.168.178.243, ONVIF port **8888** | GUANGZHOU 5831-F-Q, fw 5.2.22.2, "happytime" RTSP | below |
+
+The new camera (VMS #66):
+- **No password.** User `admin`, empty password, on ONVIF and RTSP. ONVIF refuses a request with no
+  username ("Sender not Authorized"). RTSP checks the username and **ignores the password**.
+- **MediaMTX won't take an empty RTSP password** ("username and password must be both provided"),
+  and without userinfo the camera answers 401. So its URI carries a placeholder:
+  `rtsp://admin:x@192.168.178.243:554/ch0_0.264` (sub `ch0_1.264`), which VMS registration now adds
+  by itself (`rtsp_login`, 1.8c). Giving the camera a real password is the clean fix; until then
+  anyone on the LAN can watch and move it.
+- **Registered in VMS as cam-04** (2026-10-22, name "PTZ", main stream recorded, live view on
+  `cam04_live` / KVS `cam-04-live`, audio on). The row is shared, so the successor's card sees it;
+  its producers exist only on the VMS card (§9, the card-swap half of 2.4).
+- **Audio only after "Encode Type: audio&video"** in its web page (Media → Video setup). Then both
+  streams carry G.711 **A-law** 8 kHz mono, but neither ONVIF profile lists an audio encoder: only
+  the stream's SDP shows it.
+- **Codecs.** Registered with both streams on H.265 (main 1920×1080, sub 800×448, 15 fps, accepts
+  10 and 15). Media2 has reported the sub stream as H264 at least once: take the codec from the wire
+  (Phase 4). **Since 17:34 on 2026-10-22 the main (recorded) stream is H.264**, switched from the
+  VMS admin selector; the **sub (live view) stream is still H.265** (4.7). The camera's own HTTP
+  API shows each encoder, read-only: `curl -u admin: http://192.168.178.243/netsdk/video/encode/channel/101`
+  (main) and `/102` (sub), field `codecType`. Its web page (Media → Video setup) shows one stream at
+  a time, picked by its **Stream** dropdown, so it can look "unchanged" after a switch.
+- **H.264 passthrough with audio lost audio frames** (VMS #69, fixed 2026-10-22 by **SDK patch 5**):
+  after the switch, `kvs-cam@cam04` rejected 45 frames in 5⅓ min (`0x30000005`, all on the H.264
+  recording stream). `h264parse` leaves every video frame at `dts: none`, and kvssink invented
+  `last_dts + 40 ms` against 66.7 ms frames. **`h264timestamper` is not the fix here:** cam-04's SPS
+  has no reorder count, so it assumed 4 frames (DTS = PTS − 267 ms) on a stream with no B-frames,
+  and KVS refused the video: 0 fragments until reverted. Patch 5 makes kvssink use the PTS as a
+  missing DTS: 0 rejects in 5½ min, cloud audio complete, Firefox plays it (0.4, 1.2).
+- **PTZ:** a PTZ service and node (continuous/absolute/relative pan, tilt, zoom; 255 presets; home)
+  on both profiles. Neither project reads PTZ (§8).
+- Recording triggers offered: Motion, Cell grid. **Its MotionAlarm events carry `IsMotion`, not the
+  `State` its event list declares** (#67, 3.1). Measured with an unfiltered 10-minute subscription
+  while someone walked past: 46 MotionAlarm and 46 CellMotionDetector events, always together, so
+  they are one detector; each "on" comes as a `Changed` **and** an `Initialized` message, each "off"
+  as `Deleted` (3.4).
+- **Human detection** (web page → Media → AI Detection: enabled, draw region, sensitivity; green
+  frames in the picture) can't be a trigger. No human topic in `GetEventProperties`, only the cell
+  motion engine in `GetSupportedAnalyticsModules`, no person event in the 10-minute log, and its
+  HTTP API (`/NetSDK/Video/humanDetect/`, `gw2.cgi`) has no alarm, linkage or event endpoint. The
+  detections presumably go only to the vendor's app ("Esee"). Discovery offering Manual, Motion and
+  Cell grid is correct (#67).
+- Has IR control.
 
 ---
 
@@ -166,7 +223,7 @@ Each phase: tasks, the VMS source, the verification that proves it, and the docs
 **On the VMS card, before the swap:**
 
 0.1 **Commit and push VMS.** Its working tree holds the trigger-test, `webUrl` and event-watcher work
-this plan ports (`onvif_events.py`, `onvif_discovery.py`, `event_watcher.py`, `app.py`, both
+this plan ports, and #66 (`onvif_discovery.stream_audio`, `register_camera`, `discover-onvif.py`) (`onvif_events.py`, `onvif_discovery.py`, `event_watcher.py`, `app.py`, both
 `index.html`, …) and this file. The successor's card can only get them from GitHub
 (`github.com/vizdr/VMS`). Then: producers stopped, no `pending-upload` capture on the stick (D1),
 shut down, swap the card.
@@ -193,10 +250,11 @@ iw dev wlan0 get power_save                                     # must be off (#
 (H.265 to KVS fails without them), and #62's cam-01 part too. Options then: upgrade that card's
 GStreamer, or move it to the OS this card runs.
 
-0.4 **SDK patch 4** on that card's own build (its A3 had patches 1–3): apply VMS LAUNCH A3 patch 4,
-then rebuild only the plugin, as VMS LAUNCH A3 says: `make src/gstreamer/gstkvssink.o` while
-producers may run, then stop them and `make gstkvssink` (linking over a loaded plugin can crash a
-running producer). Proof: `grep -n "VMS patch 4" "$KVS_SDK/src/gstreamer/gstkvssink.cpp"`.
+0.4 **SDK patches 4 and 5** on that card's own build (its A3 had patches 1–3): apply VMS LAUNCH A3
+patches 4 and 5 (both in `gstkvssink.cpp`), then rebuild only the plugin, as VMS LAUNCH A3 says:
+`make src/gstreamer/gstkvssink.o` while producers may run, then stop them and `make gstkvssink`
+(linking over a loaded plugin can crash a running producer). Proof: `grep -n "VMS patch [45]"
+"$KVS_SDK/src/gstreamer/gstkvssink.cpp"` shows both.
 
 0.5 **Before the stack runs at all, stop the subscription leak:**
 `systemctl --user disable --now kvs-event-watcher` (D1, #64). It stays off until Phase 3 replaces
@@ -228,24 +286,45 @@ fixed here".
 **1.1 H.265 producer chain: #57, #58.** In `producer-lib.sh` `video_depay_chain`, append
 `! h265timestamper ! identity single-segment=true` to the H.265 chain (VMS guide §21.2 has the
 exact string). Without it, a camera whose H.265 leaves `h265parse` without DTS (cam-03) never
-reaches KVS while the unit stays `active`.
+reaches KVS while the unit stays `active`. **Leave the H.264 chain without a timestamper** (VMS
+#69): passthrough H.264's `dts: none` is handled by SDK patch 5 (1.2), and `h264timestamper` broke
+cam-04's ingest. Take VMS's `video_depay_chain` with its comment, which says why.
 *Verify:* cam-03 on H.265: no `Dropping frame with flag` in the journal, fragments `PERSISTED` at
 the camera's GOP, LIVE HLS `CODECS="hvc1…"`, a clean decoded frame from the cloud URL. Then with
 audio on: zero `0x30000005` rejects over at least 4 minutes (#58's 75 s window was too short).
+Then cam-04 on H.264 (main) with audio on (needs patch 5): zero `Failed to submit frame` over 5
+minutes, a decoded frame and complete audio from the cloud URL, and a browser playing it.
 
-**1.2 SDK patch 4: #62 (part 1).** Add VMS `LAUNCH.md` A3 patch 4 (whole-millisecond DTS in
-`gstkvssink.cpp`) to the successor's A3, with its proof line
-`grep -n "VMS patch 4" "$KVS_SDK/src/gstreamer/gstkvssink.cpp"`. Applied and rebuilt in step 0.4;
-this task is the A3 text, for a fresh card.
+**1.2 SDK patches 4 and 5: #62 (part 1), #69.** Add VMS `LAUNCH.md` A3 patch 4 (whole-millisecond
+DTS) and patch 5 (a missing DTS becomes the PTS) in `gstkvssink.cpp` to the successor's A3, with
+their proof line `grep -n "VMS patch [45]" "$KVS_SDK/src/gstreamer/gstkvssink.cpp"`. Applied and
+rebuilt in step 0.4; this task is the A3 text, for a fresh card. Count rejects as
+`grep -c 'Failed to submit frame'`: the SDK logs each one on three lines, so a plain
+`grep -c 0x30000005` reads about 3× too high.
 
 **1.3 Audio for GUI-registered cameras: #59.** Three parts, all needed:
 - discovery reads the microphone from the profile (VMS `onvif_discovery._audio`) and the card shows it;
+  **and, where the profile names no audio, from the stream itself** (VMS `stream_audio`, `_describe`,
+  `_rtsp_auth`, `_wire_audio` and the fallback in `enrich_sync`, #66): one RTSP DESCRIBE with Basic
+  or Digest auth, no SETUP, so no session and no media. Credentials in the URI win over the ONVIF
+  ones. Cameras whose profile lists audio make no RTSP request at all;
 - registration writes `audioCapable` (G.711 only);
 - `stream-codec.py` prints `AUDIO_TRACK=pcma|pcmu` (from MediaMTX `tracks2[].codecProps.muLaw`) and
   `stream-channel.sh` gets the G.711 → AAC 8 kHz branch with the depayloader chosen by law (VMS
-  `stream-channel.sh`). Keep the fakesink branch for video-only (#43).
-*Verify:* cam-03 (mu-law) and cam-02 (A-law) with audio on: KVS LIVE HLS carries AAC, audible, zero
-rejects.
+  `stream-channel.sh`). Keep the fakesink branch for video-only (#43). **`stream-cam02.sh` too**
+  (VMS #70): the successor's copy hard-codes `rtppcmadepay ! alawdec` (checked on GitHub
+  2026-10-22), so cam-02, now mu-law, stalls there with the unit `active`; a law mismatch that does
+  link garbles speech. Take VMS's version.
+- **The AAC encoder derives its timestamps** (VMS #72): `AAC_ENC` in `producer-lib.sh`
+  (`voaacenc bitrate=32000 perfect-timestamp=true tolerance=100000000`), used by both passthrough
+  producers. cam-02's paired RTP timestamps otherwise cost one AAC frame in six (DISCONT, dropped by
+  kvssink). *Verify:* `grep -c 'Dropping frame with flag: 64 '` on cam-02 over 5 min: about 1, not
+  about 300.
+- Discovery normalises Media1 audio units (VMS `_per_kilo`, #73): cam-02 reports 8000/64000.
+*Verify:* cam-03 (mu-law) and cam-02 (mu-law now) with audio on: KVS LIVE HLS carries AAC, audible, zero
+rejects. The new camera (§2a, A-law, found only from the stream): Scan LAN shows "Microphone · G.711
+8 kHz" on both streams, and, once registered (1.8c), the same KVS check. Audio is not yet measured
+there in either project.
 
 **1.4 cam-01, bug fixes only (R2): #51, #61, #62 (part 2).**
 - **#51** Port only the `publish_run` function into the successor's `publish-cam01.sh`, replacing
@@ -291,6 +370,29 @@ Firefox against the real Lambdas (a local proxy stands in for API Gateway; Firef
 local-network-access prefs `network.lna.*` must be off in the test profile). Stop → Start 5 s apart
 must show 503s until the new run's first fragment; stopping the producer outside the page must
 end in "stream is not live", not a spinner.
+
+**1.8c A camera with no password: #66.** In `register_camera`, `user`/`password` default to `""`;
+only host, user and stream URI are required, and both must be strings. `discover-onvif.py`:
+`--password` defaults to `""` (a `None` crashed the digest). Check the successor's other credential
+readers (`rematch_cameras.py`, `codec_caps.py`) take `""` the way VMS's do (they index
+`item["onvifPassword"]`; DynamoDB stores the empty string). **And the RTSP login:** port VMS
+`onvif_discovery.rtsp_login` (with `RtspUnauthorized`, `RTSP_PLACEHOLDER`, `_has_login` and
+`_describe`'s no-login mode) and call it in both registration branches, after `with_credentials`
+and before anything is created. Without it the form's URI (the camera's GetStreamUri, no login)
+registers fine and then every pull is a 401 while the producers stay `active` (VMS's first cam-04
+registration). *Verify:* register a camera with the password field empty and the camera's own URI:
+the stored `rtspUrl` and `liveRtspUrl` carry `admin:x@`, `bytesReceived` grows, a decoded frame;
+a wrong username is refused with the message and nothing created; cam-03's URI stays without a
+login.
+
+**1.8d Producer stall watchdog: #71.** Port VMS `producer_run`'s second check
+(`PRODUCER_FLOW_PATTERN`, `PRODUCER_STALL_SEC`, the `read -t 5` loop that joins half lines, the
+DEBUG-lines guard): 45 s without a "client and stream metrics" line (logged per key frame *put*,
+so it continues through an AWS outage) kills the pipeline for systemd to restart. Without it, a
+pipeline that stays connected but feeds kvssink nothing (#70) stays `active` and uploads nothing.
+*Verify* as VMS did: a fake `gst-launch-1.0` on `PATH` (stall killed at the limit; steady metrics
+untouched; no DEBUG lines never enforced; a paused half line rejoined), then 5 min live with no
+kill on any producer.
 
 **1.9 Not fixed in code, documented:**
 - **#60** (cloud Start lost during an MQTT drop): open in VMS too. Record it; Phase 6's "the Pi
@@ -359,7 +461,8 @@ VMS source: guide §9.3; `adapter/onvif_events.py` (whole module); `onvif_discov
 3.1 Port `onvif_events.py`: `MODE_TOPICS` (known names), `_MODE_WORDS`, `topic_details`,
 `detection_map`, `supported_modes`, `PullSubscription` (lifetime `PT600S`, **renew every 20 s**,
 `PT2S` pulls with an 8 s deadline, 1 s pacing, hung pull = "nothing yet", **always unsubscribe**),
-`parse_notification`, `is_on`.
+`parse_notification`, `is_on`, **`state_value`** (#67: the declared on/off field, else the first
+known one the event carries; the watcher and the test both read the state through it).
 
 3.2 Discovery card shows "Recording triggers: Manual, Cell grid" (from `GetEventProperties`), the
 microphone (1.3), and a link to the camera's own web page where one answers (`web_url`, from
@@ -372,10 +475,13 @@ registered earlier.
 3.4 **Test triggers** (`POST/GET/DELETE /api/cameras/<id>/detection/test`): listen up to 60 s for
 every offered trigger at once, stop early when all fired, ignore the subscription's opening report
 (cam-03 sends `Initialized` and backlog 0.3 s after subscribing), save `detectionTests` (mode →
-seen, when, how many). The page polls locally, no AWS call (#55).
+seen, when, how many). The page polls locally, no AWS call (#55). Read the state through
+`state_value` (#67). **Don't take `Initialized` alone as "the opening report"**: cam-04 sends one
+with every detection, next to a `Changed`. VMS counts the `Changed` one and keeps `Initialized`
+for the opening window; a port that skipped both would never see cam-04 fire.
 
 3.5 Rewrite `event_watcher.py` on `PullSubscription`: subscribe to the camera's own topic from
-`detectionTopics`, read its own field, refuse (with a reason in the log) a mode the camera doesn't
+`detectionTopics`, read its own field through `state_value` (#67), refuse (with a reason in the log) a mode the camera doesn't
 list. Keep `ClipGate`, cooldown and `PUBLISH_DELAY_SEC` unchanged; `replay-gate.py` must still pass.
 
 3.6 GUIs: both grey out modes not in `detectionModes`; next to the selector the note "Some triggers
@@ -392,6 +498,10 @@ triggers sees Cell grid within ~20 s of walking past; Cell grid mode produces fu
 (~45 s); after 10 min of watching, one subscription throughout and all 10 subscription slots free
 afterwards. If a leak happens during development: send `Unsubscribe` to
 `/onvif/event_service/0…9` (#64). cam-02, when back: its Motion and Human topics found by name.
+cam-04: the card shows Motion and Cell grid, no Human; Test triggers sees **both** when someone walks
+past (Motion is the one that proves `state_value`); Motion mode produces a clip. In VMS this live
+check is still open (2026-10-22): the fix was proven by replaying the logged events (Motion
+0 → 15 on-events, Cell grid 15 → 15), and the one test run had nobody walking past.
 
 ### Phase 4: Codec selector aligned with VMS (R4)
 
@@ -418,12 +528,33 @@ successor's existing meanings; `codec_caps.py` stays the owner of the caps logic
 H.264 only, H.265 disabled with the reason as tooltip.
 
 4.6 `GET /api/cameras/<id>/codec`, read once per table load, never polled (#55). Status line shows
-what MediaMTX receives (codec and size), and the camera's claim only when it differs.
+what MediaMTX receives (codec and size), and the camera's claim only when it differs. **It also
+records the wire's codec** (`videoCodec` and the other three fields) when the registry's
+`videoCodec` is missing or differs (VMS `get_codec`, #68): a camera registered already sending
+H.265, or switched in its own web page, is otherwise labelled by `list-cameras`' fallback. First
+check what the successor's `codec_caps.py` writes as `videoCodecDefault` at registration: if it is
+the camera's claim rather than the wire, cam-03 (claims H264, sends H.265) gets the same wrong
+label even with the fallback.
+
+4.7 **The selector switches the recorded stream only.** On a camera recording main with live view
+on sub (Phase 6), the sub stream keeps its codec: cam-04 recorded H.264 while live view stayed
+H.265. `videoCodec` describes the recorded stream, and the cloud page's "can't play H.265" warning
+reads only that, so it stays silent for a live view that needs H.265. The live producer records
+its codec only in the `-live` KVS stream's MediaType (`stream-codec.py --live`), not in the
+registry. Decide here: either the admin row offers a second selector for the live stream, or the
+live producer records an additive field (e.g. `liveVideoCodecActive`) and the page's warning uses
+it for the live player. VMS has neither yet (§9).
+
+4.8 **After a switch, the producer catches up at its next Start, not before.** Measured on cam-04:
+the switch at 17:34 with producers stopped left KVS `cam-04` on `video/h265`; Start at 17:39 printed
+"cam-04 now streams h264 (was h265)" and "KVS MediaType -> video/h264". A switch while the producer
+runs restarts it through the RTSP session change, as cam-03 showed.
 
 *Verify:* cam-03, both directions twice: camera accepts in ~1 s, video in MediaMTX after ~6–7 s,
 producer persisting on the new chain within ~25 s, LIVE HLS opened afterwards plays the new codec,
 KVS `MediaType` corrected by `stream-codec.py`. A clip across the switch is split in two
-(`codec-switch` labels).
+(`codec-switch` labels). cam-04 (registered already on H.265, #68): after one admin page load its
+row has `videoCodec: h265`, and the cloud page labels it H.265.
 
 ### Phase 5: Recording stream and frame rate (R6, first half)
 
@@ -539,7 +670,7 @@ view (new subsection after §21), with the measurements from this round.
 the `_live` path and `kvs-live@` (system unit), the live deadline rule, the contract rules (0.8),
 and that the board is shared with VMS by SD-card swap (D1: what crosses, and the swap rules).
 
-7.4 `LAUNCH.md`: A3 patch 4 with the plugin-only rebuild; A8 generates `kvs-live@.service` and
+7.4 `LAUNCH.md`: A3 patches 4 and 5 with the plugin-only rebuild; A8 generates `kvs-live@.service` and
 `RuntimeDirectory` for its deadline; a "card swap" section (D1: stick uploads finished, producers
 stopped; after the swap, cameras registered from the other card need Re-register; subscription-slot
 recovery for #64).
@@ -569,7 +700,7 @@ journalctl -u kvs-cam@cam03 -f | grep -E 'PERSISTED|Dropping frame|0x30000005|pi
 
 ---
 
-## 6. VMS bug triage (#51–#65) and number mapping
+## 6. VMS bug triage (#51–#73) and number mapping
 
 | VMS # | Bug | Relevant to successor? | Phase | Successor # |
 |---|---|---|---|---|
@@ -589,6 +720,14 @@ journalctl -u kvs-cam@cam03 -f | grep -E 'PERSISTED|Dropping frame|0x30000005|pi
 | 63 | IR ON/OFF backwards in both GUIs | **Yes** | 1.6 | |
 | 64 | Detection never fired on cam-03; watcher leaked subscriptions | **Yes** | 3 | |
 | 65 | Cloud player spun forever (stale session after Stop → Start, no player watchdog) | **Yes**, same page code | 1.8b | |
+| 66 | Camera with no password couldn't be registered; microphone not in its ONVIF profile | **Yes**, both halves (checked on GitHub 2026-10-22) | 1.3, 1.8c | |
+| 67 | cam-04's Motion never fired: event field ≠ declared field; its human detection isn't on ONVIF | **Yes**, with the Phase 3 port (`state_value`) | 3 | |
+| 68 | Camera registered already on H.265 labelled H.264 in the cloud page (no `videoCodec`) | Check: depends on what `codec_caps.py` writes (4.6) | 4 | |
+| 69 | Passthrough H.264 with audio lost audio frames (invented DTS); `h264timestamper` made it worse | **Yes**, the same SDK | 0.4, 1.2 | |
+| 70 | cam-02: hard-coded A-law garbled mu-law speech, then stalled the stream after a camera audio change | **Yes**: its `stream-cam02.sh` hard-codes `rtppcmadepay ! alawdec` (GitHub, 2026-10-22) | 1.3 | |
+| 71 | Producer connected but feeding kvssink nothing stayed `active` (no watchdog for it) | **Yes**, same `producer_run` | 1.8d | |
+| 72 | cam-02 lost 1 AAC frame in 6: paired RTP audio timestamps → DISCONT → dropped | **Yes** (same producers, same camera) | 1.3 | |
+| 73 | Discovery showed "G.711 8000 kHz" (camera reports Hz) | **Yes**, with the 1.3 discovery port | 1.3 | |
 
 Bugs found during this round get their own successor numbers; when one also applies to VMS, add it
 to §9.
@@ -637,6 +776,9 @@ pages.
 - **PIR** (`pir_*`, `observe_pir.py`, mosquitto, the Pico), the `pir-` cloud resources and the PIR
   ring in RAM.
 - SSM `credentialRef` (Phase 2 of credential storage), a separate IoT Thing per Pi.
+- **PTZ.** The new camera has it (§2a); neither project discovers or drives PTZ. Undecided in VMS
+  as of 2026-10-22 (a discovery badge only, or control from the admin GUI and over MQTT); if VMS
+  builds it first, it becomes a later round's port.
 
 ---
 
@@ -656,17 +798,18 @@ pages.
 - VMS LAUNCH/README: the card-swap rules (stick uploads finished, producers stopped) and the
   subscription-slot recovery (#64), since a swap can leave cam-03's slots used by the other card.
 - VMS FoundAndFixed #53: link to the successor entry when fixed.
+- VMS: the live stream's codec (4.7), so the cloud page warns about an H.265 live view.
 
 ---
 
 ## 10. Session checklist
 
 - [ ] VMS card: 0.1 VMS committed and pushed, uploads finished, producers stopped, card swapped
-- [ ] Successor card: 0.2 local work checked, pulled, plan copied, VMS cloned read-only · 0.3 §2 and OS versions (timestampers!) · 0.4 patch 4 rebuilt · 0.5 event watcher disabled · 0.6 stack up, cam-03 provisioned, video flowing · 0.7 cloud baseline · 0.8 contract and swap rules written down
-- [ ] 1.1 H.265 chain · 1.2 patch 4 · 1.3 ONVIF audio · 1.4 cam-01 (#51, #61, #62) · 1.5 status poll · 1.6 IR · 1.7 awsblock · 1.8 clip duration · 1.8b player (#65) · 1.9 docs
+- [ ] Successor card: 0.2 local work checked, pulled, plan copied, VMS cloned read-only · 0.3 §2 and OS versions (timestampers!) · 0.4 patches 4 + 5 rebuilt · 0.5 event watcher disabled · 0.6 stack up, cam-03 provisioned, video flowing · 0.7 cloud baseline · 0.8 contract and swap rules written down
+- [ ] 1.1 H.265 chain (H.264 chain unchanged) · 1.2 patches 4 + 5 · 1.3 ONVIF audio (+ from the stream, #66) · 1.4 cam-01 (#51, #61, #62) · 1.5 status poll · 1.6 IR · 1.7 awsblock · 1.8 clip duration · 1.8b player (#65) · 1.8c no-password camera (#66) · 1.8d stall watchdog (#71) · 1.9 docs
 - [ ] 2 Unregister / Re-register, all readers incl. `rematch_cameras.py`, cloud 409s
-- [ ] 3 Triggers per camera, Test triggers, watcher on `PullSubscription`, both GUIs, `set-camera-mode` check
-- [ ] 4 Codec switch done-by-wire, encoder per request, `plan_config`
+- [ ] 3 Triggers per camera, Test triggers, watcher on `PullSubscription`, `state_value` (#67), both GUIs, `set-camera-mode` check, cam-04 Motion fires
+- [ ] 4 Codec switch done-by-wire, encoder per request, `plan_config`, codec learnt from the wire on read (#68), live stream's codec (4.7)
 - [ ] 5 Stream main/sub, fps 10/15, registration form, audio at 10 fps measured
 - [ ] 6.1 Local preview on `_live` path · 6.2 cloud Live on `<id>-live` with deadline stop
 - [ ] 7 FoundAndFixed, guide, CLAUDE.md, LAUNCH, README, final regression, VMS page still works

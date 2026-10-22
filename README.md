@@ -252,7 +252,7 @@ sudo apt install -y cmake m4 git build-essential pkg-config \
 > `gstreamer1.0-omx-generic`, which the upstream instructions ask for, **does not exist on
 > Debian trixie**.
 
-**Three upstream source patches are required**, and they go in at two different moments,
+**Five upstream source patches are required**, and they go in at two different moments,
 so the build runs in two stages. The exact commands, with a proof for each stage, are in
 `LAUNCH.md` A3:
 
@@ -262,7 +262,9 @@ so the build runs in two stages. The exact commands, with a proof for each stage
    mid-OpenSSL: `build.log` shows a burst of `Terminated signal terminated program cc1`.
 2. **Stage 1: `cmake` configure.** With `-DBUILD_DEPENDENCIES=ON` this compiles the
    dependencies and downloads the kvspic source.
-3. **Patch 3** (GCC 14 compatibility). Its file only exists after stage 1.
+3. **Patch 3** (GCC 14 compatibility). Its file only exists after stage 1. Patches 4 and 5 fix
+   kvssink's timestamps for cameras recording audio (`FoundAndFixed.md` #62, #69); apply them
+   here too.
 4. **Stage 2: `make -j1`.**
 
 On 4 GB, build **single-threaded and pinned** (`taskset -c 1,2`), as a `systemd-run

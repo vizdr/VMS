@@ -1758,3 +1758,240 @@ fragments that is usually one short wait.
 **The rule:** a player needs a watchdog for the same reason a producer does. "Loaded" and
 "playing" are states that were entered, not proof of progress: check `currentTime`. And after a
 restart, ask for footage from *after* the restart; "live" alone can mean the previous run.
+
+### #66 — A camera with no password couldn't be registered, and its microphone wasn't found
+
+**Found:** 2026-10-22, a new camera at 192.168.178.243 (GUANGZHOU 5831-F-Q, firmware 5.2.22.2,
+ONVIF on port 8888, "happytime" RTSP server): "it has no password and can't be registered", and
+"it has audio and PTZ but discovery doesn't show them".
+**Referenced from:** `adapter/onvif-admin/app.py` (`register_camera`), `adapter/onvif_discovery.py`
+(`stream_audio`, `rtsp_login`), `adapter/bin/discover-onvif.py`. **Status: fixed** (registration, audio). PTZ is
+not a defect: nothing in this project reads or drives PTZ yet.
+
+**Password.** `POST /api/cameras` required a non-empty password, so the form refused a camera that
+has none. The camera itself wants the username (`admin`) and accepts an empty password, on ONVIF
+(digest of the empty string) and on RTSP. An empty password is now stored as `""`; the username is
+still required, since with no username the camera answers "Sender not Authorized". The CLI passed
+`None` on `--user` without `--password`, which crashed the digest.
+
+**MediaMTX refuses an empty RTSP password.** `rtsp://admin:@host/...` as a path source is rejected
+with "username and password must be both provided", and without userinfo the camera answers 401.
+This camera checks only the username (`nobody:x` is refused, `admin:x` plays), so the registered
+URI carries a placeholder, `rtsp://admin:x@192.168.178.243:554/ch0_0.264`. A camera that checks an
+empty password can't be pulled by MediaMTX at all: give it a password.
+
+That URI had to be typed into the form by hand, and the first registration (as cam-04, 2026-10-22)
+went in without it: registration succeeded, both paths (`cam04`, `cam04_live`) answered 401 every
+5 s, and both producers restart-looped while `active`, so neither GUI showed a picture. Now
+registration and Re-register run `rtsp_login`: a URI without a login whose stream answers 401 gets
+the ONVIF login (the placeholder for an empty password), checked by one DESCRIBE, and a refused
+login fails the registration before anything is created. A URI that already carries a login, a
+stream that plays without one (cam-03) and an unreachable camera are left as given. The live
+view's URI copies the login from `rtspUrl` (`with_credentials`), so one fix covers both paths.
+Re-registering cam-04 through the GUI's route: both paths pulled G711 + H265, both producers
+`PERSISTED`, zero rejects, a clean frame from the local preview and from both KVS streams' LIVE
+HLS (hevc + AAC 8 kHz).
+
+**Audio.** The camera sent no audio until "Encode Type: audio&video" was set in its web page. After
+that, both RTSP streams carry G.711 A-law 8 kHz (ffprobe), but neither ONVIF profile has an
+`AudioEncoderConfiguration`. The camera has one (`A_ENC_000`, G711), but its profiles never
+reference it, so discovery, which read audio only from the profile, kept showing "No microphone".
+Now, where ONVIF names no audio for a stream, discovery reads the stream's SDP with one RTSP
+DESCRIBE (`stream_audio`: Basic or Digest auth, no SETUP, so no session and no media) and reports
+the track it finds, marked `fromStream`. Cameras whose profile lists audio are read as before.
+
+**The rule:** like the video codec (cam-03 reported H264 while sending H.265, guide §21.5), a
+camera's ONVIF answer about its own media can lag its real settings; when ONVIF says "none", ask
+the stream before believing it.
+
+### #67 — cam-04's Motion trigger could never fire: its events name the on/off field differently from its event list; and its human detection isn't on ONVIF
+
+**Found:** 2026-10-22: "I switched human detection on in the camera's web GUI and see green frames
+around humans, but the trigger is not detected and not available" (cam-04, GUANGZHOU 5831-F-Q).
+**Referenced from:** `adapter/onvif_events.py` (`state_value`), `adapter/event_watcher.py`,
+`adapter/onvif-admin/app.py` (trigger test). **Status: fixed** (Motion); Human is a camera limit.
+
+**Motion.** cam-04's `GetEventProperties` declares `tns1:VideoSource/MotionAlarm` with the data
+field `State`, so discovery recorded `motion → State`. The events it actually sends carry
+`IsMotion` (logged unfiltered for 10 minutes: every MotionAlarm `{'IsMotion': 'true'|'false'}`).
+The watcher and Test triggers both skipped any event without the recorded field, so Motion was
+offered, could be chosen, and would never have made a clip. Cell grid (`IsMotion` declared and sent)
+was unaffected. Now both read the value through `onvif_events.state_value`: the declared field
+first, else the first known state field the event carries (`_STATE_FIELDS`). Replaying the logged
+events: Motion on-events counted 0 → 15, Cell grid 15 → 15. On cam-04 the two fire together, event
+for event: they are one motion detector, not gated by person detection.
+
+**Human.** The camera has no human topic in its event list, only the cell-motion engine in its
+analytics service (`GetSupportedAnalyticsModules`), and no person event arrived unfiltered while
+someone walked past with the green frames showing. Its web interface switches the detector through
+its own HTTP API (`/NetSDK/Video/humanDetect/`: `enabled`, `drawRegion`, `sensitivityStep`, nothing
+else), with no alarm or linkage setting and no event or status endpoint (the page never reads
+detections back; `gw2.cgi` is configuration, `io_alarm="0"`). The detections evidently go only to
+the vendor's own app ("Esee"). So discovery correctly offers Manual, Motion and Cell grid; Human
+can't be offered for this camera. Like cam-03's human intrusion alarm (#64).
+
+**The rule:** a camera's event list describes its events; it doesn't guarantee them. Match the
+topic exactly, but read the state from whatever on/off field the event carries.
+
+### #68 — cam-04 sent H.265 but the cloud page labelled it H.264
+
+**Found:** 2026-10-22: "I set the stream codec to H.265 in the camera's web page and in the local
+admin, but the cloud page shows H.264."
+**Referenced from:** `adapter/onvif-admin/app.py` (`get_codec`). **Status: fixed.**
+
+The cloud page labels a camera from `videoCodec` in `GET /cameras`, and `list_cameras.py` fills a
+missing one with `videoCodecDefault`, then `"h264"`. VMS wrote `videoCodec` only from a codec or
+stream **switch** (`_record_codec`). cam-04 was registered already sending H.265, so nothing ever
+wrote it: its row had only `videoCodecActive: h265` (the producer's reading of the wire), and the
+page showed H.264. The admin selector didn't reveal it, because it shows what the wire carries:
+H.265 was already selected, so choosing it again was no change and sent nothing (the log has no
+codec POST for cam-04). A codec changed in a camera's own web page would leave a stale value the
+same way.
+
+Fix: `GET /api/cameras/<id>/codec`, which the admin page calls for every ONVIF camera on load,
+records the wire's codec (with `videoCodecCaps`, `videoEncoderToken`, `videoCodecProbe`, through
+`_record_codec`) when the registry's `videoCodec` is missing or differs. It writes once: it reads the
+live row, so the next read agrees. cam-01 (no ONVIF host) is left to its `videoCodecDefault`. Same
+precedent as `GET /detection`, which records detection fields for cameras registered earlier.
+Verified: first read `{'recorded': True}`, second nothing, cam-03 untouched, and `pir-list-cameras`
+returns cam-04 as `h265`/`camera`. The Lambda and the page are unchanged (`list_cameras.py` stays
+line-for-line the shared function's).
+
+**The rule:** a registry field that mirrors the camera must be learnt from the camera, not only from
+our own actions on it.
+
+### #69 — A passthrough camera recording H.264 with audio lost audio frames: kvssink invented its video DTS
+
+**Found:** 2026-10-22, checking cam-04 after its main stream was switched from H.265 to H.264 (#68's
+session). **Referenced from:** LAUNCH.md A3 (patch 5), `adapter/bin/producer-lib.sh`
+(`video_depay_chain`'s comment), guide §18.3. **Status: fixed.**
+
+On H.264 with audio on, `kvs-cam@cam04` logged `0x30000005` steadily: 45 rejected frames in the first
+5⅓ min (each logged on three lines, so a plain `grep -c 0x30000005` reads ~3× higher). Fragments
+still persisted, so the unit looked healthy; the losses were audio. On H.265 the same camera had
+none. The same mechanism as #62's cam-01 cause, now on a passthrough camera: `h264parse` leaves every
+video frame at `dts: none` (printed with `identity silent=false` from `rtsp://127.0.0.1:8554/cam04`),
+and kvssink then sets `dts = last_dts + 40 ms`, with `last_dts` shared by both tracks. cam-04 sends
+15 fps (66.7 ms frames), so the invented video DTS runs behind the audio's and KVS refuses frames.
+H.265 never showed it because its chain has had `h265timestamper` since #57.
+
+**The first fix made it worse, and was reverted within a minute.** Appending `h264timestamper ! identity
+single-segment=true` to the H.264 chain (as for H.265, and as on cam-01's audio branch) gave **0
+fragments persisted** and a flood of rejects. The SPS of cam-04's H.264 (Main, level 4.1, **no
+B-frames**: 1 I and 24 P per 3 s, `has_b_frames=0`) carries no reorder count, so the timestamper
+assumes the decoder's full buffer, 4 frames, and sets DTS = PTS − 267 ms. Video DTS then lagged the
+audio clock and KVS refused the **video**. The element has no property to say otherwise, and no
+stock element sets DTS = PTS. (cam-01's encoder declares its reorder depth, which is why the
+timestamper is right there.)
+
+**Fix: SDK patch 5** in `gstkvssink.cpp`, where kvssink fills in a missing DTS: use the frame's PTS
+(the old `last_dts + 40 ms` only when the PTS is invalid too). DTS = PTS is exact for every stream
+without B-frames; streams with B-frames get a real DTS from a timestamper upstream (the H.265 chain,
+cam-01's audio branch) and never reach this branch. Rebuilt as LAUNCH.md A3 says (object while
+producers ran, link with them stopped; only cam-04's were running). Verified on cam-04, H.264
+1080p + AAC, audio on: **0 rejects** in 5½ min (158 fragments on `cam-04`, 159 on `cam-04-live`),
+cloud LIVE HLS `avc1.4d0029,mp4a.40.2`, a clean decoded frame, 30 s of cloud audio = 239,616
+samples at 8 kHz (nothing missing, real room sound), and headless Firefox with hls.js 1.7.3 playing
+1920×1080 at ~15 fps with `mozHasAudio` true and no hls.js errors. The occasional `Dropping frame
+with flag: 64` lines are the stock SDK's DISCONT rule after an RTP gap (9 on cam-04 earlier that
+day), which runs before the DTS code.
+
+**The rule:** extends #62's: `dts: none` means kvssink invents a DTS, and a timestamper is only right
+when the SPS says how much the stream reorders. For a stream without B-frames the PTS *is* the DTS.
+
+### #70 — cam-02's audio was garbled, then its stream stopped: the producer hard-coded A-law
+
+**Found:** 2026-10-22: "cam-02's sound has a lot of distortion (speech can't be recognised), while
+cam-04 sounds fine. I changed cam-02's audio settings and now I can't see the stream." The admin GUI
+also showed `codec: camera refused: SOAP-ENV:Sender ter:InvalidArgVal ter:NoProfile`.
+**Referenced from:** `adapter/bin/stream-cam02.sh`. **Status: fixed** (the stall); the distortion's
+cause is inferred, below.
+
+**The stall.** After the change in the camera's audio page, cam-02 sends G.711 **mu-law** (MediaMTX
+`tracks2`: `muLaw: true`). `stream-cam02.sh`, older than the template producer, hard-coded the
+A-law chain `rtppcmadepay ! alawdec`, which can't take PCMU. Its audio branch never delivered, and
+kvssink, which collects across its pads, then held the video too: from 18:23 the unit was `active`,
+MediaMTX received ~27 kB/s, and kvssink logged "stream ready" and nothing else, no BUFFERING, no
+PERSISTED, no reject, for 7 minutes. `producer_run`'s watchdog doesn't catch this: the source never
+closed. Fix: `stream-cam02.sh` chooses the depayloader from `stream-codec.py`'s `AUDIO_TRACK` (it
+already ran it for the video codec and ignored the audio line), exactly as `stream-channel.sh` does,
+and goes video-only, with a log line, when the track isn't G.711. Its "audio ENABLED (PCMA …)" log
+line had printed a default, not the wire. Restarted 18:30:02: "audio ENABLED (pcmu -> AAC 8kHz)",
+fragments persisting at the 4 s GOP, 0 rejects. The `NoProfile` warning was transient while the
+camera rebuilt its profiles; `GET /api/cameras/cam-02/codec` answered normally afterwards.
+
+**The distortion (inferred, not proven).** Nothing recorded the law on the wire before the change.
+But a clip from KVS at 18:14 (decoded as A-law) is **23 dB louder** than one at 18:32 (decoded as
+mu-law): RMS −18.9 vs −41.7 dB, peaks −1.3 vs −22.4 dB. Decoding today's mu-law bytes as A-law on
+purpose reproduces the signature in a quiet room (RMS −41.0 → −28.5 dB, peaks −22.8 → −7.3 dB):
+quiet samples become loud, harsh noise and speech is unrecognisable. So cam-02 most likely sent
+mu-law content while the producer, by its constant, decoded A-law. cam-04 is A-law, decoded as A-law,
+which is why it sounded fine. Confirm by listening to cam-02 with someone talking.
+
+**Update, same evening:** the distortion had a second, proven cause, #72: about 1 in 6 of cam-02's AAC
+frames was dropped by kvssink, in both the A-law and the mu-law period. Its content after the change
+is genuinely mu-law (byte-level test in #72), so the producer now decodes it right.
+
+**The rule:** the G.711 law is a camera setting, like the video codec: read it from the wire at every
+start, never from a constant or a comment ("cam-02 is A-law" was true once).
+
+### #71 — A producer that stays connected but feeds kvssink nothing looked healthy
+
+**Found:** 2026-10-22, with #70. **Referenced from:** `adapter/bin/producer-lib.sh` (`producer_run`,
+`PRODUCER_FLOW_PATTERN`, `PRODUCER_STALL_SEC`). **Status: fixed.**
+
+`producer_run` (#44, #46) kills a pipeline when a line says the source closed the session. In #70
+the source never closed: MediaMTX kept delivering, the audio branch couldn't link, and kvssink, which
+collects across its pads, held the video too. 7 minutes `active`, nothing uploaded, nothing for the
+watchdog to match.
+
+The signal: the SDK logs "Kinesis Video client and stream metrics" on every key frame it **puts** into
+its buffer (`KinesisVideoStream.cpp`, `statusPutFrame`), before and independent of any upload. So the
+lines keep coming through an AWS outage, while kvssink buffers (a watchdog on PERSISTED acks would
+have thrown that buffer away at every outage), and stop when frames stop reaching kvssink: during
+#70's stall there was not one. `producer_run` now reads with `read -t 5` (a half line at a timeout is
+kept and joined, never split) and kills the pipeline after 45 s without a metrics line; systemd
+restarts it. It enforces this only after seeing the SDK's DEBUG lines, so a changed log level can't
+make it kill healthy producers. GStreamer's `progressreport` was tried first and prints nothing on
+a live RTSP source (it needs a position answer).
+
+Tested against a fake `gst-launch-1.0` (stall at 10 s: killed at 10 s; metrics every 3 s: untouched
+until they stopped; no DEBUG lines: never enforced; a line paused mid-way for 7 s: rejoined), then
+live: cam-02, cam-03 and cam-04 (with its live producer) ran 5½ min with 0 watchdog kills, a metrics
+line per key frame. Unmeasured: an outage long enough to fill kvssink's buffer, if puts then fail.
+
+### #72 — cam-02 lost one audio frame in six: its RTP audio comes in pairs with the same timestamp
+
+**Found:** 2026-10-22, while verifying #71. **Referenced from:** `adapter/bin/producer-lib.sh`
+(`AAC_ENC`), `stream-cam02.sh`, `stream-channel.sh`. **Status: fixed.**
+
+`kvs-cam02` logged `Dropping frame with flag: 64` about 60 times a minute (747 in 12 min; 36 in 52 s
+in the A-law period too), against 6 in 27 min on cam-04 and 2 in 16 min on cam-03. Flag 64 alone is
+DISCONT on a frame that is not a video delta frame, which the stock SDK drops; these were AAC frames,
+128 ms of sound each, about 16 % of the audio, the larger part of the "unrecognisable speech" in #70.
+
+cam-02 sends 40 ms G.711 packets (320 bytes), two per 80 ms, so the rate is right, but **each pair
+carries the same RTP timestamp** (0.776, 0.776, 0.856, 0.856 …, printed with `identity silent=false`
+after the depayloader). voaacenc saw time step backwards every other packet, resynced, and flagged
+its output DISCONT: 17 of 106 AAC frames in 15 s. Fix: `voaacenc perfect-timestamp=true
+tolerance=100000000` (`AAC_ENC`, used by both passthrough producers): output timestamps from the
+encoder's own sample count, with the camera's only checked for drift within 100 ms, which covers
+cam-02's 40 ms and keeps lip-sync within 0.1 s. Measured in 30 s: cam-02 29 → 1 DISCONT (the
+stream's first frame), cam-04 1 → 1. Live, 5½ min: cam-02 1 drop, 0 rejects, 77 fragments; 30 s
+of its cloud audio = 240,640 samples (complete at 8 kHz).
+
+The same session settled which law cam-02 sends now. Its wire bytes decoded as mu-law give a smooth
+level distribution (most samples at −24…−42 dB), and decoded as A-law one with a hole (nothing at
+−12…−24 dB, 2.7 % at −6…−12 dB): wrongly decoded G.711 scrambles the level order. So the content is
+mu-law, as labelled. A useful check for any camera whose sound is suspect.
+
+**The rule:** a camera's media timestamps are a claim, like its codec read-back. Where they can be
+derived (audio: from the sample count), derive them.
+
+### #73 — Discovery showed cam-02's microphone as "G.711 8000 kHz"
+
+**Found:** 2026-10-22. **Referenced from:** `adapter/onvif_discovery.py` (`_per_kilo`). **Status:
+fixed.** ONVIF Media1 gives an audio encoder's `SampleRate` in kHz and `Bitrate` in kbit/s; cam-03
+reports 8 and 64, cam-02 8000 and 64000. Discovery now divides any value of 1000 or more by 1000
+(no audio rate is a thousand kHz). Re-run: cam-02 and cam-03 8 kHz / 64 kbit/s, cam-04 8 kHz (read
+from its stream, which carries no bitrate).

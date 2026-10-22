@@ -296,10 +296,14 @@ video track it is actually receiving and prints `VIDEO_CODEC=h264|h265`, and
 (`rtph265depay ! h265parse ! video/x-h265,stream-format=hvc1 ! h265timestamper ! identity single-segment=true` vs the H.264
 `avc` form; the timestamper exists because kvssink silently drops every H.265 keyframe without a
 DTS, `FoundAndFixed.md` #57, and the `identity` undoes its 1000 h timestamp offset, which beside an
-audio track made KVS refuse audio frames, #58).
+audio track made KVS refuse audio frames, #58). The H.264 form deliberately has **no** timestamper:
+on cam-04 it guessed a 4-frame reorder for a stream without B-frames and KVS refused the video.
+H.264's `dts: none` is handled in kvssink instead, by SDK patch 5 (DTS = PTS, `LAUNCH.md` A3, #69).
 The same call prints `AUDIO_TRACK` (`pcma`/`pcmu`/none): the G.711 law, which ONVIF can't tell
-and the template producer `stream-channel.sh` needs for its audio branch (cam-02 is A-law, cam-03
-mu-law).
+and both `stream-channel.sh` and `stream-cam02.sh` choose their audio depayloader from it. The law
+is a camera setting: cam-02 sent A-law, then mu-law after a change in its own audio page, and the
+script's hard-coded A-law stalled its stream and had likely garbled its sound (`FoundAndFixed.md`
+#70). cam-03 is mu-law, cam-04 A-law.
 The wire is the authority because a camera's encoder is changed *on the camera*, so any
 registry field can be stale — the registry's `videoCodecActive` is written *from* this
 reading, not consulted for it. `stream-format=hvc1`, not byte-stream, for the same reason
@@ -385,8 +389,13 @@ Kinesis Video Stream. None of the three producer scripts `exec gst-launch` direc
 a failure and additionally watches its output for "the source closed the session" lines,
 killing a pipeline that hangs instead of exiting. Both halves exist because a producer that
 loses its source otherwise stays `active` while uploading nothing — see `FoundAndFixed.md`
-#44 and #46 before simplifying it back to an `exec`. The units carry
-`RuntimeDirectory=vms-producer` for that watchdog's pipe. **`publish-cam01.sh`, the
+#44 and #46 before simplifying it back to an `exec`. It also kills a pipeline that stays
+connected but **feeds kvssink nothing**: kvssink logs "client and stream metrics" on every key
+frame it *puts* (before any upload, so the lines continue through an AWS outage), and 45 s
+without one (`PRODUCER_STALL_SEC`) is a stall, as when cam-02's audio branch couldn't take the
+camera's G.711 law and held the video for 7 minutes (#70, #71). It only enforces this once it sees
+the SDK's DEBUG lines, so a changed log level can't make it kill healthy producers. The units
+carry `RuntimeDirectory=vms-producer` for that watchdog's pipe. **`publish-cam01.sh`, the
 publisher, has its own watchdog, `publish_run`**, because it can **hang without exiting**:
 twice so far (`FoundAndFixed.md` #51, at boot and after an hour of normal running) it stopped
 sending with no error and no EOS and stayed `active`. `publish_run` restarts it when MediaMTX's

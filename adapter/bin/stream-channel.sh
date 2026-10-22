@@ -30,7 +30,8 @@ CERTS="${VMS_HOME}/certs"
 # Resolved from what MediaMTX actually receives, not assumed: a GUI-registered camera is
 # whatever the operator plugged in, and H.265 is common on exactly these cameras. See
 # stream-cam02.sh for why a missing source is a deliberate failure here. The same call reports
-# the audio track (AUDIO_TRACK), whose G.711 law ONVIF can't tell: cam-02 is A-law, cam-03 mu-law.
+# the audio track (AUDIO_TRACK), whose G.711 law ONVIF can't tell and a camera's own audio page can
+# change (cam-02 went A-law -> mu-law, FoundAndFixed.md #70); cam-03 is mu-law, cam-04 A-law.
 VIDEO_ENV="$(${VMS_HOME}/venv-adapter/bin/python3 \
              ${VMS_HOME}/adapter/bin/stream-codec.py "${CODEC_ARGS[@]}" "${CAMERA_ID}")" \
   || { echo "stream-channel(${KVS_STREAM}): no H.264/H.265 video on ${MEDIAMTX_PATH} from MediaMTX -- exiting for systemd to retry" >&2; exit 1; }
@@ -74,7 +75,7 @@ if [ "${AUDIO:-off}" = "on" ]; then
     src. ! application/x-rtp,media=audio ! queue \
     ! ${AUDIO_DEPAY} ! audioconvert \
     ! audio/x-raw,rate=8000,channels=1 \
-    ! voaacenc bitrate=32000 ! aacparse \
+    ! ${AAC_ENC} ! aacparse \
     ! audio/mpeg,mpegversion=4,stream-format=raw ! queue ! kvs.audio_0 \
     ${KVSSINK}
 fi

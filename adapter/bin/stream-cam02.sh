@@ -26,8 +26,10 @@ CERTS="${VMS_HOME}/certs"
 #   - kvssink's audio pad wants stream-format=raw, NOT the adts that aacparse will
 #     happily produce by default.
 #
-# A-law (rtppcmadepay/alawdec), not mu-law: MediaMTX reports muLaw=false and ffprobe
-# agrees (pcm_alaw). ONVIF cannot tell you this -- its enum is just "G711".
+# The G.711 law comes from the wire (stream-codec.py's AUDIO_TRACK: pcma or pcmu), never a
+# constant. ONVIF can't tell ("G711" covers both), and the law is a setting in the camera's
+# own audio page: cam-02 sent A-law until one change there made it mu-law, and the A-law
+# depayloader then never delivered, which stalled the video too (FoundAndFixed.md #70).
 #
 # DO NOT resample the audio up to 48 kHz. It looks harmless and it is not:
 # GStreamer audio buffers carry no DTS, and kvssink synthesises one as
@@ -70,16 +72,29 @@ eval "${VIDEO_ENV}"
 # exactly like ${KVSSINK}.
 VIDEO_CHAIN="$(video_depay_chain "${VIDEO_CODEC}")"
 
+# The depayloader for the law MediaMTX receives, as in stream-channel.sh. No G.711 track (or
+# another codec): video only. kvssink collects across its pads, so an audio branch that can't
+# deliver stalls the video as well while the unit stays active (guide §18).
+case "${AUDIO_TRACK:-none}" in
+  pcma) AUDIO_DEPAY="rtppcmadepay ! alawdec" ;;
+  pcmu) AUDIO_DEPAY="rtppcmudepay ! mulawdec" ;;
+  *)    AUDIO_DEPAY="" ;;
+esac
+if [ "${AUDIO:-off}" = "on" ] && [ -z "${AUDIO_DEPAY}" ]; then
+  echo "stream-cam02: audio is on, but MediaMTX receives ${AUDIO_TRACK:-no audio}, not G.711 -- video only" >&2
+  AUDIO=off
+fi
+
 if [ "${AUDIO:-off}" = "on" ]; then
-  echo "stream-cam02: audio ENABLED (${AUDIO_CODEC:-PCMA} -> AAC 8kHz), video ${VIDEO_CODEC}"
+  echo "stream-cam02: audio ENABLED (${AUDIO_TRACK} -> AAC 8kHz), video ${VIDEO_CODEC}"
   producer_run stream-cam02 -v \
     rtspsrc location="rtsp://127.0.0.1:8554/cam02" protocols=tcp latency=200 name=src \
     src. ! application/x-rtp,media=video ! queue \
     ! ${VIDEO_CHAIN} ! queue ! kvs.video_0 \
     src. ! application/x-rtp,media=audio ! queue \
-    ! rtppcmadepay ! alawdec ! audioconvert \
+    ! ${AUDIO_DEPAY} ! audioconvert \
     ! audio/x-raw,rate=8000,channels=1 \
-    ! voaacenc bitrate=32000 ! aacparse \
+    ! ${AAC_ENC} ! aacparse \
     ! audio/mpeg,mpegversion=4,stream-format=raw ! queue ! kvs.audio_0 \
     ${KVSSINK}
 fi

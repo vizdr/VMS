@@ -25,7 +25,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--timeout", type=int, default=4, help="WS-Discovery probe timeout in seconds (default 4)")
     ap.add_argument("--user", help="ONVIF username -- enables the enrichment stage (device info + stream URI)")
-    ap.add_argument("--password", help="ONVIF password -- required if --user is given")
+    ap.add_argument("--password", default="",
+                    help="ONVIF password -- leave out for a camera without one")
     args = ap.parse_args()
 
     print(f"Probing 239.255.255.250:3702 for NetworkVideoTransmitter devices ({args.timeout}s)...")

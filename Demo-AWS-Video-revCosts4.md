@@ -1933,6 +1933,13 @@ Both the test and the watcher use one subscription implementation, `onvif_events
 renew every 20 s, `PT2S` pulls with an 8 s deadline, a hang or dropped connection counted as
 "nothing yet", always unsubscribed.
 
+**The declared field is not always the sent one** (2026-10-22, cam-04). cam-04 declares its
+MotionAlarm with the field `State` and sends `IsMotion`. Both the test and the watcher therefore read
+the state through `onvif_events.state_value`: the declared field, else the first known on/off field
+the event carries. Its human detection, switched on in its web interface (green frames in the
+picture), reaches neither ONVIF nor any HTTP endpoint, so it offers Manual, Motion and Cell grid
+only (`FoundAndFixed.md` #67).
+
 ---
 
 ## 10. Phase 9 — Measurements (what makes this a portfolio piece)
@@ -3338,6 +3345,20 @@ to 1 ms and then checks DTS at 100 ns. Both are fixed (SDK patch 4, LAUNCH.md A3
 DTS on cam-01), and with them the rule is no longer what keeps rejects at zero
 (`FoundAndFixed.md` #62).
 
+**Passthrough H.264 has the same `dts: none` (2026-10-22).** cam-04, switched to H.264 with audio
+on, lost audio frames to the invented DTS. A timestamper was no cure there: cam-04's SPS declares no
+reorder count, so `h264timestamper` assumed 4 frames and put DTS 267 ms before PTS on a stream with
+no B-frames, and KVS refused the video instead. **SDK patch 5** (LAUNCH.md A3) makes kvssink use a
+frame's PTS as its DTS when it has none, which is exact without B-frames: 0 rejects since
+(`FoundAndFixed.md` #69). The H.264 chain in `producer-lib.sh` therefore stays without a timestamper.
+
+**Audio timestamps are derived, not taken from the camera (2026-10-22).** cam-02 sends its 40 ms
+G.711 packets in pairs with the same RTP timestamp. voaacenc resynced on every backwards step and
+flagged about one AAC frame in six DISCONT, which kvssink drops: ~60 lost frames a minute, the main
+reason its speech was unrecognisable. Both passthrough producers now encode with `AAC_ENC`
+(`perfect-timestamp=true tolerance=100000000`): timestamps from the sample count, the camera's
+checked for drift within 100 ms. cam-02: 1 drop in 5½ min (`FoundAndFixed.md` #72).
+
 ### 18.4 The two pipelines as built
 
 Both split the RTP pads by `application/x-rtp,media=...`. Linking the branches bare lets
@@ -4128,6 +4149,13 @@ Two things this camera taught, worth expecting from others:
 - **It doesn't send what it's told in every detail.** Set to H264 `Profile="Main"`, it encodes
   H.264 **Baseline** (`avc1.420032`); with a 25 fps limit it still sends ~20 fps. KVS and the
   decoded frames were fine with both; check a browser before relying on it.
+
+**The registry also learns the codec without a switch** (2026-10-22, cam-04). `videoCodec`, which
+labels the camera in the cloud page, used to be written only by a switch. cam-04 was registered
+already sending H.265, so it had none, and `list_cameras`' fallback labelled it H.264. The admin
+selector couldn't show the gap, since it displays the wire. So `GET /api/cameras/<id>/codec`, read
+on every admin page load, records the wire's codec whenever the registry's is missing or differs,
+which also catches a codec changed in the camera's own web page (`FoundAndFixed.md` #68).
 
 
 ### 21.6 Stream and frame rate from the admin GUI

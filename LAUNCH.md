@@ -222,9 +222,30 @@ camera recording audio loses audio frames to `0x30000005`. In
         }
 ```
 
-**Proof:** `grep -n "VMS patch 4" "$KVS_SDK/src/gstreamer/gstkvssink.cpp"`. Rebuilding only the
-plugin later: `make src/gstreamer/gstkvssink.o` while producers run, then stop them and
-`make gstkvssink`. Linking over a loaded plugin can crash a running producer.
+**Proof:** `grep -n "VMS patch 4" "$KVS_SDK/src/gstreamer/gstkvssink.cpp"`.
+
+Patch 5 — a missing DTS becomes the frame's PTS (`FoundAndFixed.md` #69). Without it a passthrough
+camera recording H.264 with audio loses audio frames to `0x30000005`, because kvssink invents
+`last_dts + 40 ms` for `h264parse`'s `dts: none`. In the same file, replace the body of
+`} else if (!GST_BUFFER_DTS_IS_VALID(buf)) {` (the "Construct a monotonically increasing DTS"
+branch, a few lines above `data->last_dts = buf->dts;`) with:
+
+```cpp
+            if (GST_BUFFER_PTS_IS_VALID(buf)) {
+                buf->dts = buf->pts;
+            } else {
+                buf->dts = data->last_dts + DEFAULT_FRAME_DURATION_MS * HUNDREDS_OF_NANOS_IN_A_MILLISECOND * DEFAULT_TIME_UNIT_IN_NANOS;
+            }
+```
+
+with the comment line `// VMS patch 5 (LAUNCH.md A3, FoundAndFixed.md #69)` above it.
+
+**Proof:** `grep -n "VMS patch 5" "$KVS_SDK/src/gstreamer/gstkvssink.cpp"`.
+
+Rebuilding only the plugin later (patches 4 and 5): `make src/gstreamer/gstkvssink.o` while
+producers run, then stop them and `make gstkvssink`. Linking over a loaded plugin can crash a
+running producer. Then start them and check the journal: `grep -c 'Failed to submit frame'`
+must stay 0 with audio on.
 
 **Stage 2 — compile:**
 

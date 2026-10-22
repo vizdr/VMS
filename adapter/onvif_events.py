@@ -238,6 +238,16 @@ def parse_notification(note):
     return topic, op, data
 
 
+def state_value(data: dict, field: str):
+    """The on/off value of one notification's data, or None when it carries none. The declared
+    field first; otherwise the first known state field present, for a camera whose events don't
+    use the name its event list declares: cam-04's MotionAlarm is declared with State and sent
+    with IsMotion (FoundAndFixed.md #67), and matching only the declared name dropped every one."""
+    if field in data:
+        return data[field]
+    return next((data[name] for name in _STATE_FIELDS if name in data), None)
+
+
 def is_on(value) -> bool:
     """A state value that means "detecting": boolean true, or a relay's "active"."""
     return str(value).lower() in ("true", "active", "1")

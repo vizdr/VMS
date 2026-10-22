@@ -405,7 +405,9 @@ def register_camera():
     body = request.get_json(force=True, silent=True) or {}
     camera_id = body.get("cameraId", "")
     host, port = body.get("host"), int(body.get("port", 80))
-    user, password = body.get("user"), body.get("password")
+    # A camera may have no password at all (a factory "admin" with a blank one): "" is stored as
+    # given, and every ONVIF call still sends the username with an empty password's digest.
+    user, password = body.get("user") or "", body.get("password") or ""
     stream_uri = body.get("streamUri")
     has_ir_control = bool(body.get("hasIrControl"))
     # Found at discovery (onvif_discovery: a G.711 microphone on the profile). Absent means
@@ -419,8 +421,10 @@ def register_camera():
 
     if not CAMERA_ID_RE.match(camera_id):
         return jsonify({"error": "cameraId must look like 'cam-03'"}), 400
-    if not all([host, user, password, stream_uri]):
-        return jsonify({"error": "host, user, password, and streamUri are required"}), 400
+    if not all([host, user, stream_uri]):
+        return jsonify({"error": "host, user, and streamUri are required (the password may be empty)"}), 400
+    if not isinstance(user, str) or not isinstance(password, str):
+        return jsonify({"error": "user and password must be strings"}), 400
     if audio_capable is not None and not isinstance(audio_capable, bool):
         return jsonify({"error": "audioCapable must be true or false"}), 400
     if fps is not None and fps not in onvif_media2.FPS_CHOICES:
@@ -454,6 +458,10 @@ def register_camera():
         # The form offers the stream URIs the camera reports, which usually lack the credentials
         # a registered URI may carry (cam-02's ?username=..&password=..): keep those.
         stream_uri = onvif_media2.with_credentials(stream_uri, existing.get("rtspUrl"))
+        try:
+            stream_uri = onvif_discovery.rtsp_login(stream_uri, user, password)
+        except onvif_discovery.RtspUnauthorized as e:
+            return jsonify({"error": str(e)}), 400
         fps_result = _registration_fps(host, port, user, password, stream_uri, fps)
 
         # Only patch when the source actually changed. MediaMTX decides whether a config
@@ -507,6 +515,13 @@ def register_camera():
         return jsonify({"cameraId": camera_id, "kvsStreamArn": existing["kvsStreamArn"],
                         "updated": True, "reactivated": reactivate, "fps": fps_result,
                         "detectionModes": detection, "liveView": live}), 200
+
+    # The login the camera's RTSP demands, in the URI MediaMTX pulls (#66). Refused: nothing is
+    # created, rather than a camera whose every pull is a 401.
+    try:
+        stream_uri = onvif_discovery.rtsp_login(stream_uri, user, password)
+    except onvif_discovery.RtspUnauthorized as e:
+        return jsonify({"error": str(e)}), 400
 
     # 0. The frame rate, on the camera, before MediaMTX ever connects: a change can restart the
     #    camera's RTSP session, which costs nothing yet. Not fatal -- a camera without Media2
@@ -1036,10 +1051,10 @@ async def _trigger_test(item, state):
                         if mode is None:
                             state["otherTopics"][topic] = state["otherTopics"].get(topic, 0) + 1
                             continue
-                        field = dmap[mode]["field"]
-                        if field not in data:
+                        value = onvif_events.state_value(data, dmap[mode]["field"])
+                        if value is None:
                             continue
-                        on, entry = onvif_events.is_on(data[field]), state["modes"][mode]
+                        on, entry = onvif_events.is_on(value), state["modes"][mode]
                         if first or op == "Initialized":
                             entry["atStart"] = on
                         elif on:
@@ -1193,9 +1208,18 @@ def get_codec(camera_id):
         cam = onvif_media2.for_camera(item)
         prof = onvif_media2.stream_profile(cam, item.get("rtspUrl"))
         settings = onvif_media2.summarize(cam.encoder_config(prof["encoderToken"]))
-        options = _codec_options(cam.encoder_options(prof["encoderToken"]))
+        opts = cam.encoder_options(prof["encoderToken"])
+        options = _codec_options(opts)
     except onvif_media2.OnvifError as e:
         return jsonify({**out, "error": str(e)}), 502
+    # The registry learns the codec only from a switch, so a camera registered already sending
+    # H.265, or switched in its own web page, had no videoCodec or a stale one: the cloud page
+    # then labelled it H.264 (list_cameras' default; FoundAndFixed.md #68). The wire is the
+    # authority: record it when the registry disagrees. Once, since the next read agrees.
+    if out["wire"] and item.get("videoCodec") != out["wire"]["codec"]:
+        out["registry"] = _record_codec(camera_id, out["wire"]["codec"], opts, prof["encoderToken"])
+        if out["registry"]["recorded"]:
+            out["chosen"] = out["wire"]["codec"]
     return jsonify({**out, "options": options,
                     "switchable": sum(o["available"] for o in options.values()) > 1,
                     "configured": onvif_media2.CODEC.get(settings["encoding"], settings["encoding"]),
